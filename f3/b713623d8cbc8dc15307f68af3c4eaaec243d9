@@ -1,0 +1,24 @@
+Tests/DocumentImportTests/StaticWebDocumentBuilderTests.swift
+  s_413052984bbc8e::t_add51b321d2a81 29-36,56,58-61,64-78,93-159
+Sources/DocumentImport/Internal/StaticWebDocumentBuilder.swift
+  s_413052984bbc8e::t_affec95399924a 97-99,238-505
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f3b713623d8cbc8dc15307f68af3c4eaaec243d9",
+  "prompts": {},
+  "logical_commit_id": "f3b713623d8cbc8dc15307f68af3c4eaaec243d9",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 365,
+      "total_deletions": 10
+    }
+  }
+}
