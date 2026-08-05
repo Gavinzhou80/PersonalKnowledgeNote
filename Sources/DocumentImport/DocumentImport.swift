@@ -260,11 +260,14 @@ public actor DocumentImport {
                 terminal: .success(success)
             )
         } catch {
-            await failTask(workspace: workspace)
+            await failTask(workspace: workspace, error: error)
         }
     }
 
-    private func failTask(workspace: ImportWorkspace) async {
+    private func failTask(
+        workspace: ImportWorkspace,
+        error: Error
+    ) async {
         var failureRevision = (records[workspace.taskID]?.snapshot.revision ?? 0)
             + 1
 
@@ -286,7 +289,7 @@ public actor DocumentImport {
         guard let record = records[workspace.taskID] else {
             return
         }
-        let failure = Self.privacySafeFailure()
+        let failure = Self.classify(error)
         finishTask(
             taskID: workspace.taskID,
             snapshot: ImportTaskSnapshot(
@@ -530,6 +533,51 @@ public actor DocumentImport {
              .publicationFailed:
             return .cannotPersistImportTask
         }
+    }
+
+    private static func classify(_ error: Error) -> ImportFailure {
+        if error is WebAcquisitionError {
+            return ImportFailure(
+                code: .networkUnavailable,
+                recovery: .retryable
+            )
+        }
+
+        if let error = error as? StaticWebBuildError {
+            switch error {
+            case .missingArticle, .noReadableBlocks:
+                return ImportFailure(
+                    code: .webpageHasNoReadableArticle,
+                    recovery: .unsupported
+                )
+            case .unreadableHTML, .cannotWritePackage:
+                return ImportFailure(
+                    code: .artifactConstructionFailed,
+                    recovery: .retryable
+                )
+            }
+        }
+
+        if let error = error as? LocalLibraryError {
+            switch error {
+            case .publicationFailed(let retryable):
+                return ImportFailure(
+                    code: .publicationFailed,
+                    recovery: retryable ? .retryable : .requiresUserAction
+                )
+            case .unavailable,
+                 .insufficientDiskSpace,
+                 .staleRevision,
+                 .invalidTaskState,
+                 .checkpointRegression,
+                 .artifactMissing,
+                 .artifactOwnershipViolation,
+                 .corruptLibrary:
+                return privacySafeFailure()
+            }
+        }
+
+        return privacySafeFailure()
     }
 
     private static func privacySafeFailure() -> ImportFailure {

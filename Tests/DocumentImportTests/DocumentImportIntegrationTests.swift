@@ -5,6 +5,29 @@ import Testing
 @testable import DocumentImport
 
 @Test(.timeLimit(.minutes(1)))
+func invalidWebURLFailsBeforeDurableAcceptance() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(
+        at: root.appending(path: "Library")
+    )
+    let documentImport = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer()
+    )
+    do {
+        _ = try await documentImport.submit(
+            .webpage(URL(string: "relative/path")!)
+        )
+        Issue.record("Expected invalid web URL submission failure")
+    } catch let error as ImportSubmissionError {
+        #expect(error == .invalidWebURL)
+    }
+
+    #expect(try await library.recoverableImports().isEmpty)
+}
+
+@Test(.timeLimit(.minutes(1)))
 func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     let root = try makeTemporaryDocumentImportRoot()
     defer { removeTemporaryDocumentImportRoot(root) }
@@ -191,6 +214,41 @@ func genericPostAcceptanceFailureFinishesAndAbandonsTask() async throws {
     }
     #expect(failure.code == .localLibraryUnavailable)
     #expect(failure.recovery == .requiresUserAction)
+    #expect(finalSnapshot?.state == .failed(failure))
+    #expect(
+        try await library.importWorkspace(id: handle.id) == nil
+    )
+}
+
+@Test(.timeLimit(.minutes(1)))
+func acquisitionFailureIsTerminalTaskDataAfterAcceptance() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(
+        at: root.appending(path: "Library")
+    )
+    let documentImport = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingFixtureWebAcquirer()
+    )
+    let sourceURL = try #require(
+        URL(string: "https://fixture.invalid/network-unavailable")
+    )
+
+    let handle = try await documentImport.submit(.webpage(sourceURL))
+    var updates = handle.updates().makeAsyncIterator()
+    let terminal = await handle.value()
+    var finalSnapshot: ImportTaskSnapshot?
+    while let snapshot = await updates.next() {
+        finalSnapshot = snapshot
+    }
+
+    guard case .failure(let failure) = terminal else {
+        Issue.record("Expected acquisition failure after acceptance")
+        return
+    }
+    #expect(failure.code == .networkUnavailable)
+    #expect(failure.recovery == .retryable)
     #expect(finalSnapshot?.state == .failed(failure))
     #expect(
         try await library.importWorkspace(id: handle.id) == nil

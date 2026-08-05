@@ -78,6 +78,12 @@ struct ThrowingWebAcquirer: WebAcquiring {
     }
 }
 
+struct ThrowingFixtureWebAcquirer: WebAcquiring {
+    func acquire(_ url: URL) async throws -> AcquiredWebPage {
+        throw WebAcquisitionError.networkUnavailable
+    }
+}
+
 actor SelectiveWorkspaceSnapshotLoader {
     enum Failure: Error {
         case injected
