@@ -24,6 +24,11 @@ public actor LocalLibrary {
                 url: root.appending(path: "library.sqlite")
             )
             let managedArtifacts = try ManagedArtifacts(root: root)
+            for relativePath in try database
+                .abandonedStagedArtifactRelativePaths()
+            {
+                try? managedArtifacts.remove(relativePath: relativePath)
+            }
             return LocalLibrary(
                 database: database,
                 managedArtifacts: managedArtifacts
@@ -115,6 +120,30 @@ public actor LocalLibrary {
                 )
             }
             return placement.artifact
+        }
+    }
+
+    package func checkpoint(
+        taskID: ImportTaskID,
+        update: CheckpointUpdate
+    ) throws -> DurableImportSnapshot {
+        try withLocalLibraryErrorTranslation {
+            try database.checkpoint(taskID: taskID, update: update)
+        }
+    }
+
+    package func abandon(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws {
+        let relativePath = try withLocalLibraryErrorTranslation {
+            try database.abandon(
+                taskID: taskID,
+                expectedRevision: expectedRevision
+            )
+        }
+        if let relativePath {
+            try? managedArtifacts.remove(relativePath: relativePath)
         }
     }
 

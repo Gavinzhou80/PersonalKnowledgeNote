@@ -88,6 +88,106 @@ final class LibraryDatabase: Sendable {
         }
     }
 
+    func checkpoint(
+        taskID: ImportTaskID,
+        update: CheckpointUpdate
+    ) throws -> DurableImportSnapshot {
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            guard let currentRevision = UInt64(exactly: task.revision) else {
+                throw corruptLibraryError()
+            }
+            guard currentRevision == update.expectedRevision else {
+                throw LocalLibraryError.staleRevision(
+                    current: currentRevision
+                )
+            }
+            guard let state = ImportTaskState(rawValue: task.state) else {
+                throw corruptLibraryError()
+            }
+            guard state != .completed, state != .abandoned else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard update.envelope.payload.count <= 1_048_576 else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            if let storedOrdinal = task.checkpointOrdinal {
+                guard let currentOrdinal = UInt64(exactly: storedOrdinal)
+                else {
+                    throw corruptLibraryError()
+                }
+                guard update.ordinal > currentOrdinal else {
+                    throw LocalLibraryError.checkpointRegression
+                }
+            }
+            guard task.revision < Int64.max else {
+                throw corruptLibraryError()
+            }
+            guard let checkpointOrdinal = Int64(exactly: update.ordinal)
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+
+            task.checkpointOrdinal = checkpointOrdinal
+            task.checkpointCodecVersion = Int64(
+                update.envelope.codecVersion
+            )
+            task.checkpointPayload = update.envelope.payload
+            task.state = ImportTaskState.working.rawValue
+            task.revision += 1
+            try task.update(db)
+
+            let stagedArtifact = try stagedArtifact(for: task, in: db)
+            return try task.snapshot(stagedArtifact: stagedArtifact)
+        }
+    }
+
+    func abandon(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> String? {
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            let stagedArtifact = try stagedArtifact(for: task, in: db)
+            _ = try task.snapshot(stagedArtifact: stagedArtifact)
+            guard let state = ImportTaskState(rawValue: task.state),
+                  let currentRevision = UInt64(exactly: task.revision)
+            else {
+                throw corruptLibraryError()
+            }
+
+            if state == .abandoned {
+                return stagedArtifact?.relativePath
+            }
+            guard currentRevision == expectedRevision else {
+                throw LocalLibraryError.staleRevision(
+                    current: currentRevision
+                )
+            }
+            guard state != .completed, state != .publicationPending else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard task.revision < Int64.max else {
+                throw corruptLibraryError()
+            }
+
+            task.state = ImportTaskState.abandoned.rawValue
+            task.revision += 1
+            try task.update(db)
+            return stagedArtifact?.relativePath
+        }
+    }
+
     func task(id: ImportTaskID) throws -> ImportTaskRecord? {
         try queue.read { db in
             try ImportTaskRecord.fetchOne(
@@ -131,6 +231,23 @@ final class LibraryDatabase: Sendable {
                     in: db
                 )
                 return try task.snapshot(stagedArtifact: stagedArtifact)
+            }
+        }
+    }
+
+    func abandonedStagedArtifactRelativePaths() throws -> [String] {
+        try queue.read { db in
+            let tasks = try ImportTaskRecord
+                .filter(
+                    Column("state")
+                        == ImportTaskState.abandoned.rawValue
+                )
+                .fetchAll(db)
+
+            return try tasks.compactMap { task in
+                let stagedArtifact = try stagedArtifact(for: task, in: db)
+                _ = try task.snapshot(stagedArtifact: stagedArtifact)
+                return stagedArtifact?.relativePath
             }
         }
     }

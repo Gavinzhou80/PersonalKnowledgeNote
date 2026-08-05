@@ -24,6 +24,19 @@ public actor ImportWorkspace {
         )
     }
 
+    public func checkpoint(
+        _ update: CheckpointUpdate
+    ) async throws -> DurableImportSnapshot {
+        try await library.checkpoint(taskID: taskID, update: update)
+    }
+
+    public func abandon(expectedRevision: UInt64) async throws {
+        try await library.abandon(
+            taskID: taskID,
+            expectedRevision: expectedRevision
+        )
+    }
+
     package func verifyManagedArtifact(
         _ artifact: StagedArtifact
     ) async throws -> SourceArtifactDescriptor {
