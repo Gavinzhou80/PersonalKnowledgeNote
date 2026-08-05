@@ -1,0 +1,24 @@
+docs/superpowers/plans/2026-08-06-t03-static-web-import-tracer-bullet.md
+  s_413052984bbc8e::t_0066e74ceca098 792,812-813
+  s_413052984bbc8e::t_34b7542f3ac3e4 906,961-966,972-1046,1048-1056,1167-1272,1274-1306,1344,1404-1405,1407-1412,1417
+  s_413052984bbc8e::t_a18993a1d735e0 1-791,793-811,814-905,907-960,967-971,1047,1057-1166,1273,1307-1343,1345-1403,1406,1413-1416,1418-1769
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "8ff6f2538b4bf329d11e5c3ba9c5229821fb0cae",
+  "prompts": {},
+  "logical_commit_id": "8ff6f2538b4bf329d11e5c3ba9c5229821fb0cae",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 1783,
+      "total_deletions": 14
+    }
+  }
+}
