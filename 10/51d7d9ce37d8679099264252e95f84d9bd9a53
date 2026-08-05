@@ -1,0 +1,25 @@
+docs/superpowers/plans/2026-08-05-t01-workspace-bootstrap.md
+  s_413052984bbc8e::t_6a40534a80269e 1-186,188-329,372-790
+  s_413052984bbc8e::t_aea56abc6a30c2 187,330-371
+docs/superpowers/specs/2026-08-05-t01-workspace-bootstrap-design.md
+  s_413052984bbc8e::t_9dcd879282a870 3,41-42,44-45,48,132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "1051d7d9ce37d8679099264252e95f84d9bd9a53",
+  "prompts": {},
+  "logical_commit_id": "1051d7d9ce37d8679099264252e95f84d9bd9a53",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 936,
+      "total_deletions": 10
+    }
+  }
+}
