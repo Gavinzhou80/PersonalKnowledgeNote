@@ -1,6 +1,6 @@
 # T01 Workspace Bootstrap Design
 
-> Status: approved
+> Status: approved; implementation tracked by the T01 workspace bootstrap plan
 > Date: 2026-08-05
 > Ticket: GitHub issue #2 — T01 Bootstrap the testable macOS workspace
 
