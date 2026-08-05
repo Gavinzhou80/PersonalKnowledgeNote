@@ -12,9 +12,21 @@ let package = Package(
         .library(name: "LocalLibrary", targets: ["LocalLibrary"]),
         .library(name: "AppSupport", targets: ["AppSupport"]),
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/groue/GRDB.swift.git",
+            exact: "7.11.1"
+        ),
+    ],
     targets: [
         .target(name: "KnowledgeCore"),
-        .target(name: "LocalLibrary"),
+        .target(
+            name: "LocalLibrary",
+            dependencies: [
+                "KnowledgeCore",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
+        ),
         .target(
             name: "AppSupport",
             dependencies: ["KnowledgeCore", "LocalLibrary"]
@@ -34,7 +46,11 @@ let package = Package(
         ),
         .testTarget(
             name: "LocalLibraryTests",
-            dependencies: ["LocalLibrary"]
+            dependencies: [
+                "LocalLibrary",
+                "TestFixtures",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
         ),
         .testTarget(
             name: "AppSupportTests",
