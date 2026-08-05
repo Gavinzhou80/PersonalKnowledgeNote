@@ -1,0 +1,238 @@
+import Foundation
+import GRDB
+import KnowledgeCore
+
+struct ImportTaskRecord:
+    Codable,
+    FetchableRecord,
+    PersistableRecord
+{
+    static let databaseTableName = "import_tasks"
+
+    var taskID: String
+    var sourceKind: String
+    var sourceValue: String
+    var attempt: Int64
+    var revision: Int64
+    var state: String
+    var checkpointOrdinal: Int64?
+    var checkpointCodecVersion: Int64?
+    var checkpointPayload: Data?
+    var stagedArtifactID: String?
+    var outcomeJSON: Data?
+
+    private enum CodingKeys: String, CodingKey {
+        case taskID = "task_id"
+        case sourceKind = "source_kind"
+        case sourceValue = "source_value"
+        case attempt
+        case revision
+        case state
+        case checkpointOrdinal = "checkpoint_ordinal"
+        case checkpointCodecVersion = "checkpoint_codec_version"
+        case checkpointPayload = "checkpoint_payload"
+        case stagedArtifactID = "staged_artifact_id"
+        case outcomeJSON = "outcome_json"
+    }
+}
+
+struct StagedArtifactRecord:
+    Codable,
+    FetchableRecord,
+    PersistableRecord
+{
+    static let databaseTableName = "staged_artifacts"
+
+    var artifactID: String
+    var taskID: String
+    var descriptorJSON: Data
+    var relativePath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case artifactID = "artifact_id"
+        case taskID = "task_id"
+        case descriptorJSON = "descriptor_json"
+        case relativePath = "relative_path"
+    }
+}
+
+struct SourceDocumentRecord:
+    Codable,
+    FetchableRecord,
+    PersistableRecord
+{
+    static let databaseTableName = "source_documents"
+
+    var documentID: String
+    var fingerprint: String
+    var location: String
+    var visibility: String
+    var contentJSON: Data
+    var artifactDescriptorJSON: Data
+    var managedRelativePath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case documentID = "document_id"
+        case fingerprint
+        case location
+        case visibility
+        case contentJSON = "content_json"
+        case artifactDescriptorJSON = "artifact_descriptor_json"
+        case managedRelativePath = "managed_relative_path"
+    }
+}
+
+struct PublicationIntentRecord:
+    Codable,
+    FetchableRecord,
+    PersistableRecord
+{
+    static let databaseTableName = "publication_intents"
+
+    var taskID: String
+    var documentID: String
+    var stagedArtifactID: String
+    var finalRelativePath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case taskID = "task_id"
+        case documentID = "document_id"
+        case stagedArtifactID = "staged_artifact_id"
+        case finalRelativePath = "final_relative_path"
+    }
+}
+
+enum SourceColumns {
+    static func encode(_ source: OriginalSource) -> (kind: String, value: String) {
+        switch source {
+        case .webpage(let url):
+            return ("webpage", url.absoluteString)
+        case .pdfFile(let url):
+            return ("pdf", url.absoluteString)
+        }
+    }
+
+    static func decode(kind: String, value: String) throws -> OriginalSource {
+        guard let url = URL(string: value) else {
+            throw corruptLibrary()
+        }
+
+        switch kind {
+        case "webpage":
+            return .webpage(url)
+        case "pdf":
+            return .pdfFile(url)
+        default:
+            throw corruptLibrary()
+        }
+    }
+}
+
+enum DomainJSON {
+    static func encode<Value: Encodable>(_ value: Value) throws -> Data {
+        try JSONEncoder().encode(value)
+    }
+
+    static func decode<Value: Decodable>(
+        _ type: Value.Type,
+        from data: Data
+    ) throws -> Value {
+        do {
+            return try JSONDecoder().decode(type, from: data)
+        } catch {
+            throw corruptLibrary()
+        }
+    }
+}
+
+extension ImportTaskRecord {
+    func snapshot(
+        stagedArtifact: StagedArtifactRecord?
+    ) throws -> DurableImportSnapshot {
+        guard let rawTaskID = UUID(uuidString: taskID),
+              let decodedAttempt = UInt(exactly: attempt),
+              decodedAttempt > 0,
+              let decodedRevision = UInt64(exactly: revision),
+              let decodedState = ImportTaskState(rawValue: state)
+        else {
+            throw corruptLibrary()
+        }
+
+        _ = try SourceColumns.decode(kind: sourceKind, value: sourceValue)
+        let checkpoint = try decodeCheckpoint()
+        let artifact = try decodeStagedArtifact(stagedArtifact)
+        try validateOutcome(for: decodedState)
+
+        return DurableImportSnapshot(
+            taskID: ImportTaskID(rawTaskID),
+            attempt: decodedAttempt,
+            revision: decodedRevision,
+            state: decodedState,
+            checkpoint: checkpoint,
+            stagedArtifact: artifact
+        )
+    }
+
+    private func decodeCheckpoint() throws -> CheckpointEnvelope? {
+        switch (
+            checkpointOrdinal,
+            checkpointCodecVersion,
+            checkpointPayload
+        ) {
+        case (nil, nil, nil):
+            return nil
+        case (let ordinal?, let version?, let payload?):
+            guard UInt64(exactly: ordinal) != nil,
+                  let codecVersion = UInt16(exactly: version)
+            else {
+                throw corruptLibrary()
+            }
+            return CheckpointEnvelope(
+                codecVersion: codecVersion,
+                payload: payload
+            )
+        default:
+            throw corruptLibrary()
+        }
+    }
+
+    private func decodeStagedArtifact(
+        _ stagedArtifact: StagedArtifactRecord?
+    ) throws -> StagedArtifact? {
+        switch (stagedArtifactID, stagedArtifact) {
+        case (nil, nil):
+            return nil
+        case (let expectedID?, let record?):
+            guard expectedID == record.artifactID,
+                  record.taskID == taskID,
+                  let artifactID = UUID(uuidString: record.artifactID)
+            else {
+                throw corruptLibrary()
+            }
+            return StagedArtifact(
+                rawValue: artifactID,
+                descriptor: try DomainJSON.decode(
+                    SourceArtifactDescriptor.self,
+                    from: record.descriptorJSON
+                )
+            )
+        default:
+            throw corruptLibrary()
+        }
+    }
+
+    private func validateOutcome(for state: ImportTaskState) throws {
+        switch (state, outcomeJSON) {
+        case (.completed, let data?):
+            _ = try DomainJSON.decode(PublicationOutcome.self, from: data)
+        case (.completed, nil), (_, .some):
+            throw corruptLibrary()
+        case (_, nil):
+            return
+        }
+    }
+}
+
+private func corruptLibrary() -> LocalLibraryError {
+    LocalLibraryError.corruptLibrary(diagnosticID: UUID())
+}
