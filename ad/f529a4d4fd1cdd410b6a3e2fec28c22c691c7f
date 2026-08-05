@@ -1,0 +1,41 @@
+Sources/LocalLibrary/Internal/Records.swift
+  s_413052984bbc8e::t_b2888ed4c47636 154,161,164,184-187,220-228,230-231
+  s_413052984bbc8e::t_5109cdf6ce866e 1-153,155-160,162-163,165-183,188-219,229,232-238
+Sources/LocalLibrary/LocalLibraryTypes.swift
+  s_413052984bbc8e::t_5109cdf6ce866e 1-114
+Sources/LocalLibrary/Internal/SchemaMigrations.swift
+  s_413052984bbc8e::t_5109cdf6ce866e 1-67
+Tests/LocalLibraryTests/LocalLibraryTestSupport.swift
+  s_413052984bbc8e::t_e0e159e47cdd04 1-30
+Package.swift
+  s_413052984bbc8e::t_64b103554d46be 15-20,23-29
+Sources/LocalLibrary/Internal/LibraryDatabase.swift
+  s_413052984bbc8e::t_5109cdf6ce866e 1-95
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_5109cdf6ce866e 1-91
+Sources/LocalLibrary/ImportWorkspace.swift
+  s_413052984bbc8e::t_5109cdf6ce866e 1-15
+Tests/LocalLibraryTests/ImportAcceptanceTests.swift
+  s_413052984bbc8e::t_e0e159e47cdd04 1-31
+Package.resolved
+  s_413052984bbc8e::t_c8d02311355c02 1-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "adf529a4d4fd1cdd410b6a3e2fec28c22c691c7f",
+  "prompts": {},
+  "logical_commit_id": "adf529a4d4fd1cdd410b6a3e2fec28c22c691c7f",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 696,
+      "total_deletions": 4
+    }
+  }
+}
