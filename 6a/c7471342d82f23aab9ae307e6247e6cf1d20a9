@@ -1,0 +1,45 @@
+Sources/LocalLibrary/Internal/Records.swift
+  s_413052984bbc8e::t_cb36a815ed03d1 373-376
+  s_413052984bbc8e::t_fb4c4f3052c83b 123-127,377-387
+Tests/LocalLibraryTests/DuplicateResolutionTests.swift
+  s_413052984bbc8e::t_24f5d3f653a1b6 472-477
+  s_413052984bbc8e::t_3559d2bba6cf28 1-183,259-310,312-330,332-333,340-471,478-634
+  s_413052984bbc8e::t_0c806f52fbdd89 331,335
+  s_413052984bbc8e::t_33bb8ccfc3ad10 184-258
+  s_413052984bbc8e::t_cb169b0d2fb68d 311,334,336-339
+Tests/LocalLibraryTests/Support/LocalLibraryTestDriver.swift
+  s_413052984bbc8e::t_3559d2bba6cf28 125-236,252-263
+  s_413052984bbc8e::t_24f5d3f653a1b6 237-251
+Sources/LocalLibrary/Internal/LibraryDatabase.swift
+  s_413052984bbc8e::t_0c803195ec69d9 429-431
+  s_413052984bbc8e::t_8466b5c7f1f10c 397
+  s_413052984bbc8e::t_fb4c4f3052c83b 15-19,398-400,432-519,522,747-751,758,776,795-797,801-805,807-808
+  s_413052984bbc8e::t_954b2fbef24fa2 813,818,821
+  s_413052984bbc8e::t_24f5d3f653a1b6 790-794,798-800,806
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_a8d60ae7b96f21 213
+  s_413052984bbc8e::t_fb4c4f3052c83b 9,13-15,19,22-23,28-50,66-68,206-212
+Sources/LocalLibrary/Internal/PublicationCoordinator.swift
+  s_413052984bbc8e::t_fb4c4f3052c83b 6,34-41
+Sources/LocalLibrary/Internal/PublicationFaultInjector.swift
+  s_413052984bbc8e::t_fb4c4f3052c83b 1-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6ac7471342d82f23aab9ae307e6247e6cf1d20a9",
+  "prompts": {},
+  "logical_commit_id": "7695cf217515859e763f6883b51e64c945349a87",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null,
+      "total_additions": 78,
+      "total_deletions": 7
+    }
+  }
+}
