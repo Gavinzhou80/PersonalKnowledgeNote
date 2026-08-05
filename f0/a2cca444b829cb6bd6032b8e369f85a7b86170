@@ -1,0 +1,47 @@
+Sources/LocalLibrary/Internal/PublicationRecovery.swift
+  s_413052984bbc8e::t_be11e713ab0142 1-36
+Sources/LocalLibrary/Internal/PublicationFaultInjector.swift
+  s_413052984bbc8e::t_be11e713ab0142 3,11-14,16-30
+  s_413052984bbc8e::t_ca8a22a84181c3 8
+Tests/LocalLibraryTests/Support/LocalLibraryTestDriver.swift
+  s_413052984bbc8e::t_6c5454c1e32d6d 270-306
+  s_413052984bbc8e::t_47d1a647bced43 264-269
+Sources/LocalLibrary/Internal/LibraryDatabase.swift
+  s_413052984bbc8e::t_40ed0046f6350f 277-279,281-293
+  s_413052984bbc8e::t_796bcf730308cb 20-24,271-276,280,294-351,353-399,655-711,713,1054-1055
+  s_413052984bbc8e::t_6b737789a019fb 638
+Sources/LocalLibrary/Internal/PublicationCoordinator.swift
+  s_413052984bbc8e::t_be11e713ab0142 40,44-50,54-55
+Tests/LocalLibraryTests/PublicationRecoveryTests.swift
+  s_413052984bbc8e::t_6c5454c1e32d6d 1-17,20-21,26-43,45-210,364-430,432-627,642
+  s_413052984bbc8e::t_40ed0046f6350f 18-19,22-25,44,431
+  s_413052984bbc8e::t_47d1a647bced43 211-363,628-641
+Tests/LocalLibraryTests/DuplicateResolutionTests.swift
+  s_413052984bbc8e::t_678f5c61ffd6db 130-136,139-142,317-332,456-458,463-465,481
+Sources/LocalLibrary/Internal/ManagedArtifacts.swift
+  s_413052984bbc8e::t_35789153729352 50-62,72,88-91,100-103,107-108,116-117,121-122,124-125,131-133,142,193-199,220,235-239,248-310,312-345,354-359,368-369,550-605,607,828-837,839-840
+  s_413052984bbc8e::t_40ed0046f6350f 346-353,360-367,370,838
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_be11e713ab0142 13,27,37,43,54-57,62-64,68,206-215,291-292
+Tests/LocalLibraryTests/CheckpointTests.swift
+  s_413052984bbc8e::t_d7234d9b2819d7 323,340,376
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f0a2cca444b829cb6bd6032b8e369f85a7b86170",
+  "prompts": {},
+  "logical_commit_id": "f0a2cca444b829cb6bd6032b8e369f85a7b86170",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 1256,
+      "total_deletions": 73
+    }
+  }
+}
