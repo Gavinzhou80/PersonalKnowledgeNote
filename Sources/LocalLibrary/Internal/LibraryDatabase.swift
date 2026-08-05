@@ -17,7 +17,8 @@ final class LibraryDatabase: Sendable {
 
     func insertAcceptedTask(
         id: ImportTaskID,
-        source: OriginalSource
+        source: OriginalSource,
+        placement: StagedArtifactPlacement? = nil
     ) throws {
         let sourceColumns = SourceColumns.encode(source)
         try queue.write { db in
@@ -26,14 +27,64 @@ final class LibraryDatabase: Sendable {
                 sourceKind: sourceColumns.kind,
                 sourceValue: sourceColumns.value,
                 attempt: 1,
-                revision: 0,
-                state: ImportTaskState.accepted.rawValue,
+                revision: placement == nil ? 0 : 1,
+                state: placement == nil
+                    ? ImportTaskState.accepted.rawValue
+                    : ImportTaskState.working.rawValue,
                 checkpointOrdinal: nil,
                 checkpointCodecVersion: nil,
                 checkpointPayload: nil,
-                stagedArtifactID: nil,
+                stagedArtifactID: placement?.artifact.rawValue.uuidString,
                 outcomeJSON: nil
             ).insert(db)
+            if let placement {
+                try stagedArtifactRecord(
+                    taskID: id,
+                    placement: placement
+                ).insert(db)
+            }
+        }
+    }
+
+    func attachStagedArtifact(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        placement: StagedArtifactPlacement
+    ) throws {
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            guard let currentRevision = UInt64(exactly: task.revision) else {
+                throw corruptLibraryError()
+            }
+            guard currentRevision == expectedRevision else {
+                throw LocalLibraryError.staleRevision(current: currentRevision)
+            }
+            guard let state = ImportTaskState(rawValue: task.state) else {
+                throw corruptLibraryError()
+            }
+            guard state != .completed, state != .abandoned else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard task.stagedArtifactID == nil else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            guard task.revision < Int64.max else {
+                throw corruptLibraryError()
+            }
+
+            try stagedArtifactRecord(
+                taskID: taskID,
+                placement: placement
+            ).insert(db)
+            task.stagedArtifactID = placement.artifact.rawValue.uuidString
+            task.state = ImportTaskState.working.rawValue
+            task.revision += 1
+            try task.update(db)
         }
     }
 
@@ -92,4 +143,22 @@ final class LibraryDatabase: Sendable {
             .filter(Column("task_id") == task.taskID)
             .fetchOne(db)
     }
+
+    private func stagedArtifactRecord(
+        taskID: ImportTaskID,
+        placement: StagedArtifactPlacement
+    ) throws -> StagedArtifactRecord {
+        StagedArtifactRecord(
+            artifactID: placement.artifact.rawValue.uuidString,
+            taskID: taskID.rawValue.uuidString,
+            descriptorJSON: try DomainJSON.encode(
+                placement.artifact.descriptor
+            ),
+            relativePath: placement.relativePath
+        )
+    }
+}
+
+private func corruptLibraryError() -> LocalLibraryError {
+    LocalLibraryError.corruptLibrary(diagnosticID: UUID())
 }

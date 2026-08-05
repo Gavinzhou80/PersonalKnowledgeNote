@@ -12,4 +12,15 @@ public actor ImportWorkspace {
     public func snapshot() async throws -> DurableImportSnapshot {
         try await library.snapshot(taskID: taskID)
     }
+
+    public func stageArtifact(
+        _ input: SourceArtifactInput,
+        expectedRevision: UInt64
+    ) async throws -> StagedArtifact {
+        try await library.stageArtifact(
+            input,
+            taskID: taskID,
+            expectedRevision: expectedRevision
+        )
+    }
 }

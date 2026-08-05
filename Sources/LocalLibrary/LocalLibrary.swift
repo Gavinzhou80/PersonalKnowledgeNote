@@ -4,9 +4,14 @@ import KnowledgeCore
 
 public actor LocalLibrary {
     private let database: LibraryDatabase
+    private let managedArtifacts: ManagedArtifacts
 
-    private init(database: LibraryDatabase) {
+    private init(
+        database: LibraryDatabase,
+        managedArtifacts: ManagedArtifacts
+    ) {
         self.database = database
+        self.managedArtifacts = managedArtifacts
     }
 
     public static func open(at root: URL) async throws -> LocalLibrary {
@@ -18,7 +23,11 @@ public actor LocalLibrary {
             let database = try LibraryDatabase(
                 url: root.appending(path: "library.sqlite")
             )
-            return LocalLibrary(database: database)
+            let managedArtifacts = try ManagedArtifacts(root: root)
+            return LocalLibrary(
+                database: database,
+                managedArtifacts: managedArtifacts
+            )
         }
     }
 
@@ -26,12 +35,26 @@ public actor LocalLibrary {
         _ source: OriginalSource
     ) async throws -> ImportWorkspace {
         try withLocalLibraryErrorTranslation {
-            guard case .webpage = source else {
-                throw LocalLibraryError.unavailable
-            }
-
             let taskID = ImportTaskID()
-            try database.insertAcceptedTask(id: taskID, source: source)
+            switch source {
+            case .webpage:
+                try database.insertAcceptedTask(id: taskID, source: source)
+            case .pdfFile(let externalPDF):
+                let placement = try managedArtifacts.capturePDF(
+                    at: externalPDF,
+                    for: taskID
+                )
+                do {
+                    try database.insertAcceptedTask(
+                        id: taskID,
+                        source: source,
+                        placement: placement
+                    )
+                } catch {
+                    try managedArtifacts.remove(placement)
+                    throw error
+                }
+            }
             return ImportWorkspace(taskID: taskID, library: self)
         }
     }
@@ -67,6 +90,27 @@ public actor LocalLibrary {
                 throw LocalLibraryError.unavailable
             }
             return snapshot
+        }
+    }
+
+    package func stageArtifact(
+        _ input: SourceArtifactInput,
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> StagedArtifact {
+        try withLocalLibraryErrorTranslation {
+            let placement = try managedArtifacts.stage(input, for: taskID)
+            do {
+                try database.attachStagedArtifact(
+                    taskID: taskID,
+                    expectedRevision: expectedRevision,
+                    placement: placement
+                )
+            } catch {
+                try managedArtifacts.remove(placement)
+                throw error
+            }
+            return placement.artifact
         }
     }
 }

@@ -46,7 +46,7 @@ let package = Package(
         ),
         .testTarget(
             name: "LocalLibraryTests",
-            dependencies: ["LocalLibrary"]
+            dependencies: ["LocalLibrary", "TestFixtures"]
         ),
         .testTarget(
             name: "AppSupportTests",
