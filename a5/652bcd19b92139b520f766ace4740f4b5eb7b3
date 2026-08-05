@@ -1,0 +1,30 @@
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_d31b4b4e9d1d1a 1
+Tests/KnowledgeCoreTests/KnowledgeCoreBoundaryTests.swift
+  s_413052984bbc8e::t_d31b4b4e9d1d1a 5
+Tests/LocalLibraryTests/LocalLibraryBoundaryTests.swift
+  s_413052984bbc8e::t_d31b4b4e9d1d1a 5
+docs/superpowers/specs/2026-08-05-t01-workspace-bootstrap-design.md
+  s_413052984bbc8e::t_d31b4b4e9d1d1a 33,35,56
+Sources/KnowledgeCore/KnowledgeCore.swift
+  s_413052984bbc8e::t_d31b4b4e9d1d1a 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "a5652bcd19b92139b520f766ace4740f4b5eb7b3",
+  "prompts": {},
+  "logical_commit_id": "a5652bcd19b92139b520f766ace4740f4b5eb7b3",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 1279,
+      "total_deletions": 59
+    }
+  }
+}
