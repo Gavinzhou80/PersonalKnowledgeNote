@@ -1,0 +1,32 @@
+Sources/LocalLibrary/ImportWorkspace.swift
+  s_413052984bbc8e::t_2dfbc8d7cda5a9 35-38
+Tests/LocalLibraryTests/ArtifactStagingTests.swift
+  s_413052984bbc8e::t_a68452427d5fc8 651,653-765,767
+  s_413052984bbc8e::t_95096ed11606b1 404,454
+  s_413052984bbc8e::t_3af1b2038eb4c6 652
+Sources/LocalLibrary/Internal/ManagedArtifacts.swift
+  s_413052984bbc8e::t_2dfbc8d7cda5a9 157-192,194
+  s_413052984bbc8e::t_14a161cb02a9d0 1,44-48,53-57,155,386-389,397-399,401-410,413-439
+  s_413052984bbc8e::t_b5fd77197cf4e5 156
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_2dfbc8d7cda5a9 134-141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "db977f1629dc5442a5fcae809a00654ead7dac8c",
+  "prompts": {},
+  "logical_commit_id": "db977f1629dc5442a5fcae809a00654ead7dac8c",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 222,
+      "total_deletions": 17
+    }
+  }
+}
