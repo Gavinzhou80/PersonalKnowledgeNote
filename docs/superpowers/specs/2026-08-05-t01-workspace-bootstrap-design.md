@@ -1,6 +1,6 @@
 # T01 Workspace Bootstrap Design
 
-> Status: approved in conversation, pending written review
+> Status: approved
 > Date: 2026-08-05
 > Ticket: GitHub issue #2 — T01 Bootstrap the testable macOS workspace
 
@@ -38,9 +38,14 @@ Sources/
 Tests/
 ├── KnowledgeCoreTests/
 │   └── KnowledgeCoreBoundaryTests.swift
+├── LocalLibraryTests/
+│   └── LocalLibraryBoundaryTests.swift
 ├── AppSupportTests/
+│   ├── AppSupportBoundaryTests.swift
+│   ├── FixtureCatalogTests.swift
 │   └── ImportCenterPresentationTests.swift
 └── Fixtures/
+    ├── FixtureCatalog.swift
     ├── Web/
     │   └── article.html
     └── PDF/
@@ -124,6 +129,6 @@ Explicitly deferred:
 - Clean checkout builds and tests: checked-in Xcode project plus `swift test` and `xcodebuild` commands.
 - Separate boundaries: distinct `KnowledgeCore`, `LocalLibrary`, and `AppSupport` package targets.
 - Core independence: `KnowledgeCore` imports no SwiftUI or Observation module.
-- Fixture access: Web and PDF resources are loaded through `Bundle.module` in tests.
+- Fixture access: the test-only `TestFixtures` target loads Web and PDF resources through `Bundle.module` for package tests.
 - Deployment policy: macOS 15 is declared in both SwiftPM and Xcode configuration and documented in `README.md`.
 - Offline Import Center: the app shell contains only local presentation state and launches without configuration or network access.
