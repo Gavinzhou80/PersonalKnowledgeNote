@@ -1,6 +1,6 @@
 # T02 Local Library Publication Seam Design
 
-> Status: approved in conversation, pending written review
+> Status: approved
 > Date: 2026-08-05
 > Ticket: GitHub issue #3 — T02 Define and prove the minimum Local Library publication seam
 > Parent design: Document Import Architecture Design
@@ -88,6 +88,13 @@ public actor LocalLibrary {
     /// publication intents, staging, and managed files.
     public func recoverableImports()
         async throws -> [ImportWorkspace]
+
+    /// Recreates a capability for an accepted or retained completed task.
+    /// This lets a caller retry finish after a crash that happened after the
+    /// durable outcome committed but before the reply was received.
+    public func importWorkspace(
+        id: ImportTaskID
+    ) async throws -> ImportWorkspace?
 
     /// Returns a Source Document only after publication is fully visible.
     /// Hidden publication rows and incomplete artifacts never appear.
@@ -335,6 +342,7 @@ For each durable publication intent:
 - Staging has no owning Import Task or retained lease: remove it.
 - Managed artifact has no visible document or valid intent: remove or quarantine it.
 - A completed task whose caller did not receive finish's reply returns its stored PublicationOutcome when finish is retried.
+- importWorkspace(id:) can recreate the task capability after restart, including for a retained completed outcome.
 
 Recovery is idempotent and can itself be interrupted safely.
 
@@ -390,7 +398,7 @@ Required tests:
 4. Publish a complete fixture Source Document and reload it through sourceDocument.
 5. Inject termination before and after hidden-intent commit, atomic rename, final synchronization, and visibility commit.
 6. Reopen after each injected point and observe either no Source Document or one complete readable and locatable Source Document.
-7. Retry finish after a committed result and receive the same outcome.
+7. Reopen the library, recreate the workspace by ImportTaskID, retry finish after a committed result, and receive the same outcome.
 8. Reimport an identical fingerprint from a different source and receive alreadyImported without a second document.
 9. Distinguish an existing document in library from one in trash.
 10. Attach new provenance atomically during duplicate resolution.
