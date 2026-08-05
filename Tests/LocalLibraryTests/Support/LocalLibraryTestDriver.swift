@@ -122,6 +122,145 @@ enum LocalLibraryTestDriver {
         }
     }
 
+    static func setLocation(
+        at root: URL,
+        documentID: SourceDocumentID,
+        location: ExistingDocumentLocation
+    ) throws {
+        try databaseQueue(at: root).write { db in
+            guard try SourceDocumentRecord.fetchOne(
+                db,
+                key: documentID.rawValue.uuidString
+            ) != nil else {
+                throw LocalLibraryError.unavailable
+            }
+            try db.execute(
+                sql: """
+                    UPDATE source_documents
+                    SET location = ?
+                    WHERE document_id = ?
+                    """,
+                arguments: [
+                    location.rawValue,
+                    documentID.rawValue.uuidString,
+                ]
+            )
+        }
+    }
+
+    static func provenanceCount(
+        at root: URL,
+        documentID: SourceDocumentID,
+        source: OriginalSource
+    ) throws -> Int {
+        let columns = try SourceColumns.encode(source)
+        return try databaseQueue(at: root).read { db in
+            try SourceProvenanceRecord
+                .filter(
+                    Column("document_id")
+                        == documentID.rawValue.uuidString
+                )
+                .filter(Column("source_kind") == columns.kind)
+                .filter(Column("source_value") == columns.value)
+                .fetchCount(db)
+        }
+    }
+
+    static func removeProvenance(
+        at root: URL,
+        documentID: SourceDocumentID,
+        source: OriginalSource
+    ) throws {
+        let columns = try SourceColumns.encode(source)
+        try databaseQueue(at: root).write { db in
+            try db.execute(
+                sql: """
+                    DELETE FROM source_provenance
+                    WHERE document_id = ?
+                        AND source_kind = ?
+                        AND source_value = ?
+                    """,
+                arguments: [
+                    documentID.rawValue.uuidString,
+                    columns.kind,
+                    columns.value,
+                ]
+            )
+        }
+    }
+
+    static func corruptProvenance(
+        at root: URL,
+        documentID: SourceDocumentID,
+        source: OriginalSource
+    ) throws {
+        let columns = try SourceColumns.encode(source)
+        try databaseQueue(at: root).write { db in
+            try db.execute(
+                sql: """
+                    UPDATE source_provenance
+                    SET source_kind = 'invalid'
+                    WHERE document_id = ?
+                        AND source_kind = ?
+                        AND source_value = ?
+                    """,
+                arguments: [
+                    documentID.rawValue.uuidString,
+                    columns.kind,
+                    columns.value,
+                ]
+            )
+            guard db.changesCount == 1 else {
+                throw LocalLibraryError.unavailable
+            }
+        }
+    }
+
+    static func hasStagedOwnership(
+        at root: URL,
+        taskID: ImportTaskID
+    ) throws -> Bool {
+        try databaseQueue(at: root).read { db in
+            guard let task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            let stagedCount = try StagedArtifactRecord
+                .filter(Column("task_id") == task.taskID)
+                .fetchCount(db)
+            return task.stagedArtifactID != nil && stagedCount == 1
+        }
+    }
+
+    static func hasStoredOutcome(
+        at root: URL,
+        taskID: ImportTaskID
+    ) throws -> Bool {
+        try databaseQueue(at: root).read { db in
+            guard let task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            return task.outcomeJSON != nil
+        }
+    }
+
+    static func sourceDocumentExists(
+        at root: URL,
+        documentID: SourceDocumentID
+    ) throws -> Bool {
+        try databaseQueue(at: root).read { db in
+            try SourceDocumentRecord.fetchOne(
+                db,
+                key: documentID.rawValue.uuidString
+            ) != nil
+        }
+    }
+
     static func corruptStagedArtifact(
         at root: URL,
         taskID: ImportTaskID,

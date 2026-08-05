@@ -6,20 +6,48 @@ public actor LocalLibrary {
     private let database: LibraryDatabase
     private let managedArtifacts: ManagedArtifacts
     private let publicationCoordinator: PublicationCoordinator
+    private let translatesFinishErrors: Bool
 
     private init(
         database: LibraryDatabase,
-        managedArtifacts: ManagedArtifacts
+        managedArtifacts: ManagedArtifacts,
+        faultInjector: PublicationFaultInjector,
+        translatesFinishErrors: Bool
     ) {
         self.database = database
         self.managedArtifacts = managedArtifacts
+        self.translatesFinishErrors = translatesFinishErrors
         publicationCoordinator = PublicationCoordinator(
             database: database,
-            managedArtifacts: managedArtifacts
+            managedArtifacts: managedArtifacts,
+            faultInjector: faultInjector
         )
     }
 
     public static func open(at root: URL) async throws -> LocalLibrary {
+        try open(
+            at: root,
+            faultInjector: .none,
+            translatesFinishErrors: true
+        )
+    }
+
+    static func openForTesting(
+        at root: URL,
+        faultInjector: PublicationFaultInjector
+    ) async throws -> LocalLibrary {
+        try open(
+            at: root,
+            faultInjector: faultInjector,
+            translatesFinishErrors: false
+        )
+    }
+
+    private static func open(
+        at root: URL,
+        faultInjector: PublicationFaultInjector,
+        translatesFinishErrors: Bool
+    ) throws -> LocalLibrary {
         try withLocalLibraryErrorTranslation {
             try FileManager.default.createDirectory(
                 at: root,
@@ -35,7 +63,9 @@ public actor LocalLibrary {
             }
             return LocalLibrary(
                 database: database,
-                managedArtifacts: managedArtifacts
+                managedArtifacts: managedArtifacts,
+                faultInjector: faultInjector,
+                translatesFinishErrors: translatesFinishErrors
             )
         }
     }
@@ -173,7 +203,14 @@ public actor LocalLibrary {
         candidate: PublicationCandidate,
         expectedRevision: UInt64
     ) throws -> PublicationOutcome {
-        try withLocalLibraryErrorTranslation {
+        if !translatesFinishErrors {
+            return try publicationCoordinator.finish(
+                taskID: taskID,
+                candidate: candidate,
+                expectedRevision: expectedRevision
+            )
+        }
+        return try withLocalLibraryErrorTranslation {
             try publicationCoordinator.finish(
                 taskID: taskID,
                 candidate: candidate,

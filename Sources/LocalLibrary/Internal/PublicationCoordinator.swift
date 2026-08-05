@@ -3,6 +3,7 @@ import KnowledgeCore
 struct PublicationCoordinator: Sendable {
     let database: LibraryDatabase
     let managedArtifacts: ManagedArtifacts
+    let faultInjector: PublicationFaultInjector
 
     func finish(
         taskID: ImportTaskID,
@@ -30,7 +31,14 @@ struct PublicationCoordinator: Sendable {
             _ = try managedArtifacts.verifyStagedArtifact(
                 duplicate.candidateIntent
             )
-            throw LocalLibraryError.publicationFailed(retryable: true)
+            let completion = try database.completeDuplicate(
+                taskID: taskID,
+                candidate: candidate,
+                expectedRevision: expectedRevision,
+                faultInjector: faultInjector
+            )
+            try? managedArtifacts.remove(completion.stagedPlacement)
+            return completion.outcome
         case .new(let intent):
             let verifiedPlacement = try managedArtifacts.moveToFinal(intent)
             return try database.finalizePublication(

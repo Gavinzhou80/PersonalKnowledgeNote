@@ -120,6 +120,11 @@ struct SourceProvenanceRecord:
     }
 }
 
+struct StoredSourceProvenance: Sendable {
+    let documentID: SourceDocumentID
+    let source: OriginalSource
+}
+
 enum SourceColumns {
     static func encode(
         _ source: OriginalSource
@@ -365,6 +370,21 @@ extension SourceDocumentRecord {
             content: content,
             descriptor: descriptor,
             managedRelativePath: managedRelativePath
+        )
+    }
+}
+
+extension SourceProvenanceRecord {
+    func decoded() throws -> StoredSourceProvenance {
+        guard let rawDocumentID = UUID(uuidString: documentID) else {
+            throw corruptLibrary()
+        }
+        return StoredSourceProvenance(
+            documentID: SourceDocumentID(rawDocumentID),
+            source: try SourceColumns.decode(
+                kind: sourceKind,
+                value: sourceValue
+            )
         )
     }
 }

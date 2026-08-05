@@ -335,58 +335,6 @@ func sourceDocumentReportsCorruptionWhenFinalBytesAreTampered() async throws {
     }
 }
 
-@Test
-func duplicateFingerprintDefersCompletionWithoutPublishingCandidate() async throws {
-    let root = try makeTemporaryLibraryRoot()
-    defer { removeTemporaryLibraryRoot(root) }
-    let first = try await makeStagedPublicationFixture(
-        at: root,
-        sourcePath: "duplicate-first"
-    )
-    let fingerprint = ContentFingerprint("duplicate-fingerprint")
-    _ = try await first.workspace.finish(
-        PublicationCandidate(
-            fingerprint: fingerprint,
-            artifact: first.artifact,
-            document: first.content,
-            originalSource: first.source
-        ),
-        expectedRevision: first.revision
-    )
-    let secondSource = OriginalSource.webpage(
-        try #require(URL(string: "https://example.com/duplicate-second"))
-    )
-    let secondWorkspace = try await first.library.accept(secondSource)
-    let secondStaged = try await stageWebPackage(
-        for: secondWorkspace,
-        at: root,
-        label: "duplicate-second"
-    )
-    let secondContent = makeFixtureContent()
-
-    do {
-        _ = try await secondWorkspace.finish(
-            PublicationCandidate(
-                fingerprint: fingerprint,
-                artifact: secondStaged.artifact,
-                document: secondContent,
-                originalSource: secondSource
-            ),
-            expectedRevision: secondStaged.revision
-        )
-        Issue.record("Expected duplicate completion to remain deferred")
-    } catch let error as LocalLibraryError {
-        #expect(error == .publicationFailed(retryable: true))
-    }
-
-    #expect(
-        try await first.library.sourceDocument(
-            id: secondContent.documentID
-        ) == nil
-    )
-    #expect(try await secondWorkspace.snapshot().state == .working)
-}
-
 @Test(arguments: [
     LocalLibraryTestDriver.StagedArtifactCorruption.missing,
     .tampered,

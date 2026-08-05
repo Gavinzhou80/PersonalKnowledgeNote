@@ -12,6 +12,11 @@ struct DuplicatePublication: Sendable {
     let candidateIntent: PublicationIntent
 }
 
+struct DuplicateCompletion: Sendable {
+    let outcome: PublicationOutcome
+    let stagedPlacement: StagedArtifactPlacement
+}
+
 private struct PublicationStateBundle {
     let task: ImportTaskRecord
     let stagedArtifact: StagedArtifactRecord?
@@ -390,6 +395,10 @@ final class LibraryDatabase: Sendable {
                     Column("fingerprint")
                         == candidate.fingerprint.rawValue
                 )
+                .filter(
+                    Column("visibility")
+                        == SourceDocumentVisibility.visible.rawValue
+                )
                 .fetchOne(db)
             {
                 return .duplicate(DuplicatePublication(
@@ -417,6 +426,97 @@ final class LibraryDatabase: Sendable {
             task.revision += 1
             try task.update(db)
             return .new(intent)
+        }
+    }
+
+    func completeDuplicate(
+        taskID: ImportTaskID,
+        candidate: PublicationCandidate,
+        expectedRevision: UInt64,
+        faultInjector: PublicationFaultInjector
+    ) throws -> DuplicateCompletion {
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            let stagedRecord = try stagedArtifact(for: task, in: db)
+            let placement = try publicationPlacement(
+                task: task,
+                stagedRecord: stagedRecord,
+                taskID: taskID,
+                candidate: candidate,
+                expectedRevision: expectedRevision
+            )
+            guard let stagedRecord else {
+                throw corruptLibraryError()
+            }
+            guard let duplicateRecord = try SourceDocumentRecord
+                .filter(
+                    Column("fingerprint")
+                        == candidate.fingerprint.rawValue
+                )
+                .filter(
+                    Column("visibility")
+                        == SourceDocumentVisibility.visible.rawValue
+                )
+                .fetchOne(db)
+            else {
+                throw LocalLibraryError.publicationFailed(retryable: true)
+            }
+            let duplicate = try duplicateRecord.decoded()
+            guard duplicate.fingerprint == candidate.fingerprint,
+                  duplicate.visibility == .visible,
+                  task.revision < Int64.max
+            else {
+                throw corruptLibraryError()
+            }
+            let source = try SourceColumns.decode(
+                kind: task.sourceKind,
+                value: task.sourceValue
+            )
+            let sourceColumns = try SourceColumns.encode(source)
+            guard source == candidate.originalSource,
+                  sourceColumns.kind == task.sourceKind,
+                  sourceColumns.value == task.sourceValue
+            else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+
+            try faultInjector.hit(.beforeDuplicateProvenanceInsert)
+            try db.execute(
+                sql: """
+                    INSERT INTO source_provenance (
+                        document_id,
+                        source_kind,
+                        source_value
+                    ) VALUES (?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    """,
+                arguments: [
+                    duplicateRecord.documentID,
+                    sourceColumns.kind,
+                    sourceColumns.value,
+                ]
+            )
+            let provenanceAdded = db.changesCount == 1
+            let outcome = PublicationOutcome.alreadyImported(
+                documentID: duplicate.documentID,
+                location: duplicate.location,
+                provenanceAdded: provenanceAdded
+            )
+            task.outcomeJSON = try DomainJSON.encode(outcome)
+            task.state = ImportTaskState.completed.rawValue
+            task.stagedArtifactID = nil
+            task.revision += 1
+            try task.update(db)
+            _ = try stagedRecord.delete(db)
+            return DuplicateCompletion(
+                outcome: outcome,
+                stagedPlacement: placement
+            )
         }
     }
 
@@ -644,12 +744,18 @@ final class LibraryDatabase: Sendable {
             let document = try associatedDocumentID.flatMap {
                 try SourceDocumentRecord.fetchOne(db, key: $0)
             }
+            let provenance = try associatedDocumentID.map {
+                try SourceProvenanceRecord
+                    .filter(Column("document_id") == $0)
+                    .fetchAll(db)
+            } ?? []
             try validateStoredPublicationState(
                 task: task,
                 state: state,
                 stagedArtifact: stagedArtifact,
                 intent: intent,
                 document: document,
+                provenance: provenance,
                 outcome: outcome
             )
             return PublicationStateBundle(
@@ -667,6 +773,7 @@ final class LibraryDatabase: Sendable {
         stagedArtifact: StagedArtifactRecord?,
         intent: PublicationIntentRecord?,
         document: SourceDocumentRecord?,
+        provenance: [SourceProvenanceRecord],
         outcome: PublicationOutcome?
     ) throws {
         switch state {
@@ -680,24 +787,38 @@ final class LibraryDatabase: Sendable {
                 throw corruptLibraryError()
             }
             let storedDocument = try document.decoded()
-            guard storedDocument.visibility == .visible else {
+            let taskSource = try SourceColumns.decode(
+                kind: task.sourceKind,
+                value: task.sourceValue
+            )
+            let taskSourceColumns = try SourceColumns.encode(taskSource)
+            let decodedProvenance = try provenance.map { record in
+                (record, try record.decoded())
+            }
+            guard taskSourceColumns.kind == task.sourceKind,
+                  taskSourceColumns.value == task.sourceValue,
+                  storedDocument.visibility == .visible,
+                  decodedProvenance.contains(where: { record, decoded in
+                      record.documentID == document.documentID
+                          && record.sourceKind == task.sourceKind
+                          && record.sourceValue == task.sourceValue
+                          && decoded.documentID == storedDocument.documentID
+                          && decoded.source == taskSource
+                  })
+            else {
                 throw corruptLibraryError()
             }
             switch outcome {
             case .published(let documentID):
-                guard storedDocument.documentID == documentID,
-                      storedDocument.location == .library
-                else {
+                guard storedDocument.documentID == documentID else {
                     throw corruptLibraryError()
                 }
             case .alreadyImported(
                 let documentID,
-                let location,
+                _,
                 _
             ):
-                guard storedDocument.documentID == documentID,
-                      storedDocument.location == location
-                else {
+                guard storedDocument.documentID == documentID else {
                     throw corruptLibraryError()
                 }
             }
