@@ -94,18 +94,12 @@ struct StaticWebDocumentBuilder: Sendable {
     }
 
     private func articleElement(from rawHTML: String) throws -> XMLElement {
-        guard let openingTag = rawHTML.range(
-            of: #"<article\b[^>]*>"#,
-            options: [.regularExpression, .caseInsensitive]
-        ),
-        let closingTag = rawHTML[openingTag.upperBound...].range(
-            of: #"</article\s*>"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) else {
+        guard let innerHTML = NarrowArticleScanner(rawHTML: rawHTML)
+            .firstOuterArticleInnerHTML()
+        else {
             throw StaticWebBuildError.missingArticle
         }
 
-        let innerHTML = rawHTML[openingTag.upperBound..<closingTag.lowerBound]
         let marker = "document-import-article"
         let wrappedHTML = """
         <html><body><div id="\(marker)">\(innerHTML)</div></body></html>
@@ -241,4 +235,272 @@ private struct ExtractedBlock {
     let role: String
     let text: String
     let locator: String
+}
+
+private struct NarrowArticleScanner {
+    private struct Tag {
+        let range: Range<Int>
+        let nameRange: Range<Int>
+        let isClosing: Bool
+        let isSelfClosing: Bool
+    }
+
+    private struct Replacement {
+        let range: Range<Int>
+        let bytes: [UInt8]
+    }
+
+    private let bytes: [UInt8]
+
+    init(rawHTML: String) {
+        bytes = Array(rawHTML.utf8)
+    }
+
+    func firstOuterArticleInnerHTML() -> String? {
+        var index = 0
+        while index < bytes.count {
+            guard bytes[index] == Self.lessThan else {
+                index += 1
+                continue
+            }
+            if startsComment(at: index) {
+                index = endOfComment(startingAt: index)
+                continue
+            }
+            guard let tag = tag(startingAt: index) else {
+                index += 1
+                continue
+            }
+            if isRawTextOpeningTag(tag) {
+                index = endOfRawTextElement(openingTag: tag)
+                continue
+            }
+            guard tagName(tag, equals: "article"),
+                  !tag.isClosing,
+                  !tag.isSelfClosing
+            else {
+                index = tag.range.upperBound
+                continue
+            }
+            return balancedArticleInnerHTML(after: tag)
+        }
+        return nil
+    }
+
+    private func balancedArticleInnerHTML(after openingTag: Tag) -> String? {
+        let innerStart = openingTag.range.upperBound
+        var replacements: [Replacement] = []
+        var depth = 1
+        var index = innerStart
+
+        while index < bytes.count {
+            guard bytes[index] == Self.lessThan else {
+                index += 1
+                continue
+            }
+            if startsComment(at: index) {
+                index = endOfComment(startingAt: index)
+                continue
+            }
+            guard let tag = tag(startingAt: index) else {
+                index += 1
+                continue
+            }
+            if isRawTextOpeningTag(tag) {
+                index = endOfRawTextElement(openingTag: tag)
+                continue
+            }
+            guard tagName(tag, equals: "article") else {
+                index = tag.range.upperBound
+                continue
+            }
+
+            if tag.isClosing {
+                if depth == 1 {
+                    return string(
+                        from: innerStart..<tag.range.lowerBound,
+                        replacing: replacements
+                    )
+                }
+                depth -= 1
+                replacements.append(Replacement(
+                    range: tag.range,
+                    bytes: Array("</div>".utf8)
+                ))
+            } else if tag.isSelfClosing {
+                replacements.append(Replacement(
+                    range: tag.range,
+                    bytes: Array("<div></div>".utf8)
+                ))
+            } else {
+                depth += 1
+                replacements.append(Replacement(
+                    range: tag.range,
+                    bytes: Array("<div>".utf8)
+                ))
+            }
+            index = tag.range.upperBound
+        }
+        return nil
+    }
+
+    private func tag(startingAt start: Int) -> Tag? {
+        var cursor = start + 1
+        guard cursor < bytes.count else {
+            return nil
+        }
+
+        let isClosing = bytes[cursor] == Self.slash
+        if isClosing {
+            cursor += 1
+        }
+        let nameStart = cursor
+        guard cursor < bytes.count, Self.isASCIINameStart(bytes[cursor]) else {
+            return nil
+        }
+        cursor += 1
+        while cursor < bytes.count, Self.isASCIINameByte(bytes[cursor]) {
+            cursor += 1
+        }
+        guard cursor < bytes.count, Self.isTagNameBoundary(bytes[cursor]),
+              let tagEnd = tagEnd(startingAt: cursor)
+        else {
+            return nil
+        }
+
+        var beforeEnd = tagEnd - 2
+        while beforeEnd > cursor, Self.isASCIIWhitespace(bytes[beforeEnd]) {
+            beforeEnd -= 1
+        }
+        return Tag(
+            range: start..<tagEnd,
+            nameRange: nameStart..<cursor,
+            isClosing: isClosing,
+            isSelfClosing: !isClosing && bytes[beforeEnd] == Self.slash
+        )
+    }
+
+    private func tagEnd(startingAt start: Int) -> Int? {
+        var quote: UInt8?
+        var index = start
+        while index < bytes.count {
+            let byte = bytes[index]
+            if let activeQuote = quote {
+                if byte == activeQuote {
+                    quote = nil
+                }
+            } else if byte == Self.singleQuote || byte == Self.doubleQuote {
+                quote = byte
+            } else if byte == Self.greaterThan {
+                return index + 1
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    private func isRawTextOpeningTag(_ tag: Tag) -> Bool {
+        !tag.isClosing
+            && !tag.isSelfClosing
+            && (tagName(tag, equals: "script")
+                || tagName(tag, equals: "style"))
+    }
+
+    private func endOfRawTextElement(openingTag: Tag) -> Int {
+        var index = openingTag.range.upperBound
+        while index < bytes.count {
+            guard bytes[index] == Self.lessThan,
+                  let closingTag = tag(startingAt: index),
+                  closingTag.isClosing,
+                  tagName(
+                    closingTag,
+                    equals: string(for: openingTag.nameRange)
+                  )
+            else {
+                index += 1
+                continue
+            }
+            return closingTag.range.upperBound
+        }
+        return bytes.count
+    }
+
+    private func startsComment(at index: Int) -> Bool {
+        let marker = Array("<!--".utf8)
+        guard index <= bytes.count - marker.count else {
+            return false
+        }
+        return bytes[index..<(index + marker.count)].elementsEqual(marker)
+    }
+
+    private func endOfComment(startingAt start: Int) -> Int {
+        let marker = Array("-->".utf8)
+        var index = start + 4
+        while index <= bytes.count - marker.count {
+            if bytes[index..<(index + marker.count)].elementsEqual(marker) {
+                return index + marker.count
+            }
+            index += 1
+        }
+        return bytes.count
+    }
+
+    private func tagName(_ tag: Tag, equals expected: String) -> Bool {
+        let expectedBytes = Array(expected.utf8)
+        let name = bytes[tag.nameRange]
+        guard name.count == expectedBytes.count else {
+            return false
+        }
+        return zip(name, expectedBytes).allSatisfy {
+            Self.asciiLowercased($0) == Self.asciiLowercased($1)
+        }
+    }
+
+    private func string(for range: Range<Int>) -> String {
+        String(decoding: bytes[range], as: UTF8.self)
+    }
+
+    private func string(
+        from range: Range<Int>,
+        replacing replacements: [Replacement]
+    ) -> String {
+        var result: [UInt8] = []
+        var cursor = range.lowerBound
+        for replacement in replacements {
+            result.append(contentsOf: bytes[cursor..<replacement.range.lowerBound])
+            result.append(contentsOf: replacement.bytes)
+            cursor = replacement.range.upperBound
+        }
+        result.append(contentsOf: bytes[cursor..<range.upperBound])
+        return String(decoding: result, as: UTF8.self)
+    }
+
+    private static func isASCIINameStart(_ byte: UInt8) -> Bool {
+        (65...90).contains(byte) || (97...122).contains(byte)
+    }
+
+    private static func isASCIINameByte(_ byte: UInt8) -> Bool {
+        isASCIINameStart(byte)
+            || (48...57).contains(byte)
+            || byte == 45
+            || byte == 58
+    }
+
+    private static func isTagNameBoundary(_ byte: UInt8) -> Bool {
+        isASCIIWhitespace(byte) || byte == slash || byte == greaterThan
+    }
+
+    private static func isASCIIWhitespace(_ byte: UInt8) -> Bool {
+        byte == 9 || byte == 10 || byte == 12 || byte == 13 || byte == 32
+    }
+
+    private static func asciiLowercased(_ byte: UInt8) -> UInt8 {
+        (65...90).contains(byte) ? byte + 32 : byte
+    }
+
+    private static let lessThan: UInt8 = 60
+    private static let greaterThan: UInt8 = 62
+    private static let slash: UInt8 = 47
+    private static let singleQuote: UInt8 = 39
+    private static let doubleQuote: UInt8 = 34
 }
