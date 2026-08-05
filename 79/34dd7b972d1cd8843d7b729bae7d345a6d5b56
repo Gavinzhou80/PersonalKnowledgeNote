@@ -1,0 +1,41 @@
+Tests/LocalLibraryTests/PublicationRecoveryTests.swift
+  s_413052984bbc8e::t_42911a1732fee4 222-225,228-230,275-278,309-311
+Tests/LocalLibraryTests/Support/LocalLibraryTestDriver.swift
+  s_413052984bbc8e::t_6467899b8f5979 33,54-60,64-66,77-80,95-99,101-107,116,118,126,302,312-315,326-329,425-428,435-437,599-601
+Tests/LocalLibraryTests/ArtifactStagingTests.swift
+  s_413052984bbc8e::t_eade7ac40fc9e1 774
+  s_413052984bbc8e::t_389334a863a4d3 287-341
+Sources/LocalLibrary/Internal/LibraryDatabase.swift
+  s_413052984bbc8e::t_aeb60f939fdde8 374,378-379,389-395,437,521-523,528-529,556,562,889,1098,1100,1102-1107
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_aeb60f939fdde8 63
+Sources/LocalLibrary/Internal/ManagedArtifactPath.swift
+  s_413052984bbc8e::t_7943d53b22f4da 1-4,10-18,37-45,50-56,59-76
+  s_413052984bbc8e::t_c639a2e1271ef7 5-9,19-36,47,57
+  s_413052984bbc8e::t_43f777a5f8d554 46,48-49,58
+Sources/LocalLibrary/Internal/ManagedArtifacts.swift
+  s_413052984bbc8e::t_5be03b04c09dc4 348-349,368-369
+  s_413052984bbc8e::t_c639a2e1271ef7 7-32,36,43-53,58-59,61-64,70-87,124,128,228-230,243-244,265,292,301,310,331,333-334,347,367,379-383,418,427-428,431,439-444,449,492,505-506,518,523,592,595,611,614,683-687,692,698,721,726
+  s_413052984bbc8e::t_eade7ac40fc9e1 496-504
+  s_413052984bbc8e::t_83736b8c532d7e 543,765-769,772,774
+  s_413052984bbc8e::t_6467899b8f5979 445-448
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7934dd7b972d1cd8843d7b729bae7d345a6d5b56",
+  "prompts": {},
+  "logical_commit_id": "7934dd7b972d1cd8843d7b729bae7d345a6d5b56",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 373,
+      "total_deletions": 222
+    }
+  }
+}
