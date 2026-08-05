@@ -40,7 +40,7 @@ public actor DocumentImport {
     }
 
     public nonisolated func observeTasks(
-        query: ImportTaskQuery = .unfinished
+        _ query: ImportTaskQuery = .unfinished
     ) -> AsyncStream<[ImportTaskSnapshot]> {
         AsyncStream(bufferingPolicy: .bufferingNewest(16)) { continuation in
             let observerID = UUID()

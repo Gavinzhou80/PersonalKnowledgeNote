@@ -23,7 +23,7 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     let sourceURL = try #require(
         URL(string: "https://fixture.invalid/article")
     )
-    var taskLists = documentImport.observeTasks(query: .all)
+    var taskLists = documentImport.observeTasks(.all)
         .makeAsyncIterator()
 
     let initiallyVisible = try #require(await taskLists.next())
@@ -112,25 +112,42 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     let located = try #require(
         try await library.sourceDocument(id: fixedDocumentID)
     )
-    let content = located.document.content
-    let blockIDs = content.blocks.map(\.id)
+    let headingID = SourceBlockID(try #require(
+        UUID(uuidString: "d3b501a8-7190-5456-0179-7fc7ed5631c9")
+    ))
+    let paragraphID = SourceBlockID(try #require(
+        UUID(uuidString: "0ac1613a-4e71-300b-c635-7731932ff4f7")
+    ))
+    let expectedContent = SourceDocumentContent(
+        documentID: fixedDocumentID,
+        importedMetadata: ImportedDocumentMetadata(
+            title: "Fixture Article",
+            author: nil
+        ),
+        blocks: [
+            SourceBlock(
+                id: headingID,
+                canonicalText: "Fixture Article"
+            ),
+            SourceBlock(
+                id: paragraphID,
+                canonicalText: "Deterministic offline content."
+            ),
+        ],
+        structure: SourceStructure(
+            orderedBlockIDs: [headingID, paragraphID]
+        ),
+        evidence: [
+            headingID: .web(
+                locator: "article > h1:nth-of-type(1)"
+            ),
+            paragraphID: .web(
+                locator: "article > p:nth-of-type(1)"
+            ),
+        ]
+    )
+
     #expect(located.location == .library)
     #expect(located.document.artifact.kind == .webPackage)
-    #expect(content.documentID == fixedDocumentID)
-    #expect(content.importedMetadata.title == "Fixture Article")
-    #expect(content.importedMetadata.author == nil)
-    #expect(
-        content.blocks.map(\.canonicalText)
-            == ["Fixture Article", "Deterministic offline content."]
-    )
-    #expect(content.structure.orderedBlockIDs == blockIDs)
-    #expect(Set(content.evidence.keys) == Set(blockIDs))
-    #expect(
-        content.evidence[blockIDs[0]]
-            == .web(locator: "article > h1:nth-of-type(1)")
-    )
-    #expect(
-        content.evidence[blockIDs[1]]
-            == .web(locator: "article > p:nth-of-type(1)")
-    )
+    #expect(located.document.content == expectedContent)
 }
