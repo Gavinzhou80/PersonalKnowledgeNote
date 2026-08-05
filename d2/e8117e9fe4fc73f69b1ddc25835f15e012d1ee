@@ -1,0 +1,52 @@
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_ca56250383b854 119-122,228-246
+Tests/LocalLibraryTests/ArtifactStagingTests.swift
+  s_413052984bbc8e::t_07ac80a17ad93c 298,308-318,321,326,631,641-647,649-651,653-657,700-701,722-723,763-767,770,773
+Tests/LocalLibraryTests/Support/LocalLibraryTestDriver.swift
+  s_413052984bbc8e::t_e3a2de805c684c 23,292-298
+  s_413052984bbc8e::t_11bee0d2103617 58-60,64-73,75,77-78,165-202
+  s_413052984bbc8e::t_2b0e87444c109b 12-22,24-25,203-291,299-301
+  s_413052984bbc8e::t_a54e0ef68fdfb7 7-11,116-126,128-135
+  s_413052984bbc8e::t_de04ee9f1df318 303-311,314
+  s_413052984bbc8e::t_ead040ca6b2c63 302
+Sources/LocalLibrary/Internal/PublicationCoordinator.swift
+  s_413052984bbc8e::t_9aa70fcc46d9d6 16-22
+Tests/LocalLibraryTests/ImportPublicationTests.swift
+  s_413052984bbc8e::t_4e8cc822e0f469 501-553,555-600
+  s_413052984bbc8e::t_186e90bd604ff2 624-661,693-694,696-699
+  s_413052984bbc8e::t_e3a2de805c684c 554
+  s_413052984bbc8e::t_779677e0b7deef 601-623
+  s_413052984bbc8e::t_35acdfb007e1b5 460-500
+  s_413052984bbc8e::t_688be533928d6c 390-459
+  s_413052984bbc8e::t_d7e5049780ef30 779-819
+  s_413052984bbc8e::t_7113345eda8063 3,662-692
+  s_413052984bbc8e::t_30def787335d21 695
+Sources/LocalLibrary/Internal/LibraryDatabase.swift
+  s_413052984bbc8e::t_9aa70fcc46d9d6 373-392,409-414,416-417,419,421,438,595-652
+  s_413052984bbc8e::t_476da2f5709c11 324-327,329-345,361-371,653-741
+  s_413052984bbc8e::t_c69fd15783c225 346-360
+  s_413052984bbc8e::t_8669b1ba53b6fc 372
+Sources/LocalLibrary/Internal/ManagedArtifacts.swift
+  s_413052984bbc8e::t_11bee0d2103617 180-183,198-201,391-423
+Sources/LocalLibrary/Internal/Records.swift
+  s_413052984bbc8e::t_bd964b632c3d29 134-137,143-148,151-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "d2e8117e9fe4fc73f69b1ddc25835f15e012d1ee",
+  "prompts": {},
+  "logical_commit_id": "d2e8117e9fe4fc73f69b1ddc25835f15e012d1ee",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 904,
+      "total_deletions": 119
+    }
+  }
+}
