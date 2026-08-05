@@ -61,6 +61,7 @@ let package = Package(
             name: "DocumentImportTests",
             dependencies: [
                 "DocumentImport",
+                "KnowledgeCore",
                 "LocalLibrary",
                 "TestFixtures",
             ]

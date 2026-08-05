@@ -3,6 +3,8 @@ import KnowledgeCore
 import Testing
 import DocumentImport
 
+private func requireHashableSendable<T: Hashable & Sendable>(_: T.Type) {}
+
 @Test
 func importTaskSnapshotCarriesApprovedPublicState() throws {
     let taskID = ImportTaskID()
@@ -35,6 +37,11 @@ func importTaskSnapshotCarriesApprovedPublicState() throws {
 }
 
 @Test
+func importSubmissionErrorIsHashableAndSendable() {
+    requireHashableSendable(ImportSubmissionError.self)
+}
+
+@Test
 func terminalSuccessPreservesPublicationOutcome() {
     let documentID = SourceDocumentID()
     let success = ImportSuccess.published(
@@ -42,5 +49,11 @@ func terminalSuccessPreservesPublicationOutcome() {
         issues: []
     )
 
-    #expect(ImportTerminalState.success(success) == .success(success))
+    switch ImportTerminalState.success(success) {
+    case .success(.published(let actualID, let issues)):
+        #expect(actualID == documentID)
+        #expect(issues.isEmpty)
+    default:
+        Issue.record("Expected published success terminal state")
+    }
 }
