@@ -131,14 +131,26 @@ enum SourceColumns {
     }
 
     static func decode(kind: String, value: String) throws -> OriginalSource {
-        guard let url = URL(string: value) else {
+        guard let url = URL(string: value),
+              url.absoluteString == value,
+              let scheme = url.scheme?.lowercased()
+        else {
             throw corruptLibrary()
         }
 
         switch kind {
         case "webpage":
+            guard (scheme == "http" || scheme == "https"),
+                  let host = url.host,
+                  !host.isEmpty
+            else {
+                throw corruptLibrary()
+            }
             return .webpage(url)
         case "pdf":
+            guard scheme == "file", url.isFileURL else {
+                throw corruptLibrary()
+            }
             return .pdfFile(url)
         default:
             throw corruptLibrary()

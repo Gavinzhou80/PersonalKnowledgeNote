@@ -155,41 +155,6 @@ struct ManagedArtifacts {
     }
 
     func moveToFinal(
-        stagedRelativePath: String,
-        finalRelativePath: String
-    ) throws {
-        let staged = try resolve(
-            relativePath: stagedRelativePath,
-            expectedScope: .staging
-        )
-        let final = try resolve(
-            relativePath: finalRelativePath,
-            expectedScope: .artifacts
-        )
-        let fileManager = FileManager.default
-        let stagedExists = fileManager.fileExists(atPath: staged.path)
-        let finalExists = fileManager.fileExists(atPath: final.path)
-        let sourceParent = staged.deletingLastPathComponent()
-        let destinationParent = final.deletingLastPathComponent()
-
-        if finalExists {
-            guard !stagedExists else {
-                throw LocalLibraryError.artifactOwnershipViolation
-            }
-            try ManagedArtifactPayload.synchronizeDirectory(sourceParent)
-            try ManagedArtifactPayload.synchronizeDirectory(destinationParent)
-            return
-        }
-        guard stagedExists else {
-            throw LocalLibraryError.artifactMissing
-        }
-
-        try fileManager.moveItem(at: staged, to: final)
-        try ManagedArtifactPayload.synchronizeDirectory(sourceParent)
-        try ManagedArtifactPayload.synchronizeDirectory(destinationParent)
-    }
-
-    func moveToFinal(
         _ intent: PublicationIntent
     ) throws -> VerifiedPublicationPlacement {
         let staged = try resolve(
@@ -213,6 +178,10 @@ struct ManagedArtifacts {
                 descriptor: intent.artifact.descriptor,
                 managedRelativePath: intent.finalRelativePath
             )
+            try synchronizePublicationMoveParents(
+                staged: staged,
+                final: final
+            )
             return VerifiedPublicationPlacement(
                 intent: intent,
                 descriptor: descriptor
@@ -226,9 +195,10 @@ struct ManagedArtifacts {
             artifact: intent.artifact,
             relativePath: intent.stagedRelativePath
         ))
-        try moveToFinal(
-            stagedRelativePath: intent.stagedRelativePath,
-            finalRelativePath: intent.finalRelativePath
+        try fileManager.moveItem(at: staged, to: final)
+        try synchronizePublicationMoveParents(
+            staged: staged,
+            final: final
         )
         let descriptor = try verifyFinalArtifact(
             documentID: intent.documentID,
@@ -418,6 +388,39 @@ struct ManagedArtifacts {
             throw LocalLibraryError.artifactMissing
         }
         return verifiedDescriptor
+    }
+
+    private func synchronizePublicationMoveParents(
+        staged: URL,
+        final: URL
+    ) throws {
+        try synchronizeNearestExistingDirectory(
+            staged.deletingLastPathComponent(),
+            within: stagingRoot
+        )
+        try synchronizeNearestExistingDirectory(
+            final.deletingLastPathComponent(),
+            within: artifactsRoot
+        )
+    }
+
+    private func synchronizeNearestExistingDirectory(
+        _ requestedDirectory: URL,
+        within scopeRoot: URL
+    ) throws {
+        var directory = requestedDirectory.standardizedFileURL
+        guard directory == scopeRoot
+                || Self.isStrictDescendant(directory, of: scopeRoot)
+        else {
+            throw corruptManagedArtifactOwnership()
+        }
+        while !FileManager.default.fileExists(atPath: directory.path) {
+            guard directory != scopeRoot else {
+                throw LocalLibraryError.artifactMissing
+            }
+            directory = directory.deletingLastPathComponent()
+        }
+        try ManagedArtifactPayload.synchronizeDirectory(directory)
     }
 
     private func copyToStaging(

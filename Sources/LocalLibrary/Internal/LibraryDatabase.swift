@@ -321,8 +321,75 @@ final class LibraryDatabase: Sendable {
                 throw LocalLibraryError.unavailable
             }
             let stagedArtifact = try stagedArtifact(for: task, in: db)
+            let intent = try PublicationIntentRecord.fetchOne(
+                db,
+                key: task.taskID
+            )
             _ = try task.snapshot(stagedArtifact: stagedArtifact)
-            return try task.storedOutcome()
+            let outcome = try task.storedOutcome()
+            guard let state = ImportTaskState(rawValue: task.state) else {
+                throw corruptLibraryError()
+            }
+            let associatedDocumentID: String?
+            if let outcome {
+                switch outcome {
+                case .published(let documentID),
+                     .alreadyImported(let documentID, _, _):
+                    associatedDocumentID = documentID.rawValue.uuidString
+                }
+            } else {
+                associatedDocumentID = intent?.documentID
+            }
+            let document = try associatedDocumentID.flatMap {
+                try SourceDocumentRecord.fetchOne(db, key: $0)
+            }
+            let orphanedHiddenDocumentCount = try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*)
+                    FROM source_documents AS document
+                    LEFT JOIN publication_intents AS intent
+                        ON intent.document_id = document.document_id
+                    WHERE document.visibility = ?
+                        AND intent.document_id IS NULL
+                    """,
+                arguments: [SourceDocumentVisibility.hidden.rawValue]
+            )
+            guard orphanedHiddenDocumentCount == 0 else {
+                throw corruptLibraryError()
+            }
+            try validateStoredPublicationState(
+                task: task,
+                state: state,
+                stagedArtifact: stagedArtifact,
+                intent: intent,
+                document: document,
+                outcome: outcome
+            )
+            return outcome
+        }
+    }
+
+    func preflightPublication(
+        taskID: ImportTaskID,
+        candidate: PublicationCandidate,
+        expectedRevision: UInt64
+    ) throws -> StagedArtifactPlacement {
+        try queue.read { db in
+            guard let task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            let stagedRecord = try stagedArtifact(for: task, in: db)
+            return try publicationPlacement(
+                task: task,
+                stagedRecord: stagedRecord,
+                taskID: taskID,
+                candidate: candidate,
+                expectedRevision: expectedRevision
+            )
         }
     }
 
@@ -339,50 +406,19 @@ final class LibraryDatabase: Sendable {
                 throw LocalLibraryError.unavailable
             }
             let stagedRecord = try stagedArtifact(for: task, in: db)
-            _ = try task.snapshot(stagedArtifact: stagedRecord)
-            guard let currentRevision = UInt64(exactly: task.revision) else {
+            let placement = try publicationPlacement(
+                task: task,
+                stagedRecord: stagedRecord,
+                taskID: taskID,
+                candidate: candidate,
+                expectedRevision: expectedRevision
+            )
+            guard let stagedRecord,
+                  let persistedTaskID = UUID(uuidString: task.taskID)
+            else {
                 throw corruptLibraryError()
             }
-            guard currentRevision == expectedRevision else {
-                throw LocalLibraryError.staleRevision(
-                    current: currentRevision
-                )
-            }
-            guard let state = ImportTaskState(rawValue: task.state) else {
-                throw corruptLibraryError()
-            }
-            guard state == .accepted || state == .working,
-                  let stagedRecord
-            else {
-                throw LocalLibraryError.invalidTaskState
-            }
-            let storedSource = try SourceColumns.decode(
-                kind: task.sourceKind,
-                value: task.sourceValue
-            )
-            guard storedSource == candidate.originalSource else {
-                throw LocalLibraryError.artifactOwnershipViolation
-            }
-            guard task.stagedArtifactID
-                    == candidate.artifact.rawValue.uuidString,
-                  stagedRecord.taskID == task.taskID,
-                  stagedRecord.artifactID
-                    == candidate.artifact.rawValue.uuidString
-            else {
-                throw LocalLibraryError.artifactOwnershipViolation
-            }
-            let storedDescriptor = try DomainJSON.decode(
-                SourceArtifactDescriptor.self,
-                from: stagedRecord.descriptorJSON
-            )
-            guard storedDescriptor == candidate.artifact.descriptor,
-                  let persistedTaskID = UUID(uuidString: task.taskID),
-                  let persistedArtifactID = UUID(
-                    uuidString: stagedRecord.artifactID
-                  )
-            else {
-                throw LocalLibraryError.artifactOwnershipViolation
-            }
+            let storedDescriptor = placement.artifact.descriptor
             let fingerprintJSON = try DomainJSON.encode(
                 candidate.fingerprint
             )
@@ -399,10 +435,7 @@ final class LibraryDatabase: Sendable {
             let intent = try PublicationIntent(
                 taskID: ImportTaskID(persistedTaskID),
                 documentID: documentID,
-                artifact: StagedArtifact(
-                    rawValue: persistedArtifactID,
-                    descriptor: storedDescriptor
-                ),
+                artifact: placement.artifact,
                 stagedRelativePath: stagedRecord.relativePath,
                 finalRelativePath: finalRelativePath
             )
@@ -559,6 +592,153 @@ final class LibraryDatabase: Sendable {
         try StagedArtifactRecord
             .filter(Column("task_id") == task.taskID)
             .fetchOne(db)
+    }
+
+    private func publicationPlacement(
+        task: ImportTaskRecord,
+        stagedRecord: StagedArtifactRecord?,
+        taskID: ImportTaskID,
+        candidate: PublicationCandidate,
+        expectedRevision: UInt64
+    ) throws -> StagedArtifactPlacement {
+        _ = try task.snapshot(stagedArtifact: stagedRecord)
+        guard let persistedTaskID = UUID(uuidString: task.taskID),
+              ImportTaskID(persistedTaskID) == taskID,
+              let currentRevision = UInt64(exactly: task.revision)
+        else {
+            throw corruptLibraryError()
+        }
+        guard currentRevision == expectedRevision else {
+            throw LocalLibraryError.staleRevision(current: currentRevision)
+        }
+        guard let state = ImportTaskState(rawValue: task.state) else {
+            throw corruptLibraryError()
+        }
+        guard state == .accepted || state == .working,
+              let stagedRecord
+        else {
+            throw LocalLibraryError.invalidTaskState
+        }
+        let storedSource = try SourceColumns.decode(
+            kind: task.sourceKind,
+            value: task.sourceValue
+        )
+        guard storedSource == candidate.originalSource,
+              task.stagedArtifactID
+                == candidate.artifact.rawValue.uuidString,
+              stagedRecord.taskID == task.taskID,
+              stagedRecord.artifactID
+                == candidate.artifact.rawValue.uuidString
+        else {
+            throw LocalLibraryError.artifactOwnershipViolation
+        }
+        let storedDescriptor = try DomainJSON.decode(
+            SourceArtifactDescriptor.self,
+            from: stagedRecord.descriptorJSON
+        )
+        guard storedDescriptor == candidate.artifact.descriptor,
+              let persistedArtifactID = UUID(
+                uuidString: stagedRecord.artifactID
+              )
+        else {
+            throw LocalLibraryError.artifactOwnershipViolation
+        }
+        return StagedArtifactPlacement(
+            artifact: StagedArtifact(
+                rawValue: persistedArtifactID,
+                descriptor: storedDescriptor
+            ),
+            relativePath: stagedRecord.relativePath
+        )
+    }
+
+    private func validateStoredPublicationState(
+        task: ImportTaskRecord,
+        state: ImportTaskState,
+        stagedArtifact: StagedArtifactRecord?,
+        intent: PublicationIntentRecord?,
+        document: SourceDocumentRecord?,
+        outcome: PublicationOutcome?
+    ) throws {
+        switch state {
+        case .completed:
+            guard let outcome,
+                  task.stagedArtifactID == nil,
+                  stagedArtifact == nil,
+                  intent == nil,
+                  let document
+            else {
+                throw corruptLibraryError()
+            }
+            let storedDocument = try document.decoded()
+            guard storedDocument.visibility == .visible else {
+                throw corruptLibraryError()
+            }
+            switch outcome {
+            case .published(let documentID):
+                guard storedDocument.documentID == documentID,
+                      storedDocument.location == .library
+                else {
+                    throw corruptLibraryError()
+                }
+            case .alreadyImported(
+                let documentID,
+                let location,
+                _
+            ):
+                guard storedDocument.documentID == documentID,
+                      storedDocument.location == location
+                else {
+                    throw corruptLibraryError()
+                }
+            }
+        case .publicationPending:
+            guard outcome == nil,
+                  let stagedArtifact,
+                  let intent,
+                  let document,
+                  task.stagedArtifactID == stagedArtifact.artifactID,
+                  intent.taskID == task.taskID,
+                  intent.stagedArtifactID == stagedArtifact.artifactID,
+                  intent.documentID == document.documentID,
+                  let rawTaskID = UUID(uuidString: task.taskID),
+                  let rawArtifactID = UUID(
+                    uuidString: stagedArtifact.artifactID
+                  ),
+                  let rawDocumentID = UUID(uuidString: document.documentID)
+            else {
+                throw corruptLibraryError()
+            }
+            let descriptor = try DomainJSON.decode(
+                SourceArtifactDescriptor.self,
+                from: stagedArtifact.descriptorJSON
+            )
+            let publicationIntent = try PublicationIntent(
+                taskID: ImportTaskID(rawTaskID),
+                documentID: SourceDocumentID(rawDocumentID),
+                artifact: StagedArtifact(
+                    rawValue: rawArtifactID,
+                    descriptor: descriptor
+                ),
+                stagedRelativePath: stagedArtifact.relativePath,
+                finalRelativePath: intent.finalRelativePath
+            )
+            let storedDocument = try document.decoded()
+            guard storedDocument.documentID
+                    == publicationIntent.documentID,
+                  storedDocument.location == .library,
+                  storedDocument.visibility == .hidden,
+                  storedDocument.descriptor == descriptor,
+                  storedDocument.managedRelativePath
+                    == publicationIntent.finalRelativePath
+            else {
+                throw corruptLibraryError()
+            }
+        case .accepted, .working, .abandoned:
+            guard outcome == nil, intent == nil else {
+                throw corruptLibraryError()
+            }
+        }
     }
 
     private func stagedArtifactRecord(

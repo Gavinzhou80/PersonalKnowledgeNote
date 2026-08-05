@@ -116,9 +116,10 @@ public actor LocalLibrary {
                     location: stored.location
                 )
             } catch {
-                throw LocalLibraryError.corruptLibrary(
-                    diagnosticID: UUID()
-                )
+                guard isFinalArtifactCorruption(error) else {
+                    throw error
+                }
+                throw LocalLibraryError.corruptLibrary(diagnosticID: UUID())
             }
         }
     }
@@ -224,6 +225,25 @@ public actor LocalLibrary {
     ) throws -> Never {
         try? managedArtifacts.remove(placement)
         throw primaryError
+    }
+}
+
+func isFinalArtifactCorruption(_ error: Error) -> Bool {
+    guard let error = error as? LocalLibraryError else {
+        return false
+    }
+    switch error {
+    case .artifactMissing,
+         .artifactOwnershipViolation,
+         .corruptLibrary:
+        return true
+    case .unavailable,
+         .insufficientDiskSpace,
+         .staleRevision,
+         .invalidTaskState,
+         .checkpointRegression,
+         .publicationFailed:
+        return false
     }
 }
 

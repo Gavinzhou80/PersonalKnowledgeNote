@@ -295,6 +295,7 @@ func finalMoveDoesNotDeleteStagingWhenDestinationExists() throws {
     )
     try Data("source".utf8).write(to: package.appending(path: "index.html"))
     let managedArtifacts = try ManagedArtifacts(root: libraryRoot)
+    let taskID = ImportTaskID()
     let placement = try managedArtifacts.stage(
         .package(
             package,
@@ -304,21 +305,25 @@ func finalMoveDoesNotDeleteStagingWhenDestinationExists() throws {
                 contentHash: "unverified"
             )
         ),
-        for: ImportTaskID()
+        for: taskID
     )
-    let finalRelativePath = managedArtifacts.finalRelativePath(
-        documentID: SourceDocumentID()
+    let documentID = SourceDocumentID()
+    let intent = try PublicationIntent(
+        taskID: taskID,
+        documentID: documentID,
+        artifact: placement.artifact,
+        stagedRelativePath: placement.relativePath,
+        finalRelativePath: managedArtifacts.finalRelativePath(
+            documentID: documentID
+        )
     )
     try FileManager.default.createDirectory(
-        at: libraryRoot.appending(path: finalRelativePath),
+        at: libraryRoot.appending(path: intent.finalRelativePath),
         withIntermediateDirectories: true
     )
 
     do {
-        try managedArtifacts.moveToFinal(
-            stagedRelativePath: placement.relativePath,
-            finalRelativePath: finalRelativePath
-        )
+        _ = try managedArtifacts.moveToFinal(intent)
         Issue.record("Expected an existing destination to conflict")
     } catch let error as LocalLibraryError {
         #expect(error == .artifactOwnershipViolation)
@@ -623,6 +628,7 @@ func completedFinalMoveIsIdempotent() throws {
     let managedArtifacts = try ManagedArtifacts(
         root: temporaryRoot.appending(path: "Library")
     )
+    let taskID = ImportTaskID()
     let placement = try managedArtifacts.stage(
         .package(
             package,
@@ -632,22 +638,23 @@ func completedFinalMoveIsIdempotent() throws {
                 contentHash: "unverified"
             )
         ),
-        for: ImportTaskID()
+        for: taskID
     )
-    let finalRelativePath = managedArtifacts.finalRelativePath(
-        documentID: SourceDocumentID()
+    let documentID = SourceDocumentID()
+    let intent = try PublicationIntent(
+        taskID: taskID,
+        documentID: documentID,
+        artifact: placement.artifact,
+        stagedRelativePath: placement.relativePath,
+        finalRelativePath: managedArtifacts.finalRelativePath(
+            documentID: documentID
+        )
     )
 
-    try managedArtifacts.moveToFinal(
-        stagedRelativePath: placement.relativePath,
-        finalRelativePath: finalRelativePath
-    )
-    try managedArtifacts.moveToFinal(
-        stagedRelativePath: placement.relativePath,
-        finalRelativePath: finalRelativePath
-    )
+    _ = try managedArtifacts.moveToFinal(intent)
+    _ = try managedArtifacts.moveToFinal(intent)
 
-    #expect(try managedArtifacts.exists(relativePath: finalRelativePath))
+    #expect(try managedArtifacts.exists(relativePath: intent.finalRelativePath))
 }
 
 @Test
@@ -690,7 +697,8 @@ func crossTaskSymlinkCannotRedirectManagedOperations() throws {
 
     func makeAlias() throws -> (
         original: StagedArtifactPlacement,
-        alias: StagedArtifactPlacement
+        alias: StagedArtifactPlacement,
+        aliasTaskID: ImportTaskID
     ) {
         let ownerTaskID = ImportTaskID()
         let aliasTaskID = ImportTaskID()
@@ -711,7 +719,8 @@ func crossTaskSymlinkCannotRedirectManagedOperations() throws {
             StagedArtifactPlacement(
                 artifact: original.artifact,
                 relativePath: "Staging/\(aliasTaskID.rawValue.uuidString)/\(original.artifact.rawValue.uuidString)"
-            )
+            ),
+            aliasTaskID
         )
     }
 
@@ -751,12 +760,17 @@ func crossTaskSymlinkCannotRedirectManagedOperations() throws {
 
     let moveCase = try makeAlias()
     #expect(throws: LocalLibraryError.artifactMissing) {
-        try managedArtifacts.moveToFinal(
+        let documentID = SourceDocumentID()
+        let intent = try PublicationIntent(
+            taskID: moveCase.aliasTaskID,
+            documentID: documentID,
+            artifact: moveCase.alias.artifact,
             stagedRelativePath: moveCase.alias.relativePath,
             finalRelativePath: managedArtifacts.finalRelativePath(
-                documentID: SourceDocumentID()
+                documentID: documentID
             )
         )
+        _ = try managedArtifacts.moveToFinal(intent)
     }
     #expect(
         try managedArtifacts.exists(

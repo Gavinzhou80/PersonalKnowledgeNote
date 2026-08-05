@@ -4,6 +4,25 @@ import KnowledgeCore
 @testable import LocalLibrary
 
 enum LocalLibraryTestDriver {
+    enum StagedArtifactCorruption: Sendable {
+        case missing
+        case tampered
+    }
+
+    enum CompletedPublicationCorruption: Sendable {
+        case stagedOwnership
+        case publicationIntent
+        case missingDocument
+        case hiddenDocument
+    }
+
+    enum NonterminalPublicationCorruption: Sendable {
+        case missingIntent
+        case missingDocument
+        case workingWithIntent
+        case workingWithHiddenReservation
+    }
+
     enum AbandonedCleanupCorruption: Sendable {
         case artifactsScope
         case anotherTask(ImportTaskID)
@@ -36,15 +55,27 @@ enum LocalLibraryTestDriver {
             let probePath: String
             switch corruption {
             case .artifactsScope:
-                guard UUID(uuidString: target.artifactID) != nil else {
+                guard let taskUUID = UUID(uuidString: task.taskID),
+                      let artifactUUID = UUID(uuidString: target.artifactID)
+                else {
                     throw LocalLibraryError.unavailable
                 }
-                let finalPath = "Artifacts/\(target.artifactID)"
                 let managedArtifacts = try ManagedArtifacts(root: root)
-                try managedArtifacts.moveToFinal(
+                let intent = try PublicationIntent(
+                    taskID: ImportTaskID(taskUUID),
+                    documentID: SourceDocumentID(artifactUUID),
+                    artifact: StagedArtifact(
+                        rawValue: artifactUUID,
+                        descriptor: try DomainJSON.decode(
+                            SourceArtifactDescriptor.self,
+                            from: target.descriptorJSON
+                        )
+                    ),
                     stagedRelativePath: target.relativePath,
-                    finalRelativePath: finalPath
+                    finalRelativePath: "Artifacts/\(target.artifactID)"
                 )
+                _ = try managedArtifacts.moveToFinal(intent)
+                let finalPath = intent.finalRelativePath
                 corruptedPath = finalPath
                 probePath = finalPath
             case .anotherTask(let otherTaskID):
@@ -85,6 +116,25 @@ enum LocalLibraryTestDriver {
         )
     }
 
+    static func corruptStagedArtifact(
+        at root: URL,
+        taskID: ImportTaskID,
+        artifact: StagedArtifact,
+        corruption: StagedArtifactCorruption
+    ) throws {
+        let payload = root.appending(
+            path: "Staging/\(taskID.rawValue.uuidString)/\(artifact.rawValue.uuidString)/payload"
+        )
+        switch corruption {
+        case .missing:
+            try FileManager.default.removeItem(at: payload)
+        case .tampered:
+            try Data("tampered staging".utf8).write(
+                to: payload.appending(path: "index.html")
+            )
+        }
+    }
+
     static func markPublicationPending(
         at root: URL,
         taskID: ImportTaskID
@@ -112,6 +162,153 @@ enum LocalLibraryTestDriver {
             return
         case .duplicate:
             throw LocalLibraryError.unavailable
+        }
+    }
+
+    static func movePreparedPublicationToFinal(
+        at root: URL,
+        taskID: ImportTaskID
+    ) throws -> SourceArtifactDescriptor {
+        let queue = try databaseQueue(at: root)
+        let intent = try queue.read { db in
+            guard let task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ), let staged = try StagedArtifactRecord
+                .filter(Column("task_id") == task.taskID)
+                .fetchOne(db), let record = try PublicationIntentRecord
+                .fetchOne(db, key: task.taskID),
+                  let artifactID = UUID(uuidString: staged.artifactID),
+                  let documentID = UUID(uuidString: record.documentID)
+            else {
+                throw LocalLibraryError.unavailable
+            }
+            return try PublicationIntent(
+                taskID: taskID,
+                documentID: SourceDocumentID(documentID),
+                artifact: StagedArtifact(
+                    rawValue: artifactID,
+                    descriptor: try DomainJSON.decode(
+                        SourceArtifactDescriptor.self,
+                        from: staged.descriptorJSON
+                    )
+                ),
+                stagedRelativePath: staged.relativePath,
+                finalRelativePath: record.finalRelativePath
+            )
+        }
+        return try ManagedArtifacts(root: root)
+            .moveToFinal(intent)
+            .descriptor
+    }
+
+    static func corruptCompletedPublication(
+        at root: URL,
+        taskID: ImportTaskID,
+        artifact: StagedArtifact,
+        documentID: SourceDocumentID,
+        corruption: CompletedPublicationCorruption
+    ) throws {
+        let queue = try databaseQueue(at: root)
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ), task.state == ImportTaskState.completed.rawValue
+            else {
+                throw LocalLibraryError.unavailable
+            }
+            switch corruption {
+            case .stagedOwnership:
+                task.stagedArtifactID = artifact.rawValue.uuidString
+                try task.update(db)
+                try StagedArtifactRecord(
+                    artifactID: artifact.rawValue.uuidString,
+                    taskID: task.taskID,
+                    descriptorJSON: try DomainJSON.encode(
+                        artifact.descriptor
+                    ),
+                    relativePath:
+                        "Staging/\(task.taskID)/\(artifact.rawValue.uuidString)"
+                ).insert(db)
+            case .publicationIntent:
+                try PublicationIntentRecord(
+                    taskID: task.taskID,
+                    documentID: documentID.rawValue.uuidString,
+                    stagedArtifactID: artifact.rawValue.uuidString,
+                    finalRelativePath:
+                        "Artifacts/\(documentID.rawValue.uuidString)"
+                ).insert(db)
+            case .missingDocument:
+                _ = try SourceDocumentRecord.deleteOne(
+                    db,
+                    key: documentID.rawValue.uuidString
+                )
+            case .hiddenDocument:
+                try db.execute(
+                    sql: """
+                        UPDATE source_documents
+                        SET visibility = ?
+                        WHERE document_id = ?
+                        """,
+                    arguments: [
+                        SourceDocumentVisibility.hidden.rawValue,
+                        documentID.rawValue.uuidString,
+                    ]
+                )
+            }
+        }
+    }
+
+    static func corruptNonterminalPublication(
+        at root: URL,
+        taskID: ImportTaskID,
+        documentID: SourceDocumentID,
+        corruption: NonterminalPublicationCorruption
+    ) throws {
+        let queue = try databaseQueue(at: root)
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ), task.state == ImportTaskState.publicationPending.rawValue
+            else {
+                throw LocalLibraryError.unavailable
+            }
+            switch corruption {
+            case .missingIntent:
+                _ = try PublicationIntentRecord.deleteOne(
+                    db,
+                    key: task.taskID
+                )
+            case .missingDocument:
+                _ = try SourceDocumentRecord.deleteOne(
+                    db,
+                    key: documentID.rawValue.uuidString
+                )
+            case .workingWithIntent:
+                task.state = ImportTaskState.working.rawValue
+                try task.update(db)
+            case .workingWithHiddenReservation:
+                task.state = ImportTaskState.working.rawValue
+                try task.update(db)
+                _ = try PublicationIntentRecord.deleteOne(
+                    db,
+                    key: task.taskID
+                )
+            }
+        }
+    }
+
+    static func corruptOriginalSource(
+        at root: URL,
+        taskID: ImportTaskID,
+        kind: String,
+        value: String
+    ) throws {
+        try updateTask(at: root, taskID: taskID) { task in
+            task.sourceKind = kind
+            task.sourceValue = value
         }
     }
 

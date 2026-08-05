@@ -13,6 +13,13 @@ struct PublicationCoordinator: Sendable {
             return outcome
         }
 
+        let stagedPlacement = try database.preflightPublication(
+            taskID: taskID,
+            candidate: candidate,
+            expectedRevision: expectedRevision
+        )
+        _ = try managedArtifacts.verify(stagedPlacement)
+
         let preparation = try database.preparePublication(
             taskID: taskID,
             candidate: candidate,
