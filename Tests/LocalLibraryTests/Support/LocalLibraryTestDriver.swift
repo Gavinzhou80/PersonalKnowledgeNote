@@ -261,6 +261,49 @@ enum LocalLibraryTestDriver {
         }
     }
 
+    static func dropSourceDocumentsTable(at root: URL) throws {
+        try databaseQueue(at: root).write { db in
+            try db.execute(sql: "DROP TABLE source_documents")
+        }
+    }
+
+    static func sourceDocumentCount(at root: URL) throws -> Int {
+        try databaseQueue(at: root).read { db in
+            try SourceDocumentRecord.fetchCount(db)
+        }
+    }
+
+    static func visibleSourceDocumentCount(at root: URL) throws -> Int {
+        try databaseQueue(at: root).read { db in
+            try SourceDocumentRecord
+                .filter(
+                    Column("visibility")
+                        == SourceDocumentVisibility.visible.rawValue
+                )
+                .fetchCount(db)
+        }
+    }
+
+    static func finalArtifactExists(
+        at root: URL,
+        documentID: SourceDocumentID
+    ) throws -> Bool {
+        try ManagedArtifacts(root: root).exists(
+            relativePath: "Artifacts/\(documentID.rawValue.uuidString)"
+        )
+    }
+
+    static func stagingContainerExists(
+        at root: URL,
+        taskID: ImportTaskID,
+        artifact: StagedArtifact
+    ) throws -> Bool {
+        try ManagedArtifacts(root: root).exists(
+            relativePath:
+                "Staging/\(taskID.rawValue.uuidString)/\(artifact.rawValue.uuidString)"
+        )
+    }
+
     static func corruptStagedArtifact(
         at root: URL,
         taskID: ImportTaskID,

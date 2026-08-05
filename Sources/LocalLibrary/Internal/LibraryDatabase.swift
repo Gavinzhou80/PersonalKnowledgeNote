@@ -17,6 +17,11 @@ struct DuplicateCompletion: Sendable {
     let stagedPlacement: StagedArtifactPlacement
 }
 
+struct RecoveredPublicationIntent: Sendable {
+    let intent: PublicationIntent
+    let candidate: PublicationCandidate
+}
+
 private struct PublicationStateBundle {
     let task: ImportTaskRecord
     let stagedArtifact: StagedArtifactRecord?
@@ -267,6 +272,134 @@ final class LibraryDatabase: Sendable {
         }
     }
 
+    func publicationIntents() throws -> [RecoveredPublicationIntent] {
+        try queue.read { db in
+            let tasks = try ImportTaskRecord
+                .order(Column("task_id"))
+                .fetchAll(db)
+            _ = try publicationStateBundles(for: tasks, in: db)
+            let intentCount = try PublicationIntentRecord.fetchCount(db)
+            let pendingTaskCount = tasks.filter {
+                $0.state == ImportTaskState.publicationPending.rawValue
+            }.count
+            let distinctIntentDocumentCount = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(DISTINCT document_id) FROM publication_intents"
+            )
+            guard intentCount == pendingTaskCount,
+                  distinctIntentDocumentCount == intentCount
+            else {
+                throw corruptLibraryError()
+            }
+            return try tasks.compactMap { task in
+                guard task.state
+                    == ImportTaskState.publicationPending.rawValue
+                else {
+                    return nil
+                }
+                return try recoveredPublicationIntent(task: task, in: db)
+            }
+        }
+    }
+
+    func rollbackIntent(
+        taskID: ImportTaskID,
+        preserveStagedOwnership: Bool
+    ) throws {
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw corruptLibraryError()
+            }
+            _ = try publicationStateBundles(for: [task], in: db)
+            guard task.state
+                    == ImportTaskState.publicationPending.rawValue,
+                  let intent = try PublicationIntentRecord.fetchOne(
+                    db,
+                    key: task.taskID
+                  ),
+                  let document = try SourceDocumentRecord.fetchOne(
+                    db,
+                    key: intent.documentID
+                  ),
+                  document.visibility
+                    == SourceDocumentVisibility.hidden.rawValue,
+                  task.revision < Int64.max
+            else {
+                throw corruptLibraryError()
+            }
+            let staged = try stagedArtifact(for: task, in: db)
+            guard !preserveStagedOwnership || staged != nil else {
+                throw corruptLibraryError()
+            }
+
+            guard try SourceDocumentRecord.deleteOne(
+                db,
+                key: document.documentID
+            ), try PublicationIntentRecord.deleteOne(
+                db,
+                key: intent.taskID
+            ) else {
+                throw corruptLibraryError()
+            }
+            if !preserveStagedOwnership {
+                if let staged {
+                    guard try staged.delete(db) else {
+                        throw corruptLibraryError()
+                    }
+                }
+                task.stagedArtifactID = nil
+            }
+            task.state = ImportTaskState.working.rawValue
+            task.revision += 1
+            try task.update(db)
+        }
+    }
+
+    func finalizeRecoveredIntent(
+        _ recovered: RecoveredPublicationIntent,
+        verifiedDescriptor: SourceArtifactDescriptor
+    ) throws -> PublicationOutcome {
+        try finalizePublication(
+            candidate: recovered.candidate,
+            verifiedPlacement: VerifiedPublicationPlacement(
+                intent: recovered.intent,
+                descriptor: verifiedDescriptor
+            )
+        )
+    }
+
+    func ownedStagingPaths() throws -> Set<String> {
+        try queue.read { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            let bundles = try publicationStateBundles(for: tasks, in: db)
+            let paths = try bundles.compactMap { bundle -> String? in
+                guard let staged = bundle.stagedArtifact,
+                      let taskID = UUID(uuidString: bundle.task.taskID),
+                      let artifactID = UUID(uuidString: staged.artifactID)
+                else {
+                    if bundle.stagedArtifact == nil {
+                        return nil
+                    }
+                    throw corruptLibraryError()
+                }
+                let expected =
+                    "Staging/\(taskID.uuidString)/\(artifactID.uuidString)"
+                guard staged.relativePath == expected else {
+                    throw corruptLibraryError()
+                }
+                return expected
+            }
+            let owned = Set(paths)
+            guard owned.count == paths.count else {
+                throw corruptLibraryError()
+            }
+            return owned
+        }
+    }
+
     func ownedStagedArtifactPlacement(
         taskID: ImportTaskID,
         artifact: StagedArtifact
@@ -502,6 +635,7 @@ final class LibraryDatabase: Sendable {
                 ]
             )
             let provenanceAdded = db.changesCount == 1
+            try faultInjector.hit(.afterDuplicateProvenanceInsert)
             let outcome = PublicationOutcome.alreadyImported(
                 documentID: duplicate.documentID,
                 location: duplicate.location,
@@ -518,6 +652,63 @@ final class LibraryDatabase: Sendable {
                 stagedPlacement: placement
             )
         }
+    }
+
+    private func recoveredPublicationIntent(
+        task: ImportTaskRecord,
+        in db: Database
+    ) throws -> RecoveredPublicationIntent {
+        guard let staged = try stagedArtifact(for: task, in: db),
+              let intent = try PublicationIntentRecord.fetchOne(
+                db,
+                key: task.taskID
+              ),
+              let documentRecord = try SourceDocumentRecord.fetchOne(
+                db,
+                key: intent.documentID
+              ),
+              let taskID = UUID(uuidString: task.taskID),
+              let artifactID = UUID(uuidString: staged.artifactID),
+              let documentID = UUID(uuidString: documentRecord.documentID)
+        else {
+            throw corruptLibraryError()
+        }
+        let descriptor = try DomainJSON.decode(
+            SourceArtifactDescriptor.self,
+            from: staged.descriptorJSON
+        )
+        let publicationIntent = try PublicationIntent(
+            taskID: ImportTaskID(taskID),
+            documentID: SourceDocumentID(documentID),
+            artifact: StagedArtifact(
+                rawValue: artifactID,
+                descriptor: descriptor
+            ),
+            stagedRelativePath: staged.relativePath,
+            finalRelativePath: intent.finalRelativePath
+        )
+        let document = try documentRecord.decoded()
+        let source = try SourceColumns.decode(
+            kind: task.sourceKind,
+            value: task.sourceValue
+        )
+        guard document.visibility == .hidden,
+              document.documentID == publicationIntent.documentID,
+              document.descriptor == descriptor,
+              document.managedRelativePath
+                == publicationIntent.finalRelativePath
+        else {
+            throw corruptLibraryError()
+        }
+        return RecoveredPublicationIntent(
+            intent: publicationIntent,
+            candidate: PublicationCandidate(
+                fingerprint: document.fingerprint,
+                artifact: publicationIntent.artifact,
+                document: document.content,
+                originalSource: source
+            )
+        )
     }
 
     func finalizePublication(
@@ -860,7 +1051,8 @@ final class LibraryDatabase: Sendable {
                   storedDocument.visibility == .hidden,
                   storedDocument.descriptor == descriptor,
                   storedDocument.managedRelativePath
-                    == publicationIntent.finalRelativePath
+                    == publicationIntent.finalRelativePath,
+                  provenance.isEmpty
             else {
                 throw corruptLibraryError()
             }

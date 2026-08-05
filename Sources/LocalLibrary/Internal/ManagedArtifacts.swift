@@ -47,6 +47,19 @@ struct VerifiedPublicationPlacement: Sendable {
     let descriptor: SourceArtifactDescriptor
 }
 
+enum ManagedArtifactStatus: Sendable {
+    case absent
+    case valid(SourceArtifactDescriptor)
+    case invalid
+
+    var isValid: Bool {
+        if case .valid = self {
+            return true
+        }
+        return false
+    }
+}
+
 struct ManagedArtifacts {
     private enum Scope: String {
         case staging = "Staging"
@@ -56,6 +69,7 @@ struct ManagedArtifacts {
     private let root: URL
     private let stagingRoot: URL
     private let artifactsRoot: URL
+    private let quarantineRoot: URL
 
     init(root requestedRoot: URL) throws {
         let fileManager = FileManager.default
@@ -73,6 +87,10 @@ struct ManagedArtifacts {
             path: Scope.artifacts.rawValue,
             directoryHint: .isDirectory
         )
+        let requestedQuarantineRoot = resolvedRoot.appending(
+            path: "Quarantine",
+            directoryHint: .isDirectory
+        )
         try fileManager.createDirectory(
             at: requestedStagingRoot,
             withIntermediateDirectories: true
@@ -81,8 +99,13 @@ struct ManagedArtifacts {
             at: requestedArtifactsRoot,
             withIntermediateDirectories: true
         )
+        try fileManager.createDirectory(
+            at: requestedQuarantineRoot,
+            withIntermediateDirectories: true
+        )
         guard try !Self.isSymbolicLink(requestedStagingRoot),
-              try !Self.isSymbolicLink(requestedArtifactsRoot)
+              try !Self.isSymbolicLink(requestedArtifactsRoot),
+              try !Self.isSymbolicLink(requestedQuarantineRoot)
         else {
             throw LocalLibraryError.artifactMissing
         }
@@ -90,15 +113,24 @@ struct ManagedArtifacts {
             .resolvingSymlinksInPath()
         let resolvedArtifactsRoot = requestedArtifactsRoot
             .resolvingSymlinksInPath()
+        let resolvedQuarantineRoot = requestedQuarantineRoot
+            .resolvingSymlinksInPath()
         guard resolvedStagingRoot == requestedStagingRoot.standardizedFileURL,
               resolvedArtifactsRoot
                 == requestedArtifactsRoot.standardizedFileURL,
+              resolvedQuarantineRoot
+                == requestedQuarantineRoot.standardizedFileURL,
               resolvedStagingRoot != resolvedArtifactsRoot,
+              resolvedStagingRoot != resolvedQuarantineRoot,
+              resolvedArtifactsRoot != resolvedQuarantineRoot,
               Self.isStrictDescendant(
             resolvedStagingRoot,
             of: resolvedRoot
         ), Self.isStrictDescendant(
             resolvedArtifactsRoot,
+            of: resolvedRoot
+        ), Self.isStrictDescendant(
+            resolvedQuarantineRoot,
             of: resolvedRoot
         ) else {
             throw LocalLibraryError.artifactMissing
@@ -107,6 +139,7 @@ struct ManagedArtifacts {
         root = resolvedRoot
         stagingRoot = resolvedStagingRoot
         artifactsRoot = resolvedArtifactsRoot
+        quarantineRoot = resolvedQuarantineRoot
         try ManagedArtifactPayload.synchronizeDirectory(resolvedRoot)
     }
 
@@ -157,6 +190,13 @@ struct ManagedArtifacts {
     func moveToFinal(
         _ intent: PublicationIntent
     ) throws -> VerifiedPublicationPlacement {
+        try moveToFinalAtomically(intent)
+        return try verifyFinalPublication(intent)
+    }
+
+    func moveToFinalAtomically(
+        _ intent: PublicationIntent
+    ) throws {
         let staged = try resolve(
             relativePath: intent.stagedRelativePath,
             expectedScope: .staging
@@ -173,19 +213,11 @@ struct ManagedArtifacts {
             guard !stagedExists else {
                 throw LocalLibraryError.artifactOwnershipViolation
             }
-            let descriptor = try verifyFinalArtifact(
-                documentID: intent.documentID,
-                descriptor: intent.artifact.descriptor,
-                managedRelativePath: intent.finalRelativePath
-            )
             try synchronizePublicationMoveParents(
                 staged: staged,
                 final: final
             )
-            return VerifiedPublicationPlacement(
-                intent: intent,
-                descriptor: descriptor
-            )
+            return
         }
 
         guard stagedExists else {
@@ -200,6 +232,11 @@ struct ManagedArtifacts {
             staged: staged,
             final: final
         )
+    }
+
+    func verifyFinalPublication(
+        _ intent: PublicationIntent
+    ) throws -> VerifiedPublicationPlacement {
         let descriptor = try verifyFinalArtifact(
             documentID: intent.documentID,
             descriptor: intent.artifact.descriptor,
@@ -209,6 +246,128 @@ struct ManagedArtifacts {
             intent: intent,
             descriptor: descriptor
         )
+    }
+
+    func finalArtifactStatus(
+        _ intent: PublicationIntent
+    ) throws -> ManagedArtifactStatus {
+        try artifactStatus(
+            relativePath: intent.finalRelativePath,
+            expectedScope: .artifacts,
+            descriptor: intent.artifact.descriptor
+        )
+    }
+
+    func stagedArtifactStatus(
+        _ intent: PublicationIntent
+    ) throws -> ManagedArtifactStatus {
+        try artifactStatus(
+            relativePath: intent.stagedRelativePath,
+            expectedScope: .staging,
+            descriptor: intent.artifact.descriptor
+        )
+    }
+
+    func quarantineInvalidFinalArtifact(
+        _ intent: PublicationIntent
+    ) throws {
+        let final = try resolveForRecovery(
+            relativePath: intent.finalRelativePath,
+            expectedScope: .artifacts
+        )
+        guard FileManager.default.fileExists(atPath: final.path) else {
+            return
+        }
+        try rejectSymbolicLinksRecursively(at: final)
+        let quarantine = quarantineRoot.appending(
+            path: UUID().uuidString
+        ).standardizedFileURL
+        guard Self.isStrictDescendant(quarantine, of: quarantineRoot),
+              quarantine.resolvingSymlinksInPath() == quarantine
+        else {
+            throw corruptManagedArtifactOwnership()
+        }
+        try FileManager.default.moveItem(at: final, to: quarantine)
+        try ManagedArtifactPayload.synchronizeDirectory(artifactsRoot)
+        try ManagedArtifactPayload.synchronizeDirectory(quarantineRoot)
+        try ManagedArtifactPayload.synchronizeDirectory(root)
+    }
+
+    func removeUnownedStaging(
+        ownedRelativePaths: Set<String>
+    ) throws {
+        for path in ownedRelativePaths {
+            guard Self.isCanonicalStagingRelativePath(path) else {
+                throw corruptManagedArtifactOwnership()
+            }
+        }
+        let fileManager = FileManager.default
+        let taskDirectories = try fileManager.contentsOfDirectory(
+            at: stagingRoot,
+            includingPropertiesForKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+            ]
+        )
+        for taskDirectory in taskDirectories {
+            guard UUID(uuidString: taskDirectory.lastPathComponent) != nil,
+                  try !Self.isSymbolicLink(taskDirectory),
+                  taskDirectory.resolvingSymlinksInPath()
+                    == taskDirectory.standardizedFileURL,
+                  try taskDirectory.resourceValues(
+                    forKeys: [.isDirectoryKey]
+                  ).isDirectory == true
+            else {
+                throw corruptManagedArtifactOwnership()
+            }
+            let containers = try fileManager.contentsOfDirectory(
+                at: taskDirectory,
+                includingPropertiesForKeys: [
+                    .isDirectoryKey,
+                    .isSymbolicLinkKey,
+                ]
+            )
+            for container in containers {
+                guard UUID(uuidString: container.lastPathComponent) != nil,
+                      try !Self.isSymbolicLink(container),
+                      container.resolvingSymlinksInPath()
+                        == container.standardizedFileURL,
+                      try container.resourceValues(
+                        forKeys: [.isDirectoryKey]
+                      ).isDirectory == true
+                else {
+                    throw corruptManagedArtifactOwnership()
+                }
+                let relativePath =
+                    "Staging/\(taskDirectory.lastPathComponent)/\(container.lastPathComponent)"
+                guard !ownedRelativePaths.contains(relativePath) else {
+                    continue
+                }
+                do {
+                    try fileManager.removeItem(at: container)
+                    try ManagedArtifactPayload.synchronizeDirectory(
+                        taskDirectory
+                    )
+                } catch {
+                    continue
+                }
+            }
+            let remaining = try fileManager.contentsOfDirectory(
+                at: taskDirectory,
+                includingPropertiesForKeys: nil
+            )
+            if remaining.isEmpty {
+                do {
+                    try fileManager.removeItem(at: taskDirectory)
+                    try ManagedArtifactPayload.synchronizeDirectory(
+                        stagingRoot
+                    )
+                } catch {
+                    continue
+                }
+            }
+        }
+        try? ManagedArtifactPayload.synchronizeDirectory(stagingRoot)
     }
 
     func verifyStagedArtifact(
@@ -388,6 +547,62 @@ struct ManagedArtifacts {
             throw LocalLibraryError.artifactMissing
         }
         return verifiedDescriptor
+    }
+
+    private func artifactStatus(
+        relativePath: String,
+        expectedScope: Scope,
+        descriptor: SourceArtifactDescriptor
+    ) throws -> ManagedArtifactStatus {
+        let container = try resolveForRecovery(
+            relativePath: relativePath,
+            expectedScope: expectedScope
+        )
+        guard FileManager.default.fileExists(atPath: container.path) else {
+            return .absent
+        }
+        try rejectSymbolicLinksRecursively(at: container)
+        do {
+            return .valid(try verifyPayload(
+                in: container,
+                expectedDescriptor: descriptor
+            ))
+        } catch LocalLibraryError.artifactMissing {
+            return .invalid
+        }
+    }
+
+    private func resolveForRecovery(
+        relativePath: String,
+        expectedScope: Scope
+    ) throws -> URL {
+        do {
+            return try resolve(
+                relativePath: relativePath,
+                expectedScope: expectedScope
+            )
+        } catch LocalLibraryError.artifactMissing {
+            throw corruptManagedArtifactOwnership()
+        }
+    }
+
+    private func rejectSymbolicLinksRecursively(at url: URL) throws {
+        guard try !Self.isSymbolicLink(url) else {
+            throw corruptManagedArtifactOwnership()
+        }
+        let values = try url.resourceValues(forKeys: [.isDirectoryKey])
+        guard values.isDirectory == true else {
+            return
+        }
+        for child in try FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+            ]
+        ) {
+            try rejectSymbolicLinksRecursively(at: child)
+        }
     }
 
     private func synchronizePublicationMoveParents(
@@ -610,6 +825,19 @@ struct ManagedArtifacts {
             throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
         }
         return information.st_mode & S_IFMT == S_IFLNK
+    }
+
+    private static func isCanonicalStagingRelativePath(
+        _ relativePath: String
+    ) -> Bool {
+        let components = relativePath.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        return components.count == 3
+            && String(components[0]) == Scope.staging.rawValue
+            && UUID(uuidString: String(components[1])) != nil
+            && UUID(uuidString: String(components[2])) != nil
     }
 
     private static func pathsOverlap(_ first: URL, _ second: URL) -> Bool {

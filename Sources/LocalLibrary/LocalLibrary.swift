@@ -6,17 +6,14 @@ public actor LocalLibrary {
     private let database: LibraryDatabase
     private let managedArtifacts: ManagedArtifacts
     private let publicationCoordinator: PublicationCoordinator
-    private let translatesFinishErrors: Bool
 
     private init(
         database: LibraryDatabase,
         managedArtifacts: ManagedArtifacts,
-        faultInjector: PublicationFaultInjector,
-        translatesFinishErrors: Bool
+        faultInjector: PublicationFaultInjector
     ) {
         self.database = database
         self.managedArtifacts = managedArtifacts
-        self.translatesFinishErrors = translatesFinishErrors
         publicationCoordinator = PublicationCoordinator(
             database: database,
             managedArtifacts: managedArtifacts,
@@ -27,8 +24,7 @@ public actor LocalLibrary {
     public static func open(at root: URL) async throws -> LocalLibrary {
         try open(
             at: root,
-            faultInjector: .none,
-            translatesFinishErrors: true
+            faultInjector: .none
         )
     }
 
@@ -38,15 +34,13 @@ public actor LocalLibrary {
     ) async throws -> LocalLibrary {
         try open(
             at: root,
-            faultInjector: faultInjector,
-            translatesFinishErrors: false
+            faultInjector: faultInjector
         )
     }
 
     private static func open(
         at root: URL,
-        faultInjector: PublicationFaultInjector,
-        translatesFinishErrors: Bool
+        faultInjector: PublicationFaultInjector
     ) throws -> LocalLibrary {
         try withLocalLibraryErrorTranslation {
             try FileManager.default.createDirectory(
@@ -57,15 +51,21 @@ public actor LocalLibrary {
                 url: root.appending(path: "library.sqlite")
             )
             let managedArtifacts = try ManagedArtifacts(root: root)
+            try PublicationRecovery(
+                database: database,
+                managedArtifacts: managedArtifacts
+            ).run()
             for cleanup in try database.abandonedStagedArtifactCleanups()
             {
                 try managedArtifacts.removeAbandonedStagedArtifact(cleanup)
             }
+            try managedArtifacts.removeUnownedStaging(
+                ownedRelativePaths: database.ownedStagingPaths()
+            )
             return LocalLibrary(
                 database: database,
                 managedArtifacts: managedArtifacts,
-                faultInjector: faultInjector,
-                translatesFinishErrors: translatesFinishErrors
+                faultInjector: faultInjector
             )
         }
     }
@@ -203,19 +203,16 @@ public actor LocalLibrary {
         candidate: PublicationCandidate,
         expectedRevision: UInt64
     ) throws -> PublicationOutcome {
-        if !translatesFinishErrors {
-            return try publicationCoordinator.finish(
-                taskID: taskID,
-                candidate: candidate,
-                expectedRevision: expectedRevision
-            )
-        }
-        return try withLocalLibraryErrorTranslation {
-            try publicationCoordinator.finish(
-                taskID: taskID,
-                candidate: candidate,
-                expectedRevision: expectedRevision
-            )
+        do {
+            return try withLocalLibraryErrorTranslation {
+                try publicationCoordinator.finish(
+                    taskID: taskID,
+                    candidate: candidate,
+                    expectedRevision: expectedRevision
+                )
+            }
+        } catch let injected as InjectedPublicationFault {
+            throw injected.underlying
         }
     }
 
@@ -291,6 +288,8 @@ private func withLocalLibraryErrorTranslation<Value>(
     do {
         return try operation()
     } catch let error as LocalLibraryError {
+        throw error
+    } catch let error as InjectedPublicationFault {
         throw error
     } catch let error as DatabaseError {
         switch error.resultCode {

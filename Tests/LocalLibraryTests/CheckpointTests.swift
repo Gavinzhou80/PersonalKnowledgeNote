@@ -320,6 +320,7 @@ func checkpointRejectsPublicationPendingWithoutMutation() async throws {
     defer { removeTemporaryLibraryRoot(root) }
     let libraryRoot = root.appending(path: "Library")
     let staged = try await stageWebArtifactInReleasedScope(at: root)
+    let library = try await LocalLibrary.open(at: libraryRoot)
     try LocalLibraryTestDriver.prepareHiddenPublication(
         at: libraryRoot,
         taskID: staged.taskID,
@@ -335,9 +336,8 @@ func checkpointRejectsPublicationPendingWithoutMutation() async throws {
         ),
         expectedRevision: staged.revision
     )
-    let reopened = try await LocalLibrary.open(at: libraryRoot)
     let workspace = try #require(
-        try await reopened.importWorkspace(id: staged.taskID)
+        try await library.importWorkspace(id: staged.taskID)
     )
     let beforeCheckpoint = try await workspace.snapshot()
 
@@ -373,17 +373,7 @@ func persistedOversizedCheckpointIsCorruptLibrary() async throws {
         at: libraryRoot,
         taskID: staged.taskID
     )
-    let reopened = try await LocalLibrary.open(at: libraryRoot)
-
-    do {
-        _ = try await reopened.importWorkspace(id: staged.taskID)
-        Issue.record("Expected oversized persisted checkpoint corruption")
-    } catch let error as LocalLibraryError {
-        guard case .corruptLibrary = error else {
-            Issue.record("Expected corruptLibrary, got \(error)")
-            return
-        }
-    }
+    await expectCorruptLibraryWhenOpening(libraryRoot)
 }
 
 @Test

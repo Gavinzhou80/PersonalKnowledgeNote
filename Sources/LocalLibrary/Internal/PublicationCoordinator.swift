@@ -37,14 +37,22 @@ struct PublicationCoordinator: Sendable {
                 expectedRevision: expectedRevision,
                 faultInjector: faultInjector
             )
+            try faultInjector.hit(.beforeCommittedStagingCleanup)
             try? managedArtifacts.remove(completion.stagedPlacement)
             return completion.outcome
         case .new(let intent):
-            let verifiedPlacement = try managedArtifacts.moveToFinal(intent)
-            return try database.finalizePublication(
+            try faultInjector.hit(.afterIntentCommit)
+            try managedArtifacts.moveToFinalAtomically(intent)
+            try faultInjector.hit(.afterArtifactMove)
+            let verifiedPlacement = try managedArtifacts
+                .verifyFinalPublication(intent)
+            try faultInjector.hit(.beforeVisibilityCommit)
+            let outcome = try database.finalizePublication(
                 candidate: candidate,
                 verifiedPlacement: verifiedPlacement
             )
+            try faultInjector.hit(.afterVisibilityCommit)
+            return outcome
         }
     }
 }

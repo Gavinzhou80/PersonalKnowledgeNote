@@ -127,11 +127,19 @@ func duplicateInTrashReportsTrashLocation() async throws {
     #expect(existing.location == .trash)
 }
 
-@Test
-func provenanceFailureRollsBackDuplicateCompletion() async throws {
+@Test(arguments: [
+    PublicationFaultPoint.beforeDuplicateProvenanceInsert,
+    .afterDuplicateProvenanceInsert,
+])
+func provenanceFailureRollsBackDuplicateCompletion(
+    point: PublicationFaultPoint
+) async throws {
     let root = try makeTemporaryLibraryRoot()
     defer { removeTemporaryLibraryRoot(root) }
-    let failed = try await failDuplicateBeforeProvenanceInsert(at: root)
+    let failed = try await failDuplicateProvenanceTransaction(
+        at: root,
+        point: point
+    )
 
     let reopened = try await LocalLibrary.open(at: failed.libraryRoot)
     let retryWorkspace = try #require(
@@ -306,6 +314,22 @@ func duplicateCompletionRejectsInvalidProvenance(
 
 private enum SimulatedCrash: Error, Equatable, Sendable {
     case beforeDuplicateProvenanceInsert
+    case afterDuplicateProvenanceInsert
+
+    init(point: PublicationFaultPoint) {
+        switch point {
+        case .beforeDuplicateProvenanceInsert:
+            self = .beforeDuplicateProvenanceInsert
+        case .afterDuplicateProvenanceInsert:
+            self = .afterDuplicateProvenanceInsert
+        case .afterIntentCommit,
+             .afterArtifactMove,
+             .beforeVisibilityCommit,
+             .afterVisibilityCommit,
+             .beforeCommittedStagingCleanup:
+            preconditionFailure("Not a duplicate transaction fault point")
+        }
+    }
 }
 
 enum ProvenanceCorruption: Sendable {
@@ -429,15 +453,16 @@ private struct FailedDuplicate: Sendable {
 }
 
 @inline(never)
-private func failDuplicateBeforeProvenanceInsert(
-    at root: URL
+private func failDuplicateProvenanceTransaction(
+    at root: URL,
+    point: PublicationFaultPoint
 ) async throws -> FailedDuplicate {
     let libraryRoot = root.appending(path: "Library")
     let library = try await LocalLibrary.openForTesting(
         at: libraryRoot,
-        faultInjector: PublicationFaultInjector { point in
-            if point == .beforeDuplicateProvenanceInsert {
-                throw SimulatedCrash.beforeDuplicateProvenanceInsert
+        faultInjector: PublicationFaultInjector { hitPoint in
+            if hitPoint == point {
+                throw SimulatedCrash(point: hitPoint)
             }
         }
     )
@@ -453,7 +478,7 @@ private func failDuplicateBeforeProvenanceInsert(
         )
         Issue.record("Expected injected duplicate provenance failure")
     } catch let error as SimulatedCrash {
-        #expect(error == .beforeDuplicateProvenanceInsert)
+        #expect(error == SimulatedCrash(point: point))
     } catch {
         Issue.record("Expected SimulatedCrash, got \(error)")
     }
