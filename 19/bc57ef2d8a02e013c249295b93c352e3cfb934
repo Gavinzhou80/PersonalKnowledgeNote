@@ -1,0 +1,26 @@
+docs/superpowers/specs/2026-08-05-t02-local-library-publication-seam-design.md
+  s_413052984bbc8e::t_6087ff5a103fd9 3
+README.md
+  s_413052984bbc8e::t_861dd3763d73b0 47
+  s_413052984bbc8e::t_6087ff5a103fd9 20-24,31-32,43-44,48
+  s_413052984bbc8e::t_f0c3dd6bc04451 19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "19bc57ef2d8a02e013c249295b93c352e3cfb934",
+  "prompts": {},
+  "logical_commit_id": "8af6d382b3993fe334b657c348418fb6643a3959",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null,
+      "total_additions": 1,
+      "total_deletions": 1
+    }
+  }
+}
