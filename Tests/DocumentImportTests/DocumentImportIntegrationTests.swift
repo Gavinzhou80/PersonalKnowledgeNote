@@ -286,7 +286,12 @@ func completedSnapshotFailureStillPublishesSuccessfulTerminal() async throws {
             totalUnitCount: nil
         ))
     )
-    #expect(completed.revision == publishing.revision + 1)
+    let workspace = try #require(
+        try await library.importWorkspace(id: handle.id)
+    )
+    let durableCompleted = try await workspace.snapshot()
+    #expect(durableCompleted.state == .completed)
+    #expect(completed.revision == durableCompleted.revision)
     #expect(completed.attempt == publishing.attempt)
     #expect(completed.state == .completed(expectedSuccess))
     #expect(await updates.next() == nil)

@@ -249,7 +249,10 @@ public actor DocumentImport {
                 snapshot: ImportTaskSnapshot(
                     id: workspace.taskID,
                     revision: completed?.revision
-                        ?? Self.monotonicSuccessor(publishing.revision),
+                        ?? Self.completionRevision(
+                            after: publishing.revision,
+                            outcome: outcome
+                        ),
                     attempt: completed?.attempt ?? publishing.attempt,
                     source: .webpage(sourceURL),
                     state: .completed(success)
@@ -458,12 +461,24 @@ public actor DocumentImport {
         )
     }
 
-    private static func monotonicSuccessor(_ revision: UInt64) -> UInt64 {
+    private static func completionRevision(
+        after publishingRevision: UInt64,
+        outcome: PublicationOutcome
+    ) -> UInt64 {
+        let increment: UInt64
+        switch outcome {
+        case .published:
+            increment = 2
+        case .alreadyImported:
+            increment = 1
+        }
+        let (revision, overflow) = publishingRevision
+            .addingReportingOverflow(increment)
         precondition(
-            revision < UInt64.max,
-            "A completed import revision must have a monotonic successor"
+            !overflow,
+            "A successful Local Library finish must have completed its durable revision increments"
         )
-        return revision + 1
+        return revision
     }
 
     private static func success(
