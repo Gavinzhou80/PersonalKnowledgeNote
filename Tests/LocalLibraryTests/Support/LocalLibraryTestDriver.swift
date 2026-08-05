@@ -1,19 +1,20 @@
 import Foundation
 import GRDB
 import KnowledgeCore
+@testable import LocalLibrary
 
-package enum LocalLibraryTestDriver {
-    package enum AbandonedCleanupCorruption: Sendable {
+enum LocalLibraryTestDriver {
+    enum AbandonedCleanupCorruption: Sendable {
         case artifactsScope
         case anotherTask(ImportTaskID)
         case artifactIDMismatch
     }
 
-    package struct ManagedArtifactProbe: Sendable {
+    struct ManagedArtifactProbe: Sendable {
         fileprivate let relativePath: String
     }
 
-    package static func corruptAbandonedCleanupPath(
+    static func corruptAbandonedCleanupPath(
         at root: URL,
         taskID: ImportTaskID,
         corruption: AbandonedCleanupCorruption
@@ -75,7 +76,7 @@ package enum LocalLibraryTestDriver {
         }
     }
 
-    package static func managedArtifactExists(
+    static func managedArtifactExists(
         at root: URL,
         probe: ManagedArtifactProbe
     ) throws -> Bool {
@@ -84,7 +85,7 @@ package enum LocalLibraryTestDriver {
         )
     }
 
-    package static func markPublicationPending(
+    static func markPublicationPending(
         at root: URL,
         taskID: ImportTaskID
     ) throws {
@@ -93,7 +94,7 @@ package enum LocalLibraryTestDriver {
         }
     }
 
-    package static func corruptCheckpointWithOversizedPayload(
+    static func corruptCheckpointWithOversizedPayload(
         at root: URL,
         taskID: ImportTaskID
     ) throws {
@@ -107,7 +108,7 @@ package enum LocalLibraryTestDriver {
         }
     }
 
-    package static func corruptCheckpointWithNegativeOrdinal(
+    static func corruptCheckpointWithNegativeOrdinal(
         at root: URL,
         taskID: ImportTaskID
     ) throws {
@@ -118,7 +119,7 @@ package enum LocalLibraryTestDriver {
         }
     }
 
-    package static func corruptCheckpointWithOversizedCodecVersion(
+    static func corruptCheckpointWithOversizedCodecVersion(
         at root: URL,
         taskID: ImportTaskID
     ) throws {

@@ -46,7 +46,11 @@ let package = Package(
         ),
         .testTarget(
             name: "LocalLibraryTests",
-            dependencies: ["LocalLibrary", "TestFixtures"]
+            dependencies: [
+                "LocalLibrary",
+                "TestFixtures",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
         ),
         .testTarget(
             name: "AppSupportTests",
