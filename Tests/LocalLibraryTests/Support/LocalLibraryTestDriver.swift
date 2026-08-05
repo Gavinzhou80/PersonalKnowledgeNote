@@ -94,6 +94,51 @@ enum LocalLibraryTestDriver {
         }
     }
 
+    static func prepareHiddenPublication(
+        at root: URL,
+        taskID: ImportTaskID,
+        candidate: PublicationCandidate,
+        expectedRevision: UInt64
+    ) throws {
+        let database = try LibraryDatabase(
+            url: root.appending(path: "library.sqlite")
+        )
+        switch try database.preparePublication(
+            taskID: taskID,
+            candidate: candidate,
+            expectedRevision: expectedRevision
+        ) {
+        case .new:
+            return
+        case .duplicate:
+            throw LocalLibraryError.unavailable
+        }
+    }
+
+    static func removeFinalArtifactPayload(
+        at root: URL,
+        documentID: SourceDocumentID
+    ) throws {
+        try FileManager.default.removeItem(
+            at: finalArtifactPayloadURL(
+                at: root,
+                documentID: documentID
+            )
+        )
+    }
+
+    static func tamperFinalArtifactPayload(
+        at root: URL,
+        documentID: SourceDocumentID
+    ) throws {
+        try Data("tampered".utf8).write(
+            to: finalArtifactPayloadURL(
+                at: root,
+                documentID: documentID
+            ).appending(path: "index.html")
+        )
+    }
+
     static func corruptCheckpointWithOversizedPayload(
         at root: URL,
         taskID: ImportTaskID
@@ -150,5 +195,14 @@ enum LocalLibraryTestDriver {
 
     private static func databaseQueue(at root: URL) throws -> DatabaseQueue {
         try DatabaseQueue(path: root.appending(path: "library.sqlite").path)
+    }
+
+    private static func finalArtifactPayloadURL(
+        at root: URL,
+        documentID: SourceDocumentID
+    ) -> URL {
+        root.appending(
+            path: "Artifacts/\(documentID.rawValue.uuidString)/payload"
+        )
     }
 }

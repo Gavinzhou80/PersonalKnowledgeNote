@@ -13,6 +13,40 @@ struct AbandonedStagedArtifactCleanup: Sendable {
     let payloadRelativePath: String
 }
 
+struct PublicationIntent: Equatable, Sendable {
+    let taskID: ImportTaskID
+    let documentID: SourceDocumentID
+    let artifact: StagedArtifact
+    let stagedRelativePath: String
+    let finalRelativePath: String
+
+    init(
+        taskID: ImportTaskID,
+        documentID: SourceDocumentID,
+        artifact: StagedArtifact,
+        stagedRelativePath: String,
+        finalRelativePath: String
+    ) throws {
+        guard stagedRelativePath
+            == "Staging/\(taskID.rawValue.uuidString)/\(artifact.rawValue.uuidString)",
+              finalRelativePath
+                == "Artifacts/\(documentID.rawValue.uuidString)"
+        else {
+            throw corruptManagedArtifactOwnership()
+        }
+        self.taskID = taskID
+        self.documentID = documentID
+        self.artifact = artifact
+        self.stagedRelativePath = stagedRelativePath
+        self.finalRelativePath = finalRelativePath
+    }
+}
+
+struct VerifiedPublicationPlacement: Sendable {
+    let intent: PublicationIntent
+    let descriptor: SourceArtifactDescriptor
+}
+
 struct ManagedArtifacts {
     private enum Scope: String {
         case staging = "Staging"
@@ -155,6 +189,86 @@ struct ManagedArtifacts {
         try ManagedArtifactPayload.synchronizeDirectory(destinationParent)
     }
 
+    func moveToFinal(
+        _ intent: PublicationIntent
+    ) throws -> VerifiedPublicationPlacement {
+        let staged = try resolve(
+            relativePath: intent.stagedRelativePath,
+            expectedScope: .staging
+        )
+        let final = try resolve(
+            relativePath: intent.finalRelativePath,
+            expectedScope: .artifacts
+        )
+        let fileManager = FileManager.default
+        let stagedExists = fileManager.fileExists(atPath: staged.path)
+        let finalExists = fileManager.fileExists(atPath: final.path)
+
+        if finalExists {
+            guard !stagedExists else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            let descriptor = try verifyFinalArtifact(
+                documentID: intent.documentID,
+                descriptor: intent.artifact.descriptor,
+                managedRelativePath: intent.finalRelativePath
+            )
+            return VerifiedPublicationPlacement(
+                intent: intent,
+                descriptor: descriptor
+            )
+        }
+
+        guard stagedExists else {
+            throw LocalLibraryError.artifactMissing
+        }
+        _ = try verify(StagedArtifactPlacement(
+            artifact: intent.artifact,
+            relativePath: intent.stagedRelativePath
+        ))
+        try moveToFinal(
+            stagedRelativePath: intent.stagedRelativePath,
+            finalRelativePath: intent.finalRelativePath
+        )
+        let descriptor = try verifyFinalArtifact(
+            documentID: intent.documentID,
+            descriptor: intent.artifact.descriptor,
+            managedRelativePath: intent.finalRelativePath
+        )
+        return VerifiedPublicationPlacement(
+            intent: intent,
+            descriptor: descriptor
+        )
+    }
+
+    func verifyStagedArtifact(
+        _ intent: PublicationIntent
+    ) throws -> SourceArtifactDescriptor {
+        try verify(StagedArtifactPlacement(
+            artifact: intent.artifact,
+            relativePath: intent.stagedRelativePath
+        ))
+    }
+
+    func verifyFinalArtifact(
+        documentID: SourceDocumentID,
+        descriptor: SourceArtifactDescriptor,
+        managedRelativePath: String
+    ) throws -> SourceArtifactDescriptor {
+        let expectedPath = finalRelativePath(documentID: documentID)
+        guard managedRelativePath == expectedPath else {
+            throw corruptManagedArtifactOwnership()
+        }
+        let container = try resolve(
+            relativePath: managedRelativePath,
+            expectedScope: .artifacts
+        )
+        return try verifyPayload(
+            in: container,
+            expectedDescriptor: descriptor
+        )
+    }
+
     func exists(relativePath: String) throws -> Bool {
         let managedURL = try resolve(relativePath: relativePath)
         return FileManager.default.fileExists(atPath: managedURL.path)
@@ -259,6 +373,16 @@ struct ManagedArtifacts {
             relativePath: placement.relativePath,
             expectedScope: .staging
         )
+        return try verifyPayload(
+            in: container,
+            expectedDescriptor: placement.artifact.descriptor
+        )
+    }
+
+    private func verifyPayload(
+        in container: URL,
+        expectedDescriptor: SourceArtifactDescriptor
+    ) throws -> SourceArtifactDescriptor {
         guard FileManager.default.fileExists(atPath: container.path) else {
             throw LocalLibraryError.artifactMissing
         }
@@ -266,7 +390,7 @@ struct ManagedArtifacts {
         guard FileManager.default.fileExists(atPath: payload.path) else {
             throw LocalLibraryError.artifactMissing
         }
-        let expectedKind = placement.artifact.descriptor.kind
+        let expectedKind = expectedDescriptor.kind
         let values = try payload.resourceValues(forKeys: [
             .isDirectoryKey,
             .isRegularFileKey,
@@ -290,7 +414,7 @@ struct ManagedArtifacts {
             byteCount: verification.byteCount,
             contentHash: verification.contentHash
         )
-        guard verifiedDescriptor == placement.artifact.descriptor else {
+        guard verifiedDescriptor == expectedDescriptor else {
             throw LocalLibraryError.artifactMissing
         }
         return verifiedDescriptor

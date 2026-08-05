@@ -2,6 +2,16 @@ import Foundation
 import GRDB
 import KnowledgeCore
 
+enum PublicationPreparation: Sendable {
+    case new(PublicationIntent)
+    case duplicate(DuplicatePublication)
+}
+
+struct DuplicatePublication: Sendable {
+    let existingDocument: StoredSourceDocument
+    let candidateIntent: PublicationIntent
+}
+
 final class LibraryDatabase: Sendable {
     private let queue: DatabaseQueue
 
@@ -299,6 +309,246 @@ final class LibraryDatabase: Sendable {
                 artifact: storedArtifact,
                 relativePath: record.relativePath
             )
+        }
+    }
+
+    func storedOutcome(taskID: ImportTaskID) throws -> PublicationOutcome? {
+        try queue.read { db in
+            guard let task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            let stagedArtifact = try stagedArtifact(for: task, in: db)
+            _ = try task.snapshot(stagedArtifact: stagedArtifact)
+            return try task.storedOutcome()
+        }
+    }
+
+    func preparePublication(
+        taskID: ImportTaskID,
+        candidate: PublicationCandidate,
+        expectedRevision: UInt64
+    ) throws -> PublicationPreparation {
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            let stagedRecord = try stagedArtifact(for: task, in: db)
+            _ = try task.snapshot(stagedArtifact: stagedRecord)
+            guard let currentRevision = UInt64(exactly: task.revision) else {
+                throw corruptLibraryError()
+            }
+            guard currentRevision == expectedRevision else {
+                throw LocalLibraryError.staleRevision(
+                    current: currentRevision
+                )
+            }
+            guard let state = ImportTaskState(rawValue: task.state) else {
+                throw corruptLibraryError()
+            }
+            guard state == .accepted || state == .working,
+                  let stagedRecord
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            let storedSource = try SourceColumns.decode(
+                kind: task.sourceKind,
+                value: task.sourceValue
+            )
+            guard storedSource == candidate.originalSource else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            guard task.stagedArtifactID
+                    == candidate.artifact.rawValue.uuidString,
+                  stagedRecord.taskID == task.taskID,
+                  stagedRecord.artifactID
+                    == candidate.artifact.rawValue.uuidString
+            else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            let storedDescriptor = try DomainJSON.decode(
+                SourceArtifactDescriptor.self,
+                from: stagedRecord.descriptorJSON
+            )
+            guard storedDescriptor == candidate.artifact.descriptor,
+                  let persistedTaskID = UUID(uuidString: task.taskID),
+                  let persistedArtifactID = UUID(
+                    uuidString: stagedRecord.artifactID
+                  )
+            else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            let fingerprintJSON = try DomainJSON.encode(
+                candidate.fingerprint
+            )
+            guard try DomainJSON.decode(
+                ContentFingerprint.self,
+                from: fingerprintJSON
+            ) == candidate.fingerprint else {
+                throw corruptLibraryError()
+            }
+
+            let documentID = candidate.document.documentID
+            let finalRelativePath =
+                "Artifacts/\(documentID.rawValue.uuidString)"
+            let intent = try PublicationIntent(
+                taskID: ImportTaskID(persistedTaskID),
+                documentID: documentID,
+                artifact: StagedArtifact(
+                    rawValue: persistedArtifactID,
+                    descriptor: storedDescriptor
+                ),
+                stagedRelativePath: stagedRecord.relativePath,
+                finalRelativePath: finalRelativePath
+            )
+
+            if let duplicate = try SourceDocumentRecord
+                .filter(
+                    Column("fingerprint")
+                        == candidate.fingerprint.rawValue
+                )
+                .fetchOne(db)
+            {
+                return .duplicate(DuplicatePublication(
+                    existingDocument: try duplicate.decoded(),
+                    candidateIntent: intent
+                ))
+            }
+
+            guard task.revision < Int64.max else {
+                throw corruptLibraryError()
+            }
+
+            try SourceDocumentRecord.hidden(
+                candidate: candidate,
+                descriptor: storedDescriptor,
+                managedRelativePath: finalRelativePath
+            ).insert(db)
+            try PublicationIntentRecord(
+                taskID: task.taskID,
+                documentID: documentID.rawValue.uuidString,
+                stagedArtifactID: stagedRecord.artifactID,
+                finalRelativePath: finalRelativePath
+            ).insert(db)
+            task.state = ImportTaskState.publicationPending.rawValue
+            task.revision += 1
+            try task.update(db)
+            return .new(intent)
+        }
+    }
+
+    func finalizePublication(
+        candidate: PublicationCandidate,
+        verifiedPlacement: VerifiedPublicationPlacement
+    ) throws -> PublicationOutcome {
+        try queue.write { db in
+            let expectedIntent = verifiedPlacement.intent
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: expectedIntent.taskID.rawValue.uuidString
+            ), let stagedRecord = try stagedArtifact(for: task, in: db),
+                  var document = try SourceDocumentRecord.fetchOne(
+                    db,
+                    key: expectedIntent.documentID.rawValue.uuidString
+                  ), let intentRecord = try PublicationIntentRecord.fetchOne(
+                    db,
+                    key: expectedIntent.taskID.rawValue.uuidString
+                  )
+            else {
+                throw corruptLibraryError()
+            }
+            _ = try task.snapshot(stagedArtifact: stagedRecord)
+            guard task.state == ImportTaskState.publicationPending.rawValue,
+                  task.stagedArtifactID == stagedRecord.artifactID,
+                  task.stagedArtifactID
+                    == candidate.artifact.rawValue.uuidString,
+                  stagedRecord.taskID == task.taskID,
+                  stagedRecord.artifactID
+                    == expectedIntent.artifact.rawValue.uuidString,
+                  stagedRecord.relativePath
+                    == expectedIntent.stagedRelativePath,
+                  try DomainJSON.decode(
+                    SourceArtifactDescriptor.self,
+                    from: stagedRecord.descriptorJSON
+                  ) == candidate.artifact.descriptor,
+                  try SourceColumns.decode(
+                    kind: task.sourceKind,
+                    value: task.sourceValue
+                  ) == candidate.originalSource,
+                  intentRecord.taskID == task.taskID,
+                  intentRecord.documentID == document.documentID,
+                  intentRecord.documentID
+                    == candidate.document.documentID.rawValue.uuidString,
+                  intentRecord.stagedArtifactID == stagedRecord.artifactID,
+                  intentRecord.finalRelativePath
+                    == expectedIntent.finalRelativePath,
+                  verifiedPlacement.descriptor
+                    == candidate.artifact.descriptor
+            else {
+                throw corruptLibraryError()
+            }
+            let storedDocument = try document.decoded()
+            guard storedDocument.documentID == expectedIntent.documentID,
+                  storedDocument.fingerprint == candidate.fingerprint,
+                  storedDocument.location == .library,
+                  storedDocument.visibility == .hidden,
+                  storedDocument.content == candidate.document,
+                  storedDocument.descriptor == candidate.artifact.descriptor,
+                  storedDocument.managedRelativePath
+                    == expectedIntent.finalRelativePath,
+                  task.revision < Int64.max
+            else {
+                throw corruptLibraryError()
+            }
+
+            let sourceColumns = SourceColumns.encode(
+                candidate.originalSource
+            )
+            try SourceProvenanceRecord(
+                documentID: document.documentID,
+                sourceKind: sourceColumns.kind,
+                sourceValue: sourceColumns.value
+            ).insert(db)
+            let outcome = PublicationOutcome.published(
+                documentID: expectedIntent.documentID
+            )
+            document.visibility = SourceDocumentVisibility.visible.rawValue
+            try document.update(db)
+            task.outcomeJSON = try DomainJSON.encode(outcome)
+            task.state = ImportTaskState.completed.rawValue
+            task.stagedArtifactID = nil
+            task.revision += 1
+            try task.update(db)
+            _ = try intentRecord.delete(db)
+            _ = try stagedRecord.delete(db)
+            return outcome
+        }
+    }
+
+    func visibleSourceDocument(
+        id: SourceDocumentID
+    ) throws -> StoredSourceDocument? {
+        try queue.read { db in
+            guard let record = try SourceDocumentRecord
+                .filter(Column("document_id") == id.rawValue.uuidString)
+                .filter(
+                    Column("visibility")
+                        == SourceDocumentVisibility.visible.rawValue
+                )
+                .fetchOne(db)
+            else {
+                return nil
+            }
+            let decoded = try record.decoded()
+            guard decoded.visibility == .visible else {
+                throw corruptLibraryError()
+            }
+            return decoded
         }
     }
 

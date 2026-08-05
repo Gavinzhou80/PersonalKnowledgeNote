@@ -5,6 +5,7 @@ import KnowledgeCore
 public actor LocalLibrary {
     private let database: LibraryDatabase
     private let managedArtifacts: ManagedArtifacts
+    private let publicationCoordinator: PublicationCoordinator
 
     private init(
         database: LibraryDatabase,
@@ -12,6 +13,10 @@ public actor LocalLibrary {
     ) {
         self.database = database
         self.managedArtifacts = managedArtifacts
+        publicationCoordinator = PublicationCoordinator(
+            database: database,
+            managedArtifacts: managedArtifacts
+        )
     }
 
     public static func open(at root: URL) async throws -> LocalLibrary {
@@ -88,6 +93,36 @@ public actor LocalLibrary {
         }
     }
 
+    public func sourceDocument(
+        id: SourceDocumentID
+    ) async throws -> LocatedSourceDocument? {
+        try withLocalLibraryErrorTranslation {
+            guard let stored = try database.visibleSourceDocument(id: id)
+            else {
+                return nil
+            }
+            do {
+                let verifiedDescriptor = try managedArtifacts
+                    .verifyFinalArtifact(
+                        documentID: stored.documentID,
+                        descriptor: stored.descriptor,
+                        managedRelativePath: stored.managedRelativePath
+                    )
+                return LocatedSourceDocument(
+                    document: SourceDocument(
+                        content: stored.content,
+                        artifact: verifiedDescriptor
+                    ),
+                    location: stored.location
+                )
+            } catch {
+                throw LocalLibraryError.corruptLibrary(
+                    diagnosticID: UUID()
+                )
+            }
+        }
+    }
+
     package func snapshot(
         taskID: ImportTaskID
     ) throws -> DurableImportSnapshot {
@@ -128,6 +163,20 @@ public actor LocalLibrary {
     ) throws -> DurableImportSnapshot {
         try withLocalLibraryErrorTranslation {
             try database.checkpoint(taskID: taskID, update: update)
+        }
+    }
+
+    package func finish(
+        taskID: ImportTaskID,
+        candidate: PublicationCandidate,
+        expectedRevision: UInt64
+    ) throws -> PublicationOutcome {
+        try withLocalLibraryErrorTranslation {
+            try publicationCoordinator.finish(
+                taskID: taskID,
+                candidate: candidate,
+                expectedRevision: expectedRevision
+            )
         }
     }
 

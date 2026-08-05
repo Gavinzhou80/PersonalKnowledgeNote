@@ -102,6 +102,24 @@ struct PublicationIntentRecord:
     }
 }
 
+struct SourceProvenanceRecord:
+    Codable,
+    FetchableRecord,
+    PersistableRecord
+{
+    static let databaseTableName = "source_provenance"
+
+    var documentID: String
+    var sourceKind: String
+    var sourceValue: String
+
+    private enum CodingKeys: String, CodingKey {
+        case documentID = "document_id"
+        case sourceKind = "source_kind"
+        case sourceValue = "source_value"
+    }
+}
+
 enum SourceColumns {
     static func encode(_ source: OriginalSource) -> (kind: String, value: String) {
         switch source {
@@ -232,6 +250,97 @@ extension ImportTaskRecord {
             return
         }
     }
+
+    func storedOutcome() throws -> PublicationOutcome? {
+        guard let state = ImportTaskState(rawValue: state) else {
+            throw corruptLibrary()
+        }
+        switch (state, outcomeJSON) {
+        case (.completed, let data?):
+            return try DomainJSON.decode(
+                PublicationOutcome.self,
+                from: data
+            )
+        case (.completed, nil), (_, .some):
+            throw corruptLibrary()
+        case (_, nil):
+            return nil
+        }
+    }
+}
+
+extension SourceDocumentRecord {
+    static func hidden(
+        candidate: PublicationCandidate,
+        descriptor: SourceArtifactDescriptor,
+        managedRelativePath: String
+    ) throws -> SourceDocumentRecord {
+        SourceDocumentRecord(
+            documentID: candidate.document.documentID.rawValue.uuidString,
+            fingerprint: candidate.fingerprint.rawValue,
+            location: ExistingDocumentLocation.library.rawValue,
+            visibility: SourceDocumentVisibility.hidden.rawValue,
+            contentJSON: try DomainJSON.encode(candidate.document),
+            artifactDescriptorJSON: try DomainJSON.encode(descriptor),
+            managedRelativePath: managedRelativePath
+        )
+    }
+
+    func decoded() throws -> StoredSourceDocument {
+        guard let rawDocumentID = UUID(uuidString: documentID),
+              let location = ExistingDocumentLocation(rawValue: location),
+              let visibility = SourceDocumentVisibility(rawValue: visibility)
+        else {
+            throw corruptLibrary()
+        }
+        let content = try DomainJSON.decode(
+            SourceDocumentContent.self,
+            from: contentJSON
+        )
+        let descriptor = try DomainJSON.decode(
+            SourceArtifactDescriptor.self,
+            from: artifactDescriptorJSON
+        )
+        let fingerprintData = try DomainJSON.encode(
+            PersistedFingerprint(rawValue: fingerprint)
+        )
+        let decodedFingerprint = try DomainJSON.decode(
+            ContentFingerprint.self,
+            from: fingerprintData
+        )
+        let decodedDocumentID = SourceDocumentID(rawDocumentID)
+        guard content.documentID == decodedDocumentID else {
+            throw corruptLibrary()
+        }
+        return StoredSourceDocument(
+            documentID: decodedDocumentID,
+            fingerprint: decodedFingerprint,
+            location: location,
+            visibility: visibility,
+            content: content,
+            descriptor: descriptor,
+            managedRelativePath: managedRelativePath
+        )
+    }
+}
+
+enum SourceDocumentVisibility: String, Sendable {
+    case hidden
+    case visible
+}
+
+struct StoredSourceDocument: Sendable {
+    let documentID: SourceDocumentID
+    let fingerprint: ContentFingerprint
+    let location: ExistingDocumentLocation
+    let visibility: SourceDocumentVisibility
+    let content: SourceDocumentContent
+    let descriptor: SourceArtifactDescriptor
+    let managedRelativePath: String
+}
+
+private struct PersistedFingerprint: Encodable {
+    let rawValue: String
 }
 
 private func corruptLibrary() -> LocalLibraryError {

@@ -30,6 +30,17 @@ public actor ImportWorkspace {
         try await library.checkpoint(taskID: taskID, update: update)
     }
 
+    public func finish(
+        _ candidate: PublicationCandidate,
+        expectedRevision: UInt64
+    ) async throws -> PublicationOutcome {
+        try await library.finish(
+            taskID: taskID,
+            candidate: candidate,
+            expectedRevision: expectedRevision
+        )
+    }
+
     public func abandon(expectedRevision: UInt64) async throws {
         try await library.abandon(
             taskID: taskID,
