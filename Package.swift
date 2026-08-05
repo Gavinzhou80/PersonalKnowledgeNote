@@ -19,6 +19,15 @@ let package = Package(
             name: "AppSupport",
             dependencies: ["KnowledgeCore", "LocalLibrary"]
         ),
+        .target(
+            name: "TestFixtures",
+            path: "Tests/Fixtures",
+            sources: ["FixtureCatalog.swift"],
+            resources: [
+                .copy("Web"),
+                .copy("PDF"),
+            ]
+        ),
         .testTarget(
             name: "KnowledgeCoreTests",
             dependencies: ["KnowledgeCore"]
@@ -29,7 +38,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AppSupportTests",
-            dependencies: ["AppSupport"]
+            dependencies: ["AppSupport", "TestFixtures"]
         ),
     ],
     swiftLanguageModes: [.v6]
