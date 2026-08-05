@@ -1,0 +1,25 @@
+Tests/DocumentImportTests/DocumentImportIntegrationTests.swift
+  s_413052984bbc8e::t_ab304ca7ffbdc0 26
+  s_413052984bbc8e::t_82b430d5b2a05e 115-149,152
+Sources/DocumentImport/DocumentImport.swift
+  s_413052984bbc8e::t_ba54ed607ed130 43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6714fc20b9695ffcaaea9e5aac81a4d840b75123",
+  "prompts": {},
+  "logical_commit_id": "6714fc20b9695ffcaaea9e5aac81a4d840b75123",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 38,
+      "total_deletions": 21
+    }
+  }
+}
