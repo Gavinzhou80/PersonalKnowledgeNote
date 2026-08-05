@@ -1,6 +1,6 @@
 # T02 Local Library Publication Seam Design
 
-> Status: approved
+> Status: approved; implementation tracked by the T02 Local Library publication seam plan
 > Date: 2026-08-05
 > Ticket: GitHub issue #3 — T02 Define and prove the minimum Local Library publication seam
 > Parent design: Document Import Architecture Design
