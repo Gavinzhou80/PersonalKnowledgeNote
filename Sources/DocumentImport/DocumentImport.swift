@@ -23,6 +23,9 @@ public actor DocumentImport {
     private let library: LocalLibrary
     private let webAcquirer: any WebAcquiring
     private let documentIDGenerator: @Sendable () -> SourceDocumentID
+    private let workspaceSnapshotLoader: @Sendable (
+        ImportWorkspace
+    ) async throws -> DurableImportSnapshot
     private var records: [ImportTaskID: TaskRecord] = [:]
     private var listObservers: [UUID: ListObserver] = [:]
     private var nextSequence: UInt64 = 0
@@ -32,11 +35,17 @@ public actor DocumentImport {
         webAcquirer: any WebAcquiring,
         documentIDGenerator: @escaping @Sendable () -> SourceDocumentID = {
             SourceDocumentID()
+        },
+        workspaceSnapshotLoader: @escaping @Sendable (
+            ImportWorkspace
+        ) async throws -> DurableImportSnapshot = { workspace in
+            try await workspace.snapshot()
         }
     ) {
         self.library = library
         self.webAcquirer = webAcquirer
         self.documentIDGenerator = documentIDGenerator
+        self.workspaceSnapshotLoader = workspaceSnapshotLoader
     }
 
     public nonisolated func observeTasks(
@@ -118,8 +127,9 @@ public actor DocumentImport {
 
         let durable: DurableImportSnapshot
         do {
-            durable = try await workspace.snapshot()
+            durable = try await workspaceSnapshotLoader(workspace)
         } catch {
+            try? await workspace.abandon(expectedRevision: 0)
             throw Self.submissionError(for: error)
         }
 
@@ -232,14 +242,15 @@ public actor DocumentImport {
                 ),
                 expectedRevision: publishing.revision
             )
-            let completed = try await workspace.snapshot()
             let success = Self.success(for: outcome)
+            let completed = try? await workspaceSnapshotLoader(workspace)
             finishTask(
                 taskID: workspace.taskID,
                 snapshot: ImportTaskSnapshot(
                     id: workspace.taskID,
-                    revision: completed.revision,
-                    attempt: completed.attempt,
+                    revision: completed?.revision
+                        ?? Self.monotonicSuccessor(publishing.revision),
+                    attempt: completed?.attempt ?? publishing.attempt,
                     source: .webpage(sourceURL),
                     state: .completed(success)
                 ),
@@ -294,11 +305,14 @@ public actor DocumentImport {
         query: ImportTaskQuery,
         continuation: AsyncStream<[ImportTaskSnapshot]>.Continuation
     ) {
+        let result = continuation.yield(snapshots(matching: query))
+        if case .terminated = result {
+            return
+        }
         listObservers[id] = ListObserver(
             query: query,
             continuation: continuation
         )
-        continuation.yield(snapshots(matching: query))
     }
 
     private func removeListObserver(id: UUID) {
@@ -314,7 +328,10 @@ public actor DocumentImport {
             continuation.finish()
             return
         }
-        continuation.yield(record.snapshot)
+        let result = continuation.yield(record.snapshot)
+        if case .terminated = result {
+            return
+        }
         if record.terminal != nil {
             continuation.finish()
             return
@@ -439,6 +456,14 @@ public actor DocumentImport {
             codecVersion: 1,
             payload: Data("document-import-t03:\(stage)".utf8)
         )
+    }
+
+    private static func monotonicSuccessor(_ revision: UInt64) -> UInt64 {
+        precondition(
+            revision < UInt64.max,
+            "A completed import revision must have a monotonic successor"
+        )
+        return revision + 1
     }
 
     private static func success(

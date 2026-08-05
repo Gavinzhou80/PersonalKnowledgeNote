@@ -1,4 +1,5 @@
 import Foundation
+import LocalLibrary
 import TestFixtures
 @testable import DocumentImport
 
@@ -64,5 +65,38 @@ actor GatedFixtureWebAcquirer: WebAcquiring {
         hasBeenReleased = true
         releaseWaiter?.resume()
         releaseWaiter = nil
+    }
+}
+
+enum FixtureWebAcquisitionError: Error {
+    case unavailable
+}
+
+struct ThrowingWebAcquirer: WebAcquiring {
+    func acquire(_ url: URL) async throws -> AcquiredWebPage {
+        throw FixtureWebAcquisitionError.unavailable
+    }
+}
+
+actor SelectiveWorkspaceSnapshotLoader {
+    enum Failure: Error {
+        case injected
+    }
+
+    private let failingCalls: Set<Int>
+    private var callCount = 0
+
+    init(failingCalls: Set<Int>) {
+        self.failingCalls = failingCalls
+    }
+
+    func load(
+        _ workspace: ImportWorkspace
+    ) async throws -> DurableImportSnapshot {
+        callCount += 1
+        if failingCalls.contains(callCount) {
+            throw Failure.injected
+        }
+        return try await workspace.snapshot()
     }
 }
