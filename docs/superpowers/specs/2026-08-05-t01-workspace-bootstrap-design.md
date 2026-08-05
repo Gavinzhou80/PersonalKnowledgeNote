@@ -30,9 +30,9 @@ App/
 └── ImportCenterView.swift
 Sources/
 ├── KnowledgeCore/
-│   └── KnowledgeCoreBoundary.swift
+│   └── KnowledgeCore.swift
 ├── LocalLibrary/
-│   └── LocalLibraryBoundary.swift
+│   └── LocalLibrary.swift
 └── AppSupport/
     └── ImportCenterPresentation.swift
 Tests/
@@ -53,7 +53,7 @@ Tests/
 README.md
 ```
 
-The boundary types are deliberately small. T01 proves module visibility, dependency direction, fixture loading, and application assembly; it does not introduce Document Import domain behavior early.
+The lower module source files are deliberately empty of domain behavior. T01 proves module visibility, dependency direction, fixture loading, and application assembly through the Package manifest and compiler rather than introducing public marker APIs.
 
 ## Dependency direction
 
