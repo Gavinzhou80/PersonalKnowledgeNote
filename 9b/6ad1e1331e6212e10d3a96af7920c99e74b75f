@@ -1,0 +1,31 @@
+Tests/KnowledgeCoreTests/PublicationModelTests.swift
+  s_413052984bbc8e::t_2eaf2a5a852f04 1-55
+Sources/KnowledgeCore/SourceDocument.swift
+  s_413052984bbc8e::t_2cc5f62ba82bbc 1-95
+Sources/KnowledgeCore/OriginalSource.swift
+  s_413052984bbc8e::t_2cc5f62ba82bbc 1-11
+Sources/KnowledgeCore/ImportTask.swift
+  s_413052984bbc8e::t_2cc5f62ba82bbc 1-19
+Sources/KnowledgeCore/Identifiers.swift
+  s_413052984bbc8e::t_2cc5f62ba82bbc 1-34
+Sources/KnowledgeCore/SourceArtifact.swift
+  s_413052984bbc8e::t_2cc5f62ba82bbc 1-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "9b6ad1e1331e6212e10d3a96af7920c99e74b75f",
+  "prompts": {},
+  "logical_commit_id": "9b6ad1e1331e6212e10d3a96af7920c99e74b75f",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 238
+    }
+  }
+}
