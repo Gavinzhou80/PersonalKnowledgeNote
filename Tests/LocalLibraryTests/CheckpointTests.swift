@@ -79,7 +79,7 @@ func staleRevisionAndCheckpointRegressionAreRejected() async throws {
         _ = try await workspace.checkpoint(
             CheckpointUpdate(
                 expectedRevision: initial.revision,
-                ordinal: 3,
+                ordinal: 2,
                 envelope: envelope
             )
         )
@@ -245,6 +245,200 @@ func reopeningCleansArtifactsFromCommittedAbandon() async throws {
     await #expect(throws: LocalLibraryError.artifactMissing) {
         _ = try await workspace.verifyManagedArtifact(staged.artifact)
     }
+}
+
+@Test
+func abandonedCleanupRejectsArtifactsScopeWithoutDeletingVictim() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let abandoned = try await prepareAbandonedStagedArtifact(at: root)
+    let probe = try LocalLibraryTestDriver.corruptAbandonedCleanupPath(
+        at: libraryRoot,
+        taskID: abandoned.taskID,
+        corruption: .artifactsScope
+    )
+
+    await expectCorruptLibraryWhenOpening(libraryRoot)
+
+    #expect(
+        try LocalLibraryTestDriver.managedArtifactExists(
+            at: libraryRoot,
+            probe: probe
+        )
+    )
+}
+
+@Test
+func abandonedCleanupRejectsAnotherTaskWithoutDeletingVictim() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let abandoned = try await prepareAbandonedStagedArtifact(at: root)
+    let victim = try await stageWebArtifactInReleasedScope(at: root)
+    let probe = try LocalLibraryTestDriver.corruptAbandonedCleanupPath(
+        at: libraryRoot,
+        taskID: abandoned.taskID,
+        corruption: .anotherTask(victim.taskID)
+    )
+
+    await expectCorruptLibraryWhenOpening(libraryRoot)
+
+    #expect(
+        try LocalLibraryTestDriver.managedArtifactExists(
+            at: libraryRoot,
+            probe: probe
+        )
+    )
+}
+
+@Test
+func abandonedCleanupRejectsArtifactIDMismatchWithoutDeletingOwner() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let abandoned = try await prepareAbandonedStagedArtifact(at: root)
+    let probe = try LocalLibraryTestDriver.corruptAbandonedCleanupPath(
+        at: libraryRoot,
+        taskID: abandoned.taskID,
+        corruption: .artifactIDMismatch
+    )
+
+    await expectCorruptLibraryWhenOpening(libraryRoot)
+
+    #expect(
+        try LocalLibraryTestDriver.managedArtifactExists(
+            at: libraryRoot,
+            probe: probe
+        )
+    )
+}
+
+@Test
+func checkpointRejectsPublicationPendingWithoutMutation() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let staged = try await stageWebArtifactInReleasedScope(at: root)
+    try LocalLibraryTestDriver.markPublicationPending(
+        at: libraryRoot,
+        taskID: staged.taskID
+    )
+    let reopened = try await LocalLibrary.open(at: libraryRoot)
+    let workspace = try #require(
+        try await reopened.importWorkspace(id: staged.taskID)
+    )
+    let beforeCheckpoint = try await workspace.snapshot()
+
+    do {
+        _ = try await workspace.checkpoint(
+            CheckpointUpdate(
+                expectedRevision: beforeCheckpoint.revision,
+                ordinal: 1,
+                envelope: CheckpointEnvelope(
+                    codecVersion: 1,
+                    payload: Data("publication-critical".utf8)
+                )
+            )
+        )
+        Issue.record("Expected publicationPending checkpoint rejection")
+    } catch let error as LocalLibraryError {
+        #expect(error == .invalidTaskState)
+    }
+
+    let afterCheckpoint = try await workspace.snapshot()
+    #expect(beforeCheckpoint.state == .publicationPending)
+    #expect(afterCheckpoint.state == .publicationPending)
+    #expect(afterCheckpoint.revision == beforeCheckpoint.revision)
+}
+
+@Test
+func persistedOversizedCheckpointIsCorruptLibrary() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let staged = try await stageWebArtifactInReleasedScope(at: root)
+    try LocalLibraryTestDriver.corruptCheckpointWithOversizedPayload(
+        at: libraryRoot,
+        taskID: staged.taskID
+    )
+    let reopened = try await LocalLibrary.open(at: libraryRoot)
+
+    do {
+        _ = try await reopened.importWorkspace(id: staged.taskID)
+        Issue.record("Expected oversized persisted checkpoint corruption")
+    } catch let error as LocalLibraryError {
+        guard case .corruptLibrary = error else {
+            Issue.record("Expected corruptLibrary, got \(error)")
+            return
+        }
+    }
+}
+
+@Test
+func checkpointOrdinalBeyondSQLiteIntegerRangeIsRejected() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let library = try await LocalLibrary.open(at: root)
+    let workspace = try await library.accept(
+        .webpage(try #require(URL(string: "https://example.com/ordinal-overflow")))
+    )
+    let initial = try await workspace.snapshot()
+
+    do {
+        _ = try await workspace.checkpoint(
+            CheckpointUpdate(
+                expectedRevision: initial.revision,
+                ordinal: UInt64(Int64.max) + 1,
+                envelope: CheckpointEnvelope(
+                    codecVersion: 1,
+                    payload: Data("overflow".utf8)
+                )
+            )
+        )
+        Issue.record("Expected checkpoint ordinal overflow rejection")
+    } catch let error as LocalLibraryError {
+        #expect(error == .invalidTaskState)
+    }
+
+    let unchanged = try await workspace.snapshot()
+    #expect(unchanged.revision == initial.revision)
+    #expect(unchanged.state == initial.state)
+    #expect(unchanged.checkpoint == nil)
+}
+
+@Test
+func persistedNegativeCheckpointOrdinalIsCorruptLibrary() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let staged = try await stageWebArtifactInReleasedScope(at: root)
+    try LocalLibraryTestDriver.corruptCheckpointWithNegativeOrdinal(
+        at: libraryRoot,
+        taskID: staged.taskID
+    )
+
+    await expectCorruptCheckpointWhenOpening(
+        libraryRoot,
+        taskID: staged.taskID
+    )
+}
+
+@Test
+func persistedOversizedCheckpointCodecVersionIsCorruptLibrary() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let staged = try await stageWebArtifactInReleasedScope(at: root)
+    try LocalLibraryTestDriver.corruptCheckpointWithOversizedCodecVersion(
+        at: libraryRoot,
+        taskID: staged.taskID
+    )
+
+    await expectCorruptCheckpointWhenOpening(
+        libraryRoot,
+        taskID: staged.taskID
+    )
 }
 
 private struct CheckpointAcceptance: Sendable {
@@ -426,4 +620,50 @@ private func stageWebArtifactInReleasedScope(
         revision: staged.revision,
         artifact: artifact
     )
+}
+
+private func prepareAbandonedStagedArtifact(
+    at root: URL
+) async throws -> StagedAcceptance {
+    let staged = try await stageWebArtifactInReleasedScope(at: root)
+    let database = try LibraryDatabase(
+        url: root.appending(path: "Library/library.sqlite")
+    )
+    _ = try database.abandon(
+        taskID: staged.taskID,
+        expectedRevision: staged.revision
+    )
+    return staged
+}
+
+private func expectCorruptLibraryWhenOpening(_ root: URL) async {
+    do {
+        _ = try await LocalLibrary.open(at: root)
+        Issue.record("Expected corrupt persisted cleanup ownership")
+    } catch let error as LocalLibraryError {
+        guard case .corruptLibrary = error else {
+            Issue.record("Expected corruptLibrary, got \(error)")
+            return
+        }
+    } catch {
+        Issue.record("Expected LocalLibraryError, got \(error)")
+    }
+}
+
+private func expectCorruptCheckpointWhenOpening(
+    _ root: URL,
+    taskID: ImportTaskID
+) async {
+    do {
+        let reopened = try await LocalLibrary.open(at: root)
+        _ = try await reopened.importWorkspace(id: taskID)
+        Issue.record("Expected corrupt persisted checkpoint")
+    } catch let error as LocalLibraryError {
+        guard case .corruptLibrary = error else {
+            Issue.record("Expected corruptLibrary, got \(error)")
+            return
+        }
+    } catch {
+        Issue.record("Expected LocalLibraryError, got \(error)")
+    }
 }

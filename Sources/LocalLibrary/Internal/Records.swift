@@ -183,7 +183,8 @@ extension ImportTaskRecord {
             return nil
         case (let ordinal?, let version?, let payload?):
             guard UInt64(exactly: ordinal) != nil,
-                  let codecVersion = UInt16(exactly: version)
+                  let codecVersion = UInt16(exactly: version),
+                  payload.count <= 1_048_576
             else {
                 throw corruptLibrary()
             }

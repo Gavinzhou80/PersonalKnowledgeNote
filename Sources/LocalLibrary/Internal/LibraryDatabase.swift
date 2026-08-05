@@ -110,7 +110,10 @@ final class LibraryDatabase: Sendable {
             guard let state = ImportTaskState(rawValue: task.state) else {
                 throw corruptLibraryError()
             }
-            guard state != .completed, state != .abandoned else {
+            guard state != .completed,
+                  state != .abandoned,
+                  state != .publicationPending
+            else {
                 throw LocalLibraryError.invalidTaskState
             }
             guard update.envelope.payload.count <= 1_048_576 else {
@@ -150,7 +153,7 @@ final class LibraryDatabase: Sendable {
     func abandon(
         taskID: ImportTaskID,
         expectedRevision: UInt64
-    ) throws -> String? {
+    ) throws -> AbandonedStagedArtifactCleanup? {
         try queue.write { db in
             guard var task = try ImportTaskRecord.fetchOne(
                 db,
@@ -167,7 +170,10 @@ final class LibraryDatabase: Sendable {
             }
 
             if state == .abandoned {
-                return stagedArtifact?.relativePath
+                return try abandonedCleanup(
+                    task: task,
+                    stagedArtifact: stagedArtifact
+                )
             }
             guard currentRevision == expectedRevision else {
                 throw LocalLibraryError.staleRevision(
@@ -184,7 +190,10 @@ final class LibraryDatabase: Sendable {
             task.state = ImportTaskState.abandoned.rawValue
             task.revision += 1
             try task.update(db)
-            return stagedArtifact?.relativePath
+            return try abandonedCleanup(
+                task: task,
+                stagedArtifact: stagedArtifact
+            )
         }
     }
 
@@ -235,7 +244,9 @@ final class LibraryDatabase: Sendable {
         }
     }
 
-    func abandonedStagedArtifactRelativePaths() throws -> [String] {
+    func abandonedStagedArtifactCleanups() throws
+        -> [AbandonedStagedArtifactCleanup]
+    {
         try queue.read { db in
             let tasks = try ImportTaskRecord
                 .filter(
@@ -247,7 +258,10 @@ final class LibraryDatabase: Sendable {
             return try tasks.compactMap { task in
                 let stagedArtifact = try stagedArtifact(for: task, in: db)
                 _ = try task.snapshot(stagedArtifact: stagedArtifact)
-                return stagedArtifact?.relativePath
+                return try abandonedCleanup(
+                    task: task,
+                    stagedArtifact: stagedArtifact
+                )
             }
         }
     }
@@ -308,6 +322,25 @@ final class LibraryDatabase: Sendable {
                 placement.artifact.descriptor
             ),
             relativePath: placement.relativePath
+        )
+    }
+
+    private func abandonedCleanup(
+        task: ImportTaskRecord,
+        stagedArtifact: StagedArtifactRecord?
+    ) throws -> AbandonedStagedArtifactCleanup? {
+        guard let stagedArtifact else {
+            return nil
+        }
+        guard let taskUUID = UUID(uuidString: task.taskID),
+              let artifactUUID = UUID(uuidString: stagedArtifact.artifactID)
+        else {
+            throw corruptLibraryError()
+        }
+        return AbandonedStagedArtifactCleanup(
+            taskID: ImportTaskID(taskUUID),
+            artifactID: artifactUUID,
+            payloadRelativePath: stagedArtifact.relativePath + "/payload"
         )
     }
 }

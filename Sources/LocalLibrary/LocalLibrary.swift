@@ -24,10 +24,9 @@ public actor LocalLibrary {
                 url: root.appending(path: "library.sqlite")
             )
             let managedArtifacts = try ManagedArtifacts(root: root)
-            for relativePath in try database
-                .abandonedStagedArtifactRelativePaths()
+            for cleanup in try database.abandonedStagedArtifactCleanups()
             {
-                try? managedArtifacts.remove(relativePath: relativePath)
+                try managedArtifacts.removeAbandonedStagedArtifact(cleanup)
             }
             return LocalLibrary(
                 database: database,
@@ -136,14 +135,16 @@ public actor LocalLibrary {
         taskID: ImportTaskID,
         expectedRevision: UInt64
     ) throws {
-        let relativePath = try withLocalLibraryErrorTranslation {
+        let cleanup = try withLocalLibraryErrorTranslation {
             try database.abandon(
                 taskID: taskID,
                 expectedRevision: expectedRevision
             )
         }
-        if let relativePath {
-            try? managedArtifacts.remove(relativePath: relativePath)
+        if let cleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeAbandonedStagedArtifact(cleanup)
+            }
         }
     }
 

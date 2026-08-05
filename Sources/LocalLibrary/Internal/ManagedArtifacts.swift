@@ -7,6 +7,12 @@ struct StagedArtifactPlacement: Sendable {
     let relativePath: String
 }
 
+struct AbandonedStagedArtifactCleanup: Sendable {
+    let taskID: ImportTaskID
+    let artifactID: UUID
+    let payloadRelativePath: String
+}
+
 struct ManagedArtifacts {
     private enum Scope: String {
         case staging = "Staging"
@@ -204,6 +210,46 @@ struct ManagedArtifacts {
         let parent = managedURL.deletingLastPathComponent()
         try FileManager.default.removeItem(at: managedURL)
         try ManagedArtifactPayload.synchronizeDirectory(parent)
+    }
+
+    func removeAbandonedStagedArtifact(
+        _ cleanup: AbandonedStagedArtifactCleanup
+    ) throws {
+        let components = cleanup.payloadRelativePath
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard components == [
+            Scope.staging.rawValue,
+            cleanup.taskID.rawValue.uuidString,
+            cleanup.artifactID.uuidString,
+            "payload",
+        ] else {
+            throw corruptManagedArtifactOwnership()
+        }
+
+        let containerRelativePath = components
+            .dropLast()
+            .joined(separator: "/")
+        let container: URL
+        do {
+            container = try resolve(
+                relativePath: containerRelativePath,
+                expectedScope: .staging
+            )
+        } catch LocalLibraryError.artifactMissing {
+            throw corruptManagedArtifactOwnership()
+        }
+
+        guard FileManager.default.fileExists(atPath: container.path) else {
+            return
+        }
+        let parent = container.deletingLastPathComponent()
+        do {
+            try FileManager.default.removeItem(at: container)
+            try ManagedArtifactPayload.synchronizeDirectory(parent)
+        } catch {
+            return
+        }
     }
 
     func verify(
@@ -457,4 +503,8 @@ struct ManagedArtifacts {
         return candidateComponents.prefix(parentComponents.count)
             .elementsEqual(parentComponents)
     }
+}
+
+private func corruptManagedArtifactOwnership() -> LocalLibraryError {
+    LocalLibraryError.corruptLibrary(diagnosticID: UUID())
 }
