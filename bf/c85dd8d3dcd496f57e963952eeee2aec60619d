@@ -1,0 +1,50 @@
+Sources/LocalLibrary/ImportWorkspace.swift
+  s_413052984bbc8e::t_b2c75f7563bc78 33-39
+  s_413052984bbc8e::t_7cff020f672de0 27-32
+Sources/LocalLibrary/Internal/LibraryDatabase.swift
+  s_413052984bbc8e::t_7cff020f672de0 91-109,128-149
+  s_413052984bbc8e::t_443ce7e1806f61 119-127
+  s_413052984bbc8e::t_1a09f25975ac12 238-250,254
+  s_413052984bbc8e::t_477ec11934a3fb 116-118
+  s_413052984bbc8e::t_65d8d6f4c8096f 110-115
+  s_413052984bbc8e::t_b2c75f7563bc78 150-171,177-190,234-236
+  s_413052984bbc8e::t_c1721d74086c28 172-176
+  s_413052984bbc8e::t_1eccd9265e1667 237
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_b2c75f7563bc78 123,135-144,149
+  s_413052984bbc8e::t_1a09f25975ac12 27-31
+  s_413052984bbc8e::t_21cf0fcb7de965 145-146
+  s_413052984bbc8e::t_7cff020f672de0 124,126-134
+  s_413052984bbc8e::t_8463ee1d1ced15 125
+Tests/LocalLibraryTests/CheckpointTests.swift
+  s_413052984bbc8e::t_2a7ee602d2b925 245
+  s_413052984bbc8e::t_a324b88117a562 1-2,4-29,42-43,250,256-257,264-286,305-306,343,429
+  s_413052984bbc8e::t_8fc16bd88f8c58 92-131
+  s_413052984bbc8e::t_126bbafaf29938 132-155,251-255,287-304
+  s_413052984bbc8e::t_1643e5a8dadf13 44-91
+  s_413052984bbc8e::t_a233cc22461f15 3,213-218,307-342,344-388
+  s_413052984bbc8e::t_c96c95a7467408 219-224,226-232,236-244,246-249,258-263,389-402,406-428
+  s_413052984bbc8e::t_570264778579fb 156-183
+  s_413052984bbc8e::t_8169854bef306b 30-41
+  s_413052984bbc8e::t_51c7a5478ebf3d 184-212
+  s_413052984bbc8e::t_77abaa57553cfc 225,233-235,403-405
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "bfc85dd8d3dcd496f57e963952eeee2aec60619d",
+  "prompts": {},
+  "logical_commit_id": "bfc85dd8d3dcd496f57e963952eeee2aec60619d",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 601,
+      "total_deletions": 13
+    }
+  }
+}
