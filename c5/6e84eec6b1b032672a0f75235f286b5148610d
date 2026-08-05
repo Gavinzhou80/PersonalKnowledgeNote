@@ -1,0 +1,46 @@
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_d22045d1300b26 54-57,112-115,132-139
+  s_413052984bbc8e::t_bdc5b04d867b8f 118-130
+Sources/LocalLibrary/Internal/LibraryDatabase.swift
+  s_413052984bbc8e::t_bdc5b04d867b8f 138-173
+Sources/LocalLibrary/Internal/ManagedArtifacts.swift
+  s_413052984bbc8e::t_892a94a30e2ccb 60,129-130,138-139,158,187,239,247-249
+  s_413052984bbc8e::t_7e498a6d516947 4
+  s_413052984bbc8e::t_bdc5b04d867b8f 161-171,175-186,188-200,202
+  s_413052984bbc8e::t_d22045d1300b26 172-174
+  s_413052984bbc8e::t_e0dbe83de41101 10-14,19-23,26-40,43-59,103-104,108-118,120-127,131,133,137,142-144,148,151-153,155-157,159,211-214,216-220,222,225-229,234,238,246,269-274,293-296,298-299,301-308,310-319,321-326,329-332,337-342,344-346,348,351-354,357-364,366-367
+  s_413052984bbc8e::t_0e227b125ec191 365
+  s_413052984bbc8e::t_1be73368c9e0fc 160
+Tests/LocalLibraryTests/ArtifactStagingTests.swift
+  s_413052984bbc8e::t_89ef9759fece36 1,125-181
+  s_413052984bbc8e::t_285fa45601942a 199,220-225,227-229,234-236,327-328,433
+  s_413052984bbc8e::t_88e688689c30d1 267-326,552
+  s_413052984bbc8e::t_3d1e00a6808fd4 27-29,34,69-72,74,329-432,434-551
+  s_413052984bbc8e::t_faffd4827b3ea7 183-198,200-219,226,230-233,237-266
+  s_413052984bbc8e::t_f427ecd69b75bb 2,19,32-33,47-48,75-81,85,664-687
+  s_413052984bbc8e::t_e3a2f1e9b65588 86-124,182
+  s_413052984bbc8e::t_7cc0bd0d0b05c1 553-663
+Sources/LocalLibrary/ImportWorkspace.swift
+  s_413052984bbc8e::t_bdc5b04d867b8f 26-34
+Sources/LocalLibrary/Internal/ManagedArtifactPayload.swift
+  s_413052984bbc8e::t_892a94a30e2ccb 1-173
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c56e84eec6b1b032672a0f75235f286b5148610d",
+  "prompts": {},
+  "logical_commit_id": "c56e84eec6b1b032672a0f75235f286b5148610d",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 1231,
+      "total_deletions": 288
+    }
+  }
+}
