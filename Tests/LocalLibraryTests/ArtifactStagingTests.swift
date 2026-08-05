@@ -401,13 +401,7 @@ func staleRevisionIsPreservedAndCopiedOrphanIsRemoved() async throws {
         #expect(error == .staleRevision(current: 0))
     }
 
-    let taskDirectory = libraryRoot.appending(
-        path: "Staging/\(workspace.taskID.rawValue.uuidString)"
-    )
-    let remainingEntries = try FileManager.default.fileExists(
-        atPath: taskDirectory.path
-    ) ? FileManager.default.contentsOfDirectory(atPath: taskDirectory.path) : []
-    #expect(remainingEntries.isEmpty)
+    #expect(try await workspace.stagedArtifactCount() == 0)
 }
 
 @Test
@@ -457,14 +451,7 @@ func repeatedStagingKeepsFirstOwnedArtifact() async throws {
 
     let snapshot = try await workspace.snapshot()
     #expect(snapshot.stagedArtifact == first)
-    let taskDirectory = libraryRoot.appending(
-        path: "Staging/\(workspace.taskID.rawValue.uuidString)"
-    )
-    #expect(
-        try FileManager.default.contentsOfDirectory(
-            atPath: taskDirectory.path
-        ).count == 1
-    )
+    #expect(try await workspace.stagedArtifactCount() == 1)
 }
 
 @Test
@@ -661,6 +648,121 @@ func completedFinalMoveIsIdempotent() throws {
     )
 
     #expect(try managedArtifacts.exists(relativePath: finalRelativePath))
+}
+
+@Test
+func managedScopeRootSymlinkIsRejected() throws {
+    let temporaryRoot = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(temporaryRoot) }
+    let libraryRoot = temporaryRoot.appending(path: "Library")
+    let artifactsRoot = libraryRoot.appending(path: "Artifacts")
+    try FileManager.default.createDirectory(
+        at: artifactsRoot,
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.createSymbolicLink(
+        at: libraryRoot.appending(path: "Staging"),
+        withDestinationURL: artifactsRoot
+    )
+
+    #expect(throws: LocalLibraryError.artifactMissing) {
+        _ = try ManagedArtifacts(root: libraryRoot)
+    }
+}
+
+@Test
+func crossTaskSymlinkCannotRedirectManagedOperations() throws {
+    let temporaryRoot = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(temporaryRoot) }
+    let libraryRoot = temporaryRoot.appending(path: "Library")
+    let package = temporaryRoot.appending(path: "Package")
+    try FileManager.default.createDirectory(
+        at: package,
+        withIntermediateDirectories: true
+    )
+    try Data("owned".utf8).write(to: package.appending(path: "index.html"))
+    let managedArtifacts = try ManagedArtifacts(root: libraryRoot)
+    let descriptor = SourceArtifactDescriptor(
+        kind: .webPackage,
+        byteCount: 1,
+        contentHash: "unverified"
+    )
+
+    func makeAlias() throws -> (
+        original: StagedArtifactPlacement,
+        alias: StagedArtifactPlacement
+    ) {
+        let ownerTaskID = ImportTaskID()
+        let aliasTaskID = ImportTaskID()
+        let original = try managedArtifacts.stage(
+            .package(package, descriptor: descriptor),
+            for: ownerTaskID
+        )
+        try FileManager.default.createSymbolicLink(
+            at: libraryRoot.appending(
+                path: "Staging/\(aliasTaskID.rawValue.uuidString)"
+            ),
+            withDestinationURL: libraryRoot.appending(
+                path: "Staging/\(ownerTaskID.rawValue.uuidString)"
+            )
+        )
+        return (
+            original,
+            StagedArtifactPlacement(
+                artifact: original.artifact,
+                relativePath: "Staging/\(aliasTaskID.rawValue.uuidString)/\(original.artifact.rawValue.uuidString)"
+            )
+        )
+    }
+
+    let existsCase = try makeAlias()
+    #expect(throws: LocalLibraryError.artifactMissing) {
+        _ = try managedArtifacts.exists(
+            relativePath: existsCase.alias.relativePath
+        )
+    }
+    #expect(
+        try managedArtifacts.exists(
+            relativePath: existsCase.original.relativePath
+        )
+    )
+
+    let verifyCase = try makeAlias()
+    #expect(throws: LocalLibraryError.artifactMissing) {
+        _ = try managedArtifacts.verify(verifyCase.alias)
+    }
+    #expect(
+        try managedArtifacts.exists(
+            relativePath: verifyCase.original.relativePath
+        )
+    )
+
+    let removeCase = try makeAlias()
+    #expect(throws: LocalLibraryError.artifactMissing) {
+        try managedArtifacts.remove(
+            relativePath: removeCase.alias.relativePath
+        )
+    }
+    #expect(
+        try managedArtifacts.exists(
+            relativePath: removeCase.original.relativePath
+        )
+    )
+
+    let moveCase = try makeAlias()
+    #expect(throws: LocalLibraryError.artifactMissing) {
+        try managedArtifacts.moveToFinal(
+            stagedRelativePath: moveCase.alias.relativePath,
+            finalRelativePath: managedArtifacts.finalRelativePath(
+                documentID: SourceDocumentID()
+            )
+        )
+    }
+    #expect(
+        try managedArtifacts.exists(
+            relativePath: moveCase.original.relativePath
+        )
+    )
 }
 
 private func sha256Hex(_ data: Data) -> String {

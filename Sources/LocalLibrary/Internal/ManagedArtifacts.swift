@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import KnowledgeCore
 
@@ -40,11 +41,20 @@ struct ManagedArtifacts {
             at: requestedArtifactsRoot,
             withIntermediateDirectories: true
         )
+        guard try !Self.isSymbolicLink(requestedStagingRoot),
+              try !Self.isSymbolicLink(requestedArtifactsRoot)
+        else {
+            throw LocalLibraryError.artifactMissing
+        }
         let resolvedStagingRoot = requestedStagingRoot
             .resolvingSymlinksInPath()
         let resolvedArtifactsRoot = requestedArtifactsRoot
             .resolvingSymlinksInPath()
-        guard Self.isStrictDescendant(
+        guard resolvedStagingRoot == requestedStagingRoot.standardizedFileURL,
+              resolvedArtifactsRoot
+                == requestedArtifactsRoot.standardizedFileURL,
+              resolvedStagingRoot != resolvedArtifactsRoot,
+              Self.isStrictDescendant(
             resolvedStagingRoot,
             of: resolvedRoot
         ), Self.isStrictDescendant(
@@ -142,6 +152,44 @@ struct ManagedArtifacts {
     func exists(relativePath: String) throws -> Bool {
         let managedURL = try resolve(relativePath: relativePath)
         return FileManager.default.fileExists(atPath: managedURL.path)
+    }
+
+    func stagedArtifactCount(for taskID: ImportTaskID) throws -> Int {
+        let taskComponent = taskID.rawValue.uuidString
+        try rejectSymbolicLinks(
+            from: stagingRoot,
+            components: [taskComponent]
+        )
+        let taskDirectory = stagingRoot
+            .appending(path: taskComponent)
+            .standardizedFileURL
+        guard taskDirectory.resolvingSymlinksInPath() == taskDirectory else {
+            throw LocalLibraryError.artifactMissing
+        }
+        guard FileManager.default.fileExists(atPath: taskDirectory.path) else {
+            return 0
+        }
+
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: taskDirectory,
+            includingPropertiesForKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+            ]
+        )
+        for entry in entries {
+            guard UUID(uuidString: entry.lastPathComponent) != nil,
+                  try !Self.isSymbolicLink(entry),
+                  entry.resolvingSymlinksInPath()
+                    == entry.standardizedFileURL,
+                  try entry.resourceValues(
+                    forKeys: [.isDirectoryKey]
+                  ).isDirectory == true
+            else {
+                throw LocalLibraryError.artifactMissing
+            }
+        }
+        return entries.count
     }
 
     func remove(_ placement: StagedArtifactPlacement) throws {
@@ -335,6 +383,10 @@ struct ManagedArtifacts {
         }
 
         let scopeRoot = scope == .staging ? stagingRoot : artifactsRoot
+        try rejectSymbolicLinks(
+            from: scopeRoot,
+            components: Array(components.dropFirst())
+        )
         let standardized = components.dropFirst().reduce(scopeRoot) {
             $0.appending(path: $1)
         }.standardizedFileURL
@@ -342,10 +394,49 @@ struct ManagedArtifacts {
             throw LocalLibraryError.artifactMissing
         }
         let resolved = standardized.resolvingSymlinksInPath()
-        guard Self.isStrictDescendant(resolved, of: scopeRoot) else {
+        guard resolved == standardized,
+              Self.isStrictDescendant(resolved, of: scopeRoot)
+        else {
             throw LocalLibraryError.artifactMissing
         }
+        try rejectSymbolicLinks(from: scopeRoot, components: [])
+        let payload = resolved.appending(path: "payload")
+        if FileManager.default.fileExists(atPath: resolved.path) {
+            guard try !Self.isSymbolicLink(payload),
+                  payload.resolvingSymlinksInPath()
+                    == payload.standardizedFileURL
+            else {
+                throw LocalLibraryError.artifactMissing
+            }
+        }
         return resolved
+    }
+
+    private func rejectSymbolicLinks(
+        from scopeRoot: URL,
+        components: [String]
+    ) throws {
+        var current = scopeRoot
+        guard try !Self.isSymbolicLink(current) else {
+            throw LocalLibraryError.artifactMissing
+        }
+        for component in components {
+            current.append(path: component)
+            guard try !Self.isSymbolicLink(current) else {
+                throw LocalLibraryError.artifactMissing
+            }
+        }
+    }
+
+    private static func isSymbolicLink(_ url: URL) throws -> Bool {
+        var information = stat()
+        guard lstat(url.path, &information) == 0 else {
+            if errno == ENOENT {
+                return false
+            }
+            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+        }
+        return information.st_mode & S_IFMT == S_IFLNK
     }
 
     private static func pathsOverlap(_ first: URL, _ second: URL) -> Bool {

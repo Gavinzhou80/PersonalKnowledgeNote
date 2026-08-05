@@ -32,4 +32,8 @@ public actor ImportWorkspace {
             taskID: taskID
         )
     }
+
+    package func stagedArtifactCount() async throws -> Int {
+        try await library.stagedArtifactCount(taskID: taskID)
+    }
 }

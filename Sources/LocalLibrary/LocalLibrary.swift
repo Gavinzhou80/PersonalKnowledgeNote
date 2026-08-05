@@ -131,6 +131,14 @@ public actor LocalLibrary {
         }
     }
 
+    package func stagedArtifactCount(
+        taskID: ImportTaskID
+    ) throws -> Int {
+        try withLocalLibraryErrorTranslation {
+            try managedArtifacts.stagedArtifactCount(for: taskID)
+        }
+    }
+
     private func rethrow(
         _ primaryError: Error,
         afterBestEffortRemovalOf placement: StagedArtifactPlacement
