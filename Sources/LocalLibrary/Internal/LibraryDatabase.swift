@@ -2,7 +2,7 @@ import Foundation
 import GRDB
 import KnowledgeCore
 
-final class LibraryDatabase: @unchecked Sendable {
+final class LibraryDatabase: Sendable {
     private let queue: DatabaseQueue
 
     init(url: URL) throws {

@@ -12,6 +12,10 @@ func makeTemporaryLibraryRoot() throws -> URL {
     return root
 }
 
+func removeTemporaryLibraryRoot(_ root: URL) {
+    try? FileManager.default.removeItem(at: root)
+}
+
 func makeFixtureContent() -> SourceDocumentContent {
     let block = SourceBlock(
         id: SourceBlockID(),
