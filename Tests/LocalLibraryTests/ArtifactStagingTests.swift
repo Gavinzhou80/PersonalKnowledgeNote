@@ -284,6 +284,61 @@ func finalArtifactPathUsesDocumentIdentity() throws {
 }
 
 @Test
+func managedArtifactPathRoundTripsCanonicalStrongIdentities() throws {
+    let taskID = ImportTaskID()
+    let artifactID = UUID()
+    let documentID = SourceDocumentID()
+    let staging = ManagedArtifactPath.staging(
+        taskID: taskID,
+        artifactID: artifactID
+    )
+    let final = ManagedArtifactPath.artifacts(documentID: documentID)
+
+    #expect(
+        staging.relativePath
+            == "Staging/\(taskID.rawValue.uuidString)/\(artifactID.uuidString)"
+    )
+    #expect(
+        final.relativePath
+            == "Artifacts/\(documentID.rawValue.uuidString)"
+    )
+    #expect(try ManagedArtifactPath.parse(staging.relativePath) == staging)
+    #expect(try ManagedArtifactPath.parse(final.relativePath) == final)
+}
+
+@Test
+func managedArtifactPathStrictlyRejectsNoncanonicalRawStrings() {
+    let taskID = ImportTaskID().rawValue.uuidString
+    let artifactID = UUID().uuidString
+    let documentID = SourceDocumentID().rawValue.uuidString
+    let malformed = [
+        "",
+        "/Staging/\(taskID)/\(artifactID)",
+        "Staging/./\(artifactID)",
+        "Staging/\(taskID)//\(artifactID)",
+        "Staging/\(taskID)/\(artifactID)/payload",
+        "Staging/\(taskID.lowercased())/\(artifactID)",
+        "Artifacts/\(documentID.lowercased())",
+        "Artifacts/\(documentID)/payload",
+        "Unknown/\(documentID)",
+    ]
+
+    for raw in malformed {
+        do {
+            _ = try ManagedArtifactPath.parse(raw)
+            Issue.record("Expected noncanonical path rejection: \(raw)")
+        } catch let error as LocalLibraryError {
+            guard case .corruptLibrary = error else {
+                Issue.record("Expected corruptLibrary, got \(error)")
+                continue
+            }
+        } catch {
+            Issue.record("Expected LocalLibraryError, got \(error)")
+        }
+    }
+}
+
+@Test
 func finalMoveDoesNotDeleteStagingWhenDestinationExists() throws {
     let temporaryRoot = try makeTemporaryLibraryRoot()
     defer { removeTemporaryLibraryRoot(temporaryRoot) }
@@ -716,7 +771,7 @@ func crossTaskSymlinkCannotRedirectManagedOperations() throws {
         )
         return (
             original,
-            StagedArtifactPlacement(
+            try StagedArtifactPlacement(
                 artifact: original.artifact,
                 relativePath: "Staging/\(aliasTaskID.rawValue.uuidString)/\(original.artifact.rawValue.uuidString)"
             ),

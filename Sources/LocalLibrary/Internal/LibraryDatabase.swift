@@ -371,11 +371,12 @@ final class LibraryDatabase: Sendable {
         )
     }
 
-    func ownedStagingPaths() throws -> Set<String> {
+    func ownedStagingPaths() throws -> Set<ManagedArtifactPath> {
         try queue.read { db in
             let tasks = try ImportTaskRecord.fetchAll(db)
             let bundles = try publicationStateBundles(for: tasks, in: db)
-            let paths = try bundles.compactMap { bundle -> String? in
+            let paths = try bundles.compactMap {
+                bundle -> ManagedArtifactPath? in
                 guard let staged = bundle.stagedArtifact,
                       let taskID = UUID(uuidString: bundle.task.taskID),
                       let artifactID = UUID(uuidString: staged.artifactID)
@@ -385,9 +386,13 @@ final class LibraryDatabase: Sendable {
                     }
                     throw corruptLibraryError()
                 }
-                let expected =
-                    "Staging/\(taskID.uuidString)/\(artifactID.uuidString)"
-                guard staged.relativePath == expected else {
+                let expected = ManagedArtifactPath.staging(
+                    taskID: ImportTaskID(taskID),
+                    artifactID: artifactID
+                )
+                guard try ManagedArtifactPath.parse(
+                    staged.relativePath
+                ) == expected else {
                     throw corruptLibraryError()
                 }
                 return expected
@@ -429,7 +434,7 @@ final class LibraryDatabase: Sendable {
             guard storedArtifact == artifact else {
                 throw LocalLibraryError.artifactOwnershipViolation
             }
-            return StagedArtifactPlacement(
+            return try StagedArtifactPlacement(
                 artifact: storedArtifact,
                 relativePath: record.relativePath
             )
@@ -513,14 +518,15 @@ final class LibraryDatabase: Sendable {
             }
 
             let documentID = candidate.document.documentID
-            let finalRelativePath =
-                "Artifacts/\(documentID.rawValue.uuidString)"
+            let finalPath = ManagedArtifactPath.artifacts(
+                documentID: documentID
+            )
             let intent = try PublicationIntent(
                 taskID: ImportTaskID(persistedTaskID),
                 documentID: documentID,
                 artifact: placement.artifact,
-                stagedRelativePath: stagedRecord.relativePath,
-                finalRelativePath: finalRelativePath
+                stagedPath: placement.path,
+                finalPath: finalPath
             )
 
             if let duplicate = try SourceDocumentRecord
@@ -547,13 +553,13 @@ final class LibraryDatabase: Sendable {
             try SourceDocumentRecord.hidden(
                 candidate: candidate,
                 descriptor: storedDescriptor,
-                managedRelativePath: finalRelativePath
+                managedRelativePath: finalPath.relativePath
             ).insert(db)
             try PublicationIntentRecord(
                 taskID: task.taskID,
                 documentID: documentID.rawValue.uuidString,
                 stagedArtifactID: stagedRecord.artifactID,
-                finalRelativePath: finalRelativePath
+                finalRelativePath: finalPath.relativePath
             ).insert(db)
             task.state = ImportTaskState.publicationPending.rawValue
             task.revision += 1
@@ -880,7 +886,7 @@ final class LibraryDatabase: Sendable {
         else {
             throw LocalLibraryError.artifactOwnershipViolation
         }
-        return StagedArtifactPlacement(
+        return try StagedArtifactPlacement(
             artifact: StagedArtifact(
                 rawValue: persistedArtifactID,
                 descriptor: storedDescriptor
@@ -1089,11 +1095,16 @@ final class LibraryDatabase: Sendable {
         else {
             throw corruptLibraryError()
         }
-        return AbandonedStagedArtifactCleanup(
+        let expectedPath = ManagedArtifactPath.staging(
             taskID: ImportTaskID(taskUUID),
-            artifactID: artifactUUID,
-            payloadRelativePath: stagedArtifact.relativePath + "/payload"
+            artifactID: artifactUUID
         )
+        guard try ManagedArtifactPath.parse(
+            stagedArtifact.relativePath
+        ) == expectedPath else {
+            throw corruptLibraryError()
+        }
+        return AbandonedStagedArtifactCleanup(path: expectedPath)
     }
 }
 

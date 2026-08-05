@@ -30,7 +30,7 @@ enum LocalLibraryTestDriver {
     }
 
     struct ManagedArtifactProbe: Sendable {
-        fileprivate let relativePath: String
+        fileprivate let path: ManagedArtifactPath
     }
 
     static func corruptAbandonedCleanupPath(
@@ -51,16 +51,19 @@ enum LocalLibraryTestDriver {
                 throw LocalLibraryError.unavailable
             }
 
-            let corruptedPath: String
-            let probePath: String
+            guard let taskUUID = UUID(uuidString: task.taskID),
+                  let artifactUUID = UUID(uuidString: target.artifactID)
+            else {
+                throw LocalLibraryError.unavailable
+            }
+            let corruptedPath: ManagedArtifactPath
+            let probePath: ManagedArtifactPath
             switch corruption {
             case .artifactsScope:
-                guard let taskUUID = UUID(uuidString: task.taskID),
-                      let artifactUUID = UUID(uuidString: target.artifactID)
-                else {
-                    throw LocalLibraryError.unavailable
-                }
                 let managedArtifacts = try ManagedArtifacts(root: root)
+                let finalPath = ManagedArtifactPath.artifacts(
+                    documentID: SourceDocumentID(artifactUUID)
+                )
                 let intent = try PublicationIntent(
                     taskID: ImportTaskID(taskUUID),
                     documentID: SourceDocumentID(artifactUUID),
@@ -71,11 +74,12 @@ enum LocalLibraryTestDriver {
                             from: target.descriptorJSON
                         )
                     ),
-                    stagedRelativePath: target.relativePath,
-                    finalRelativePath: "Artifacts/\(target.artifactID)"
+                    stagedPath: ManagedArtifactPath.parse(
+                        target.relativePath
+                    ),
+                    finalPath: finalPath
                 )
                 _ = try managedArtifacts.moveToFinal(intent)
-                let finalPath = intent.finalRelativePath
                 corruptedPath = finalPath
                 probePath = finalPath
             case .anotherTask(let otherTaskID):
@@ -88,11 +92,19 @@ enum LocalLibraryTestDriver {
                 else {
                     throw LocalLibraryError.unavailable
                 }
-                corruptedPath = other.relativePath
-                probePath = other.relativePath
+                let otherPath = try ManagedArtifactPath.parse(
+                    other.relativePath
+                )
+                corruptedPath = otherPath
+                probePath = otherPath
             case .artifactIDMismatch:
-                corruptedPath = "Staging/\(task.taskID)/\(UUID().uuidString)"
-                probePath = target.relativePath
+                corruptedPath = .staging(
+                    taskID: ImportTaskID(taskUUID),
+                    artifactID: UUID()
+                )
+                probePath = try ManagedArtifactPath.parse(
+                    target.relativePath
+                )
             }
 
             try db.execute(
@@ -101,9 +113,9 @@ enum LocalLibraryTestDriver {
                     SET relative_path = ?
                     WHERE task_id = ?
                     """,
-                arguments: [corruptedPath, task.taskID]
+                arguments: [corruptedPath.relativePath, task.taskID]
             )
-            return ManagedArtifactProbe(relativePath: probePath)
+            return ManagedArtifactProbe(path: probePath)
         }
     }
 
@@ -111,9 +123,7 @@ enum LocalLibraryTestDriver {
         at root: URL,
         probe: ManagedArtifactProbe
     ) throws -> Bool {
-        try ManagedArtifacts(root: root).exists(
-            relativePath: probe.relativePath
-        )
+        try ManagedArtifacts(root: root).exists(probe.path)
     }
 
     static func taskCount(at root: URL) throws -> Int {
@@ -289,7 +299,7 @@ enum LocalLibraryTestDriver {
         documentID: SourceDocumentID
     ) throws -> Bool {
         try ManagedArtifacts(root: root).exists(
-            relativePath: "Artifacts/\(documentID.rawValue.uuidString)"
+            .artifacts(documentID: documentID)
         )
     }
 
@@ -299,8 +309,10 @@ enum LocalLibraryTestDriver {
         artifact: StagedArtifact
     ) throws -> Bool {
         try ManagedArtifacts(root: root).exists(
-            relativePath:
-                "Staging/\(taskID.rawValue.uuidString)/\(artifact.rawValue.uuidString)"
+            .staging(
+                taskID: taskID,
+                artifactID: artifact.rawValue
+            )
         )
     }
 
@@ -311,7 +323,10 @@ enum LocalLibraryTestDriver {
         corruption: StagedArtifactCorruption
     ) throws {
         let payload = root.appending(
-            path: "Staging/\(taskID.rawValue.uuidString)/\(artifact.rawValue.uuidString)/payload"
+            path: ManagedArtifactPath.staging(
+                taskID: taskID,
+                artifactID: artifact.rawValue
+            ).relativePath + "/payload"
         )
         switch corruption {
         case .missing:
@@ -407,16 +422,19 @@ enum LocalLibraryTestDriver {
                     descriptorJSON: try DomainJSON.encode(
                         artifact.descriptor
                     ),
-                    relativePath:
-                        "Staging/\(task.taskID)/\(artifact.rawValue.uuidString)"
+                    relativePath: ManagedArtifactPath.staging(
+                        taskID: taskID,
+                        artifactID: artifact.rawValue
+                    ).relativePath
                 ).insert(db)
             case .publicationIntent:
                 try PublicationIntentRecord(
                     taskID: task.taskID,
                     documentID: documentID.rawValue.uuidString,
                     stagedArtifactID: artifact.rawValue.uuidString,
-                    finalRelativePath:
-                        "Artifacts/\(documentID.rawValue.uuidString)"
+                    finalRelativePath: ManagedArtifactPath.artifacts(
+                        documentID: documentID
+                    ).relativePath
                 ).insert(db)
             case .missingDocument:
                 _ = try SourceDocumentRecord.deleteOne(
@@ -578,7 +596,9 @@ enum LocalLibraryTestDriver {
         documentID: SourceDocumentID
     ) -> URL {
         root.appending(
-            path: "Artifacts/\(documentID.rawValue.uuidString)/payload"
+            path: ManagedArtifactPath.artifacts(
+                documentID: documentID
+            ).relativePath + "/payload"
         )
     }
 }

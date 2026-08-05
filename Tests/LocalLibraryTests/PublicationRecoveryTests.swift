@@ -219,12 +219,15 @@ func invalidFinalWithValidStagingIsQuarantinedAndKeepsOwnership()
         label: "invalid-final-with-staging"
     )
     let stagedContainer = interrupted.libraryRoot.appending(
-        path:
-            "Staging/\(interrupted.taskID.rawValue.uuidString)/\(interrupted.candidate.artifact.rawValue.uuidString)"
+        path: ManagedArtifactPath.staging(
+            taskID: interrupted.taskID,
+            artifactID: interrupted.candidate.artifact.rawValue
+        ).relativePath
     )
     let finalContainer = interrupted.libraryRoot.appending(
-        path:
-            "Artifacts/\(interrupted.candidate.document.documentID.rawValue.uuidString)"
+        path: ManagedArtifactPath.artifacts(
+            documentID: interrupted.candidate.document.documentID
+        ).relativePath
     )
     try FileManager.default.copyItem(
         at: stagedContainer,
@@ -269,8 +272,10 @@ func missingFinalAndStagingClearsOwnershipForRestaging() async throws {
     )
     try FileManager.default.removeItem(
         at: interrupted.libraryRoot.appending(
-            path:
-                "Staging/\(interrupted.taskID.rawValue.uuidString)/\(interrupted.candidate.artifact.rawValue.uuidString)"
+            path: ManagedArtifactPath.staging(
+                taskID: interrupted.taskID,
+                artifactID: interrupted.candidate.artifact.rawValue
+            ).relativePath
         )
     )
 
@@ -301,8 +306,9 @@ func recoveryRejectsSymlinkedFinalWithoutTouchingDestination()
         label: "symlinked-final"
     )
     let finalContainer = interrupted.libraryRoot.appending(
-        path:
-            "Artifacts/\(interrupted.candidate.document.documentID.rawValue.uuidString)"
+        path: ManagedArtifactPath.artifacts(
+            documentID: interrupted.candidate.document.documentID
+        ).relativePath
     )
     let victim = root.appending(path: "SymlinkVictim")
     try FileManager.default.createDirectory(

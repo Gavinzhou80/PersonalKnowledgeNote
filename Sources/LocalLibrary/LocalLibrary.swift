@@ -60,7 +60,7 @@ public actor LocalLibrary {
                 try managedArtifacts.removeAbandonedStagedArtifact(cleanup)
             }
             try managedArtifacts.removeUnownedStaging(
-                ownedRelativePaths: database.ownedStagingPaths()
+                ownedPaths: database.ownedStagingPaths()
             )
             return LocalLibrary(
                 database: database,
