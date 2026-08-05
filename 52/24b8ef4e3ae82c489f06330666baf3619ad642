@@ -1,0 +1,28 @@
+Sources/DocumentImport/DocumentImport.swift
+  s_413052984bbc8e::t_80abe6fe68a4d6 1-501
+Sources/DocumentImport/ImportTaskHandle.swift
+  s_413052984bbc8e::t_80abe6fe68a4d6 1-20
+Tests/DocumentImportTests/DocumentImportIntegrationTests.swift
+  s_413052984bbc8e::t_298f7a61d35c90 1-136
+Tests/DocumentImportTests/DocumentImportTestSupport.swift
+  s_413052984bbc8e::t_298f7a61d35c90 1-68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "5224b8ef4e3ae82c489f06330666baf3619ad642",
+  "prompts": {},
+  "logical_commit_id": "5224b8ef4e3ae82c489f06330666baf3619ad642",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 731,
+      "total_deletions": 6
+    }
+  }
+}
