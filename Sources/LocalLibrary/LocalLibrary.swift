@@ -44,6 +44,7 @@ public actor LocalLibrary {
         _ source: OriginalSource
     ) async throws -> ImportWorkspace {
         try withLocalLibraryErrorTranslation {
+            _ = try SourceColumns.encode(source)
             let taskID = ImportTaskID()
             switch source {
             case .webpage:

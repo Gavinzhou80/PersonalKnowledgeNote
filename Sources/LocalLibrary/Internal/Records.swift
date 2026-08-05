@@ -121,21 +121,44 @@ struct SourceProvenanceRecord:
 }
 
 enum SourceColumns {
-    static func encode(_ source: OriginalSource) -> (kind: String, value: String) {
+    static func encode(
+        _ source: OriginalSource
+    ) throws -> (kind: String, value: String) {
+        let columns: (kind: String, value: String)
         switch source {
         case .webpage(let url):
-            return ("webpage", url.absoluteString)
+            columns = ("webpage", url.absoluteString)
         case .pdfFile(let url):
-            return ("pdf", url.absoluteString)
+            columns = ("pdf", url.absoluteString)
+        }
+        do {
+            _ = try validatedSource(
+                kind: columns.kind,
+                value: columns.value
+            )
+            return columns
+        } catch {
+            throw LocalLibraryError.unavailable
         }
     }
 
     static func decode(kind: String, value: String) throws -> OriginalSource {
+        do {
+            return try validatedSource(kind: kind, value: value)
+        } catch {
+            throw corruptLibrary()
+        }
+    }
+
+    private static func validatedSource(
+        kind: String,
+        value: String
+    ) throws -> OriginalSource {
         guard let url = URL(string: value),
               url.absoluteString == value,
               let scheme = url.scheme?.lowercased()
         else {
-            throw corruptLibrary()
+            throw SourceValidationError.invalidURL
         }
 
         switch kind {
@@ -144,17 +167,27 @@ enum SourceColumns {
                   let host = url.host,
                   !host.isEmpty
             else {
-                throw corruptLibrary()
+                throw SourceValidationError.invalidURL
             }
             return .webpage(url)
         case "pdf":
-            guard scheme == "file", url.isFileURL else {
-                throw corruptLibrary()
+            let host = url.host?.lowercased()
+            guard scheme == "file",
+                  url.isFileURL,
+                  url.path.hasPrefix("/"),
+                  host == nil || host == "" || host == "localhost"
+            else {
+                throw SourceValidationError.invalidURL
             }
             return .pdfFile(url)
         default:
-            throw corruptLibrary()
+            throw SourceValidationError.invalidKind
         }
+    }
+
+    private enum SourceValidationError: Error {
+        case invalidKind
+        case invalidURL
     }
 }
 

@@ -54,6 +54,61 @@ func openingMalformedDatabaseReportsCorruptLibrary() async throws {
     }
 }
 
+@Test(arguments: [
+    InvalidOriginalSource(
+        source: .webpage(URL(string: "relative/path")!),
+        label: "relative webpage"
+    ),
+    InvalidOriginalSource(
+        source: .webpage(URL(string: "ftp://example.com/article")!),
+        label: "ftp webpage"
+    ),
+    InvalidOriginalSource(
+        source: .webpage(URL(fileURLWithPath: "/tmp/article.html")),
+        label: "file webpage"
+    ),
+    InvalidOriginalSource(
+        source: .webpage(URL(string: "https:///article")!),
+        label: "hostless webpage"
+    ),
+    InvalidOriginalSource(
+        source: .pdfFile(URL(string: "https://example.com/file.pdf")!),
+        label: "remote pdf"
+    ),
+    InvalidOriginalSource(
+        source: .pdfFile(URL(string: "file:relative.pdf")!),
+        label: "relative file pdf"
+    ),
+    InvalidOriginalSource(
+        source: .pdfFile(
+            URL(string: "file://remote-host/tmp/file.pdf")!
+        ),
+        label: "remote-host file pdf"
+    ),
+])
+func acceptingInvalidOriginalSourceDoesNotPersistTask(
+    invalid: InvalidOriginalSource
+) async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let library = try await LocalLibrary.open(at: root)
+
+    do {
+        _ = try await library.accept(invalid.source)
+        Issue.record("Expected \(invalid.label) to be rejected")
+    } catch let error as LocalLibraryError {
+        #expect(error == .unavailable)
+    }
+
+    #expect(try await library.recoverableImports().isEmpty)
+    #expect(try LocalLibraryTestDriver.taskCount(at: root) == 0)
+}
+
+struct InvalidOriginalSource: Sendable {
+    let source: OriginalSource
+    let label: String
+}
+
 private struct ReleasedAcceptance: Sendable {
     let taskID: ImportTaskID
     let library: WeakReference<LocalLibrary>

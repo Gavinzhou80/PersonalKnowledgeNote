@@ -116,6 +116,12 @@ enum LocalLibraryTestDriver {
         )
     }
 
+    static func taskCount(at root: URL) throws -> Int {
+        try databaseQueue(at: root).read { db in
+            try ImportTaskRecord.fetchCount(db)
+        }
+    }
+
     static func corruptStagedArtifact(
         at root: URL,
         taskID: ImportTaskID,
@@ -132,15 +138,6 @@ enum LocalLibraryTestDriver {
             try Data("tampered staging".utf8).write(
                 to: payload.appending(path: "index.html")
             )
-        }
-    }
-
-    static func markPublicationPending(
-        at root: URL,
-        taskID: ImportTaskID
-    ) throws {
-        try updateTask(at: root, taskID: taskID) { task in
-            task.state = ImportTaskState.publicationPending.rawValue
         }
     }
 

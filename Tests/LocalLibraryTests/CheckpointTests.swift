@@ -320,9 +320,20 @@ func checkpointRejectsPublicationPendingWithoutMutation() async throws {
     defer { removeTemporaryLibraryRoot(root) }
     let libraryRoot = root.appending(path: "Library")
     let staged = try await stageWebArtifactInReleasedScope(at: root)
-    try LocalLibraryTestDriver.markPublicationPending(
+    try LocalLibraryTestDriver.prepareHiddenPublication(
         at: libraryRoot,
-        taskID: staged.taskID
+        taskID: staged.taskID,
+        candidate: PublicationCandidate(
+            fingerprint: ContentFingerprint("checkpoint-pending"),
+            artifact: staged.artifact,
+            document: makeFixtureContent(),
+            originalSource: .webpage(
+                try #require(
+                    URL(string: "https://example.com/startup-cleanup")
+                )
+            )
+        ),
+        expectedRevision: staged.revision
     )
     let reopened = try await LocalLibrary.open(at: libraryRoot)
     let workspace = try #require(

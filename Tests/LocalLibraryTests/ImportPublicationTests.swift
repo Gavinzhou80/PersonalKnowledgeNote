@@ -533,6 +533,18 @@ func storedOutcomeRejectsCorruptCompletedPublicationState(
         corruption: corruption
     )
 
+    await expectCorruptLibrary("snapshot") {
+        _ = try await fixture.workspace.snapshot()
+    }
+    await expectCorruptLibrary("importWorkspace") {
+        _ = try await fixture.library.importWorkspace(
+            id: fixture.workspace.taskID
+        )
+    }
+    await expectCorruptLibrary("recoverableImports") {
+        _ = try await fixture.library.recoverableImports()
+    }
+
     do {
         _ = try await fixture.workspace.finish(
             candidate,
@@ -584,6 +596,18 @@ func storedOutcomeRejectsCorruptNonterminalPublicationState(
         corruption: corruption
     )
 
+    await expectCorruptLibrary("snapshot") {
+        _ = try await fixture.workspace.snapshot()
+    }
+    await expectCorruptLibrary("importWorkspace") {
+        _ = try await fixture.library.importWorkspace(
+            id: fixture.workspace.taskID
+        )
+    }
+    await expectCorruptLibrary("recoverableImports") {
+        _ = try await fixture.library.recoverableImports()
+    }
+
     do {
         _ = try await fixture.workspace.finish(
             candidate,
@@ -632,6 +656,11 @@ func finalArtifactVerificationClassifiesOnlyArtifactCorruption() {
     PersistedSourceCorruption(
         kind: "pdf",
         value: "https://example.com/document.pdf"
+    ),
+    PersistedSourceCorruption(kind: "pdf", value: "file:relative.pdf"),
+    PersistedSourceCorruption(
+        kind: "pdf",
+        value: "file://remote-host/tmp/document.pdf"
     ),
 ])
 func persistedInvalidOriginalSourceIsCorruptLibrary(
@@ -817,4 +846,25 @@ private func publishPDFInReleasedScope(
         candidate: candidate,
         outcome: outcome
     )
+}
+
+private func expectCorruptLibrary(
+    _ operationName: String,
+    operation: () async throws -> Void
+) async {
+    do {
+        try await operation()
+        Issue.record("Expected \(operationName) to reject corruption")
+    } catch let error as LocalLibraryError {
+        guard case .corruptLibrary = error else {
+            Issue.record(
+                "Expected corruptLibrary from \(operationName), got \(error)"
+            )
+            return
+        }
+    } catch {
+        Issue.record(
+            "Expected LocalLibraryError from \(operationName), got \(error)"
+        )
+    }
 }

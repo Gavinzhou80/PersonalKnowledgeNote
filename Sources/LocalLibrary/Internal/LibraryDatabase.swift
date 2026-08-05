@@ -12,6 +12,13 @@ struct DuplicatePublication: Sendable {
     let candidateIntent: PublicationIntent
 }
 
+private struct PublicationStateBundle {
+    let task: ImportTaskRecord
+    let stagedArtifact: StagedArtifactRecord?
+    let snapshot: DurableImportSnapshot
+    let outcome: PublicationOutcome?
+}
+
 final class LibraryDatabase: Sendable {
     private let queue: DatabaseQueue
 
@@ -30,7 +37,7 @@ final class LibraryDatabase: Sendable {
         source: OriginalSource,
         placement: StagedArtifactPlacement? = nil
     ) throws {
-        let sourceColumns = SourceColumns.encode(source)
+        let sourceColumns = try SourceColumns.encode(source)
         try queue.write { db in
             try ImportTaskRecord(
                 taskID: id.rawValue.uuidString,
@@ -207,50 +214,30 @@ final class LibraryDatabase: Sendable {
         }
     }
 
-    func task(id: ImportTaskID) throws -> ImportTaskRecord? {
-        try queue.read { db in
-            try ImportTaskRecord.fetchOne(
-                db,
-                key: id.rawValue.uuidString
-            )
-        }
-    }
-
     func snapshot(
         taskID: ImportTaskID
     ) throws -> DurableImportSnapshot? {
         try queue.read { db in
-            guard let task = try ImportTaskRecord.fetchOne(
+            let task = try ImportTaskRecord.fetchOne(
                 db,
                 key: taskID.rawValue.uuidString
-            ) else {
-                return nil
-            }
-            let stagedArtifact = try stagedArtifact(
-                for: task,
+            )
+            let bundles = try publicationStateBundles(
+                for: task.map { [$0] } ?? [],
                 in: db
             )
-            return try task.snapshot(stagedArtifact: stagedArtifact)
+            return bundles.first?.snapshot
         }
     }
 
     func recoverableTasks() throws -> [DurableImportSnapshot] {
         try queue.read { db in
-            let terminalStates = [
-                ImportTaskState.completed.rawValue,
-                ImportTaskState.abandoned.rawValue,
-            ]
-            let tasks = try ImportTaskRecord
-                .filter(!terminalStates.contains(Column("state")))
-                .fetchAll(db)
-
-            return try tasks.map { task in
-                let stagedArtifact = try stagedArtifact(
-                    for: task,
-                    in: db
-                )
-                return try task.snapshot(stagedArtifact: stagedArtifact)
-            }
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            return try publicationStateBundles(for: tasks, in: db)
+                .map(\.snapshot)
+                .filter {
+                    $0.state != .completed && $0.state != .abandoned
+                }
         }
     }
 
@@ -265,14 +252,13 @@ final class LibraryDatabase: Sendable {
                 )
                 .fetchAll(db)
 
-            return try tasks.compactMap { task in
-                let stagedArtifact = try stagedArtifact(for: task, in: db)
-                _ = try task.snapshot(stagedArtifact: stagedArtifact)
-                return try abandonedCleanup(
-                    task: task,
-                    stagedArtifact: stagedArtifact
-                )
-            }
+            return try publicationStateBundles(for: tasks, in: db)
+                .compactMap { bundle in
+                    try abandonedCleanup(
+                        task: bundle.task,
+                        stagedArtifact: bundle.stagedArtifact
+                    )
+                }
         }
     }
 
@@ -314,59 +300,18 @@ final class LibraryDatabase: Sendable {
 
     func storedOutcome(taskID: ImportTaskID) throws -> PublicationOutcome? {
         try queue.read { db in
-            guard let task = try ImportTaskRecord.fetchOne(
+            let task = try ImportTaskRecord.fetchOne(
                 db,
                 key: taskID.rawValue.uuidString
-            ) else {
+            )
+            let bundles = try publicationStateBundles(
+                for: task.map { [$0] } ?? [],
+                in: db
+            )
+            guard let bundle = bundles.first else {
                 throw LocalLibraryError.unavailable
             }
-            let stagedArtifact = try stagedArtifact(for: task, in: db)
-            let intent = try PublicationIntentRecord.fetchOne(
-                db,
-                key: task.taskID
-            )
-            _ = try task.snapshot(stagedArtifact: stagedArtifact)
-            let outcome = try task.storedOutcome()
-            guard let state = ImportTaskState(rawValue: task.state) else {
-                throw corruptLibraryError()
-            }
-            let associatedDocumentID: String?
-            if let outcome {
-                switch outcome {
-                case .published(let documentID),
-                     .alreadyImported(let documentID, _, _):
-                    associatedDocumentID = documentID.rawValue.uuidString
-                }
-            } else {
-                associatedDocumentID = intent?.documentID
-            }
-            let document = try associatedDocumentID.flatMap {
-                try SourceDocumentRecord.fetchOne(db, key: $0)
-            }
-            let orphanedHiddenDocumentCount = try Int.fetchOne(
-                db,
-                sql: """
-                    SELECT COUNT(*)
-                    FROM source_documents AS document
-                    LEFT JOIN publication_intents AS intent
-                        ON intent.document_id = document.document_id
-                    WHERE document.visibility = ?
-                        AND intent.document_id IS NULL
-                    """,
-                arguments: [SourceDocumentVisibility.hidden.rawValue]
-            )
-            guard orphanedHiddenDocumentCount == 0 else {
-                throw corruptLibraryError()
-            }
-            try validateStoredPublicationState(
-                task: task,
-                state: state,
-                stagedArtifact: stagedArtifact,
-                intent: intent,
-                document: document,
-                outcome: outcome
-            )
-            return outcome
+            return bundle.outcome
         }
     }
 
@@ -539,7 +484,7 @@ final class LibraryDatabase: Sendable {
                 throw corruptLibraryError()
             }
 
-            let sourceColumns = SourceColumns.encode(
+            let sourceColumns = try SourceColumns.encode(
                 candidate.originalSource
             )
             try SourceProvenanceRecord(
@@ -567,6 +512,7 @@ final class LibraryDatabase: Sendable {
         id: SourceDocumentID
     ) throws -> StoredSourceDocument? {
         try queue.read { db in
+            _ = try publicationStateBundles(for: [], in: db)
             guard let record = try SourceDocumentRecord
                 .filter(Column("document_id") == id.rawValue.uuidString)
                 .filter(
@@ -650,6 +596,69 @@ final class LibraryDatabase: Sendable {
             ),
             relativePath: stagedRecord.relativePath
         )
+    }
+
+    private func publicationStateBundles(
+        for tasks: [ImportTaskRecord],
+        in db: Database
+    ) throws -> [PublicationStateBundle] {
+        let orphanedHiddenDocumentCount = try Int.fetchOne(
+            db,
+            sql: """
+                SELECT COUNT(*)
+                FROM source_documents AS document
+                LEFT JOIN publication_intents AS intent
+                    ON intent.document_id = document.document_id
+                WHERE document.visibility = ?
+                    AND intent.document_id IS NULL
+                """,
+            arguments: [SourceDocumentVisibility.hidden.rawValue]
+        )
+        guard orphanedHiddenDocumentCount == 0 else {
+            throw corruptLibraryError()
+        }
+
+        return try tasks.map { task in
+            let stagedArtifact = try stagedArtifact(for: task, in: db)
+            let intent = try PublicationIntentRecord.fetchOne(
+                db,
+                key: task.taskID
+            )
+            let snapshot = try task.snapshot(
+                stagedArtifact: stagedArtifact
+            )
+            let outcome = try task.storedOutcome()
+            guard let state = ImportTaskState(rawValue: task.state) else {
+                throw corruptLibraryError()
+            }
+            let associatedDocumentID: String?
+            if let outcome {
+                switch outcome {
+                case .published(let documentID),
+                     .alreadyImported(let documentID, _, _):
+                    associatedDocumentID = documentID.rawValue.uuidString
+                }
+            } else {
+                associatedDocumentID = intent?.documentID
+            }
+            let document = try associatedDocumentID.flatMap {
+                try SourceDocumentRecord.fetchOne(db, key: $0)
+            }
+            try validateStoredPublicationState(
+                task: task,
+                state: state,
+                stagedArtifact: stagedArtifact,
+                intent: intent,
+                document: document,
+                outcome: outcome
+            )
+            return PublicationStateBundle(
+                task: task,
+                stagedArtifact: stagedArtifact,
+                snapshot: snapshot,
+                outcome: outcome
+            )
+        }
     }
 
     private func validateStoredPublicationState(
