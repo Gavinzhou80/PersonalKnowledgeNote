@@ -1,0 +1,33 @@
+name: PersonalKnowledgeNote
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "15.0"
+packages:
+  PersonalKnowledgeNotePackage:
+    path: .
+targets:
+  PersonalKnowledgeNote:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: App
+    dependencies:
+      - package: PersonalKnowledgeNotePackage
+        product: AppSupport
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gavinzhou.PersonalKnowledgeNote
+        PRODUCT_NAME: PersonalKnowledgeNote
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: 6.0
+        SWIFT_STRICT_CONCURRENCY: complete
+        CODE_SIGNING_ALLOWED: NO
+schemes:
+  PersonalKnowledgeNote:
+    build:
+      targets:
+        PersonalKnowledgeNote: all
+    run:
+      config: Debug
