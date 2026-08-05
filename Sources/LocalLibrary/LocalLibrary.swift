@@ -51,8 +51,10 @@ public actor LocalLibrary {
                         placement: placement
                     )
                 } catch {
-                    try managedArtifacts.remove(placement)
-                    throw error
+                    try rethrow(
+                        error,
+                        afterBestEffortRemovalOf: placement
+                    )
                 }
             }
             return ImportWorkspace(taskID: taskID, library: self)
@@ -107,11 +109,34 @@ public actor LocalLibrary {
                     placement: placement
                 )
             } catch {
-                try managedArtifacts.remove(placement)
-                throw error
+                try rethrow(
+                    error,
+                    afterBestEffortRemovalOf: placement
+                )
             }
             return placement.artifact
         }
+    }
+
+    package func verifyManagedArtifact(
+        _ artifact: StagedArtifact,
+        taskID: ImportTaskID
+    ) throws -> SourceArtifactDescriptor {
+        try withLocalLibraryErrorTranslation {
+            let placement = try database.ownedStagedArtifactPlacement(
+                taskID: taskID,
+                artifact: artifact
+            )
+            return try managedArtifacts.verify(placement)
+        }
+    }
+
+    private func rethrow(
+        _ primaryError: Error,
+        afterBestEffortRemovalOf placement: StagedArtifactPlacement
+    ) throws -> Never {
+        try? managedArtifacts.remove(placement)
+        throw primaryError
     }
 }
 

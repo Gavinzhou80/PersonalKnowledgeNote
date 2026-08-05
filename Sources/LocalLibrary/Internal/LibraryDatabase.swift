@@ -135,6 +135,42 @@ final class LibraryDatabase: Sendable {
         }
     }
 
+    func ownedStagedArtifactPlacement(
+        taskID: ImportTaskID,
+        artifact: StagedArtifact
+    ) throws -> StagedArtifactPlacement {
+        try queue.read { db in
+            guard let task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            guard task.stagedArtifactID == artifact.rawValue.uuidString else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            guard let record = try stagedArtifact(for: task, in: db),
+                  record.artifactID == artifact.rawValue.uuidString
+            else {
+                throw corruptLibraryError()
+            }
+            let storedArtifact = StagedArtifact(
+                rawValue: artifact.rawValue,
+                descriptor: try DomainJSON.decode(
+                    SourceArtifactDescriptor.self,
+                    from: record.descriptorJSON
+                )
+            )
+            guard storedArtifact == artifact else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            return StagedArtifactPlacement(
+                artifact: storedArtifact,
+                relativePath: record.relativePath
+            )
+        }
+    }
+
     private func stagedArtifact(
         for task: ImportTaskRecord,
         in db: Database

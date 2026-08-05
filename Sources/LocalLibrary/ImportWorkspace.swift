@@ -23,4 +23,13 @@ public actor ImportWorkspace {
             expectedRevision: expectedRevision
         )
     }
+
+    package func verifyManagedArtifact(
+        _ artifact: StagedArtifact
+    ) async throws -> SourceArtifactDescriptor {
+        try await library.verifyManagedArtifact(
+            artifact,
+            taskID: taskID
+        )
+    }
 }

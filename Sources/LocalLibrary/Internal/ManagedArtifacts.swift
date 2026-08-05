@@ -1,30 +1,63 @@
-import CryptoKit
-import Darwin
 import Foundation
 import KnowledgeCore
 
-struct StagedArtifactPlacement {
+struct StagedArtifactPlacement: Sendable {
     let artifact: StagedArtifact
     let relativePath: String
 }
 
 struct ManagedArtifacts {
+    private enum Scope: String {
+        case staging = "Staging"
+        case artifacts = "Artifacts"
+    }
+
     private let root: URL
     private let stagingRoot: URL
     private let artifactsRoot: URL
 
-    init(root: URL) throws {
-        self.root = root
-        stagingRoot = root.appending(path: "Staging", directoryHint: .isDirectory)
-        artifactsRoot = root.appending(path: "Artifacts", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(
-            at: stagingRoot,
+    init(root requestedRoot: URL) throws {
+        let fileManager = FileManager.default
+        let standardizedRoot = requestedRoot.standardizedFileURL
+        try fileManager.createDirectory(
+            at: standardizedRoot,
             withIntermediateDirectories: true
         )
-        try FileManager.default.createDirectory(
-            at: artifactsRoot,
+        let resolvedRoot = standardizedRoot.resolvingSymlinksInPath()
+        let requestedStagingRoot = resolvedRoot.appending(
+            path: Scope.staging.rawValue,
+            directoryHint: .isDirectory
+        )
+        let requestedArtifactsRoot = resolvedRoot.appending(
+            path: Scope.artifacts.rawValue,
+            directoryHint: .isDirectory
+        )
+        try fileManager.createDirectory(
+            at: requestedStagingRoot,
             withIntermediateDirectories: true
         )
+        try fileManager.createDirectory(
+            at: requestedArtifactsRoot,
+            withIntermediateDirectories: true
+        )
+        let resolvedStagingRoot = requestedStagingRoot
+            .resolvingSymlinksInPath()
+        let resolvedArtifactsRoot = requestedArtifactsRoot
+            .resolvingSymlinksInPath()
+        guard Self.isStrictDescendant(
+            resolvedStagingRoot,
+            of: resolvedRoot
+        ), Self.isStrictDescendant(
+            resolvedArtifactsRoot,
+            of: resolvedRoot
+        ) else {
+            throw LocalLibraryError.artifactMissing
+        }
+
+        root = resolvedRoot
+        stagingRoot = resolvedStagingRoot
+        artifactsRoot = resolvedArtifactsRoot
+        try ManagedArtifactPayload.synchronizeDirectory(resolvedRoot)
     }
 
     func stage(
@@ -67,50 +100,106 @@ struct ManagedArtifacts {
         )
     }
 
-    func finalRelativePath(for artifact: StagedArtifact) -> String {
-        "Artifacts/\(artifact.rawValue.uuidString)/payload"
+    func finalRelativePath(documentID: SourceDocumentID) -> String {
+        "Artifacts/\(documentID.rawValue.uuidString)"
     }
 
     func moveToFinal(
-        _ placement: StagedArtifactPlacement
-    ) throws -> String {
-        let finalPath = finalRelativePath(for: placement.artifact)
-        let sourceContainer = url(for: placement.relativePath)
-            .deletingLastPathComponent()
-        let finalContainer = url(for: finalPath)
-            .deletingLastPathComponent()
+        stagedRelativePath: String,
+        finalRelativePath: String
+    ) throws {
+        let staged = try resolve(
+            relativePath: stagedRelativePath,
+            expectedScope: .staging
+        )
+        let final = try resolve(
+            relativePath: finalRelativePath,
+            expectedScope: .artifacts
+        )
         let fileManager = FileManager.default
+        let stagedExists = fileManager.fileExists(atPath: staged.path)
+        let finalExists = fileManager.fileExists(atPath: final.path)
+        let sourceParent = staged.deletingLastPathComponent()
+        let destinationParent = final.deletingLastPathComponent()
 
-        if fileManager.fileExists(atPath: finalContainer.path) {
-            if fileManager.fileExists(atPath: sourceContainer.path) {
-                try fileManager.removeItem(at: sourceContainer)
+        if finalExists {
+            guard !stagedExists else {
+                throw LocalLibraryError.artifactOwnershipViolation
             }
-            try synchronizeDirectory(artifactsRoot)
-            return finalPath
+            try ManagedArtifactPayload.synchronizeDirectory(sourceParent)
+            try ManagedArtifactPayload.synchronizeDirectory(destinationParent)
+            return
         }
-        guard fileManager.fileExists(atPath: sourceContainer.path) else {
+        guard stagedExists else {
             throw LocalLibraryError.artifactMissing
         }
 
-        try fileManager.moveItem(at: sourceContainer, to: finalContainer)
-        try synchronizeDirectory(artifactsRoot)
-        return finalPath
+        try fileManager.moveItem(at: staged, to: final)
+        try ManagedArtifactPayload.synchronizeDirectory(sourceParent)
+        try ManagedArtifactPayload.synchronizeDirectory(destinationParent)
     }
 
-    func exists(at relativePath: String) -> Bool {
-        FileManager.default.fileExists(atPath: url(for: relativePath).path)
+    func exists(relativePath: String) throws -> Bool {
+        let managedURL = try resolve(relativePath: relativePath)
+        return FileManager.default.fileExists(atPath: managedURL.path)
     }
 
     func remove(_ placement: StagedArtifactPlacement) throws {
-        try remove(at: placement.relativePath)
+        try remove(relativePath: placement.relativePath)
     }
 
-    func remove(at relativePath: String) throws {
-        let container = url(for: relativePath).deletingLastPathComponent()
-        guard FileManager.default.fileExists(atPath: container.path) else {
+    func remove(relativePath: String) throws {
+        let managedURL = try resolve(relativePath: relativePath)
+        guard FileManager.default.fileExists(atPath: managedURL.path) else {
             return
         }
-        try FileManager.default.removeItem(at: container)
+        let parent = managedURL.deletingLastPathComponent()
+        try FileManager.default.removeItem(at: managedURL)
+        try ManagedArtifactPayload.synchronizeDirectory(parent)
+    }
+
+    func verify(
+        _ placement: StagedArtifactPlacement
+    ) throws -> SourceArtifactDescriptor {
+        let container = try resolve(
+            relativePath: placement.relativePath,
+            expectedScope: .staging
+        )
+        guard FileManager.default.fileExists(atPath: container.path) else {
+            throw LocalLibraryError.artifactMissing
+        }
+        let payload = container.appending(path: "payload")
+        guard FileManager.default.fileExists(atPath: payload.path) else {
+            throw LocalLibraryError.artifactMissing
+        }
+        let expectedKind = placement.artifact.descriptor.kind
+        let values = try payload.resourceValues(forKeys: [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+        ])
+        guard values.isSymbolicLink != true,
+              (expectedKind == .webPackage && values.isDirectory == true)
+                || (expectedKind == .pdf && values.isRegularFile == true)
+        else {
+            throw LocalLibraryError.artifactMissing
+        }
+        let verification = try ManagedArtifactPayload.verifyAndSynchronize(
+            payload: payload,
+            isDirectory: expectedKind == .webPackage
+        )
+        guard verification.byteCount > 0 else {
+            throw LocalLibraryError.artifactMissing
+        }
+        let verifiedDescriptor = SourceArtifactDescriptor(
+            kind: expectedKind,
+            byteCount: verification.byteCount,
+            contentHash: verification.contentHash
+        )
+        guard verifiedDescriptor == placement.artifact.descriptor else {
+            throw LocalLibraryError.artifactMissing
+        }
+        return verifiedDescriptor
     }
 
     private func copyToStaging(
@@ -119,33 +208,45 @@ struct ManagedArtifacts {
         expectsDirectory: Bool,
         taskID: ImportTaskID
     ) throws -> StagedArtifactPlacement {
-        try validateSource(source, expectsDirectory: expectsDirectory)
-
+        let verifiedSource = try validateSource(
+            source,
+            expectsDirectory: expectsDirectory
+        )
         let artifactID = UUID()
-        let relativePath = "Staging/\(taskID.rawValue.uuidString)/\(artifactID.uuidString)/payload"
-        let payload = url(for: relativePath)
-        let container = payload.deletingLastPathComponent()
+        let relativePath = "Staging/\(taskID.rawValue.uuidString)/\(artifactID.uuidString)"
+        let requestedContainer = try resolve(
+            relativePath: relativePath,
+            expectedScope: .staging
+        )
         try FileManager.default.createDirectory(
-            at: container,
+            at: requestedContainer,
             withIntermediateDirectories: true
         )
+        let container = try resolve(
+            relativePath: relativePath,
+            expectedScope: .staging
+        )
+        let payload = container.appending(path: "payload")
 
         var completed = false
         defer {
             if !completed {
-                try? FileManager.default.removeItem(at: container)
+                try? remove(relativePath: relativePath)
             }
         }
 
-        try FileManager.default.copyItem(at: source, to: payload)
-        let verification = try verifyAndSynchronize(
+        try FileManager.default.copyItem(at: verifiedSource, to: payload)
+        let verification = try ManagedArtifactPayload.verifyAndSynchronize(
             payload: payload,
             isDirectory: expectsDirectory
         )
         guard verification.byteCount > 0 else {
             throw LocalLibraryError.artifactMissing
         }
-        try synchronizeDirectory(container)
+        let taskDirectory = container.deletingLastPathComponent()
+        try ManagedArtifactPayload.synchronizeDirectory(container)
+        try ManagedArtifactPayload.synchronizeDirectory(taskDirectory)
+        try ManagedArtifactPayload.synchronizeDirectory(stagingRoot)
 
         let descriptor = SourceArtifactDescriptor(
             kind: kind,
@@ -165,7 +266,12 @@ struct ManagedArtifacts {
     private func validateSource(
         _ source: URL,
         expectsDirectory: Bool
-    ) throws {
+    ) throws -> URL {
+        guard source.isFileURL,
+              FileManager.default.fileExists(atPath: source.path)
+        else {
+            throw LocalLibraryError.artifactMissing
+        }
         let values = try source.resourceValues(forKeys: [
             .isDirectoryKey,
             .isRegularFileKey,
@@ -183,109 +289,81 @@ struct ManagedArtifacts {
                 throw LocalLibraryError.artifactMissing
             }
         }
+
+        let resolvedSource = source.standardizedFileURL
+            .resolvingSymlinksInPath()
+        guard !Self.pathsOverlap(resolvedSource, root) else {
+            throw LocalLibraryError.artifactMissing
+        }
+        return resolvedSource
     }
 
-    private func verifyAndSynchronize(
-        payload: URL,
-        isDirectory: Bool
-    ) throws -> (byteCount: UInt64, contentHash: String) {
-        let files: [(relativePath: String, url: URL)]
-        if isDirectory {
-            files = try regularFiles(in: payload, relativePath: "")
-                .sorted {
-                    $0.relativePath.utf8.lexicographicallyPrecedes(
-                        $1.relativePath.utf8
-                    )
-                }
-        } else {
-            files = [(relativePath: "", url: payload)]
+    private func resolve(
+        relativePath: String,
+        expectedScope: Scope? = nil
+    ) throws -> URL {
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/")
+        else {
+            throw LocalLibraryError.artifactMissing
+        }
+        let components = relativePath
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard !components.contains(where: {
+            $0.isEmpty || $0 == "." || $0 == ".."
+        }), let scope = Scope(rawValue: components[0]),
+              expectedScope == nil || expectedScope == scope
+        else {
+            throw LocalLibraryError.artifactMissing
         }
 
-        var hasher = SHA256()
-        var byteCount: UInt64 = 0
-        for file in files {
-            if isDirectory {
-                hasher.update(data: Data(file.relativePath.utf8))
-            }
-            let data = try Data(contentsOf: file.url)
-            guard let fileByteCount = UInt64(exactly: data.count),
-                  byteCount <= UInt64.max - fileByteCount
+        switch scope {
+        case .staging:
+            guard components.count == 3,
+                  UUID(uuidString: components[1]) != nil,
+                  UUID(uuidString: components[2]) != nil
             else {
                 throw LocalLibraryError.artifactMissing
             }
-            byteCount += fileByteCount
-            hasher.update(data: data)
-            try synchronizeFile(file.url)
-        }
-
-        let digest = hasher.finalize()
-        return (
-            byteCount,
-            digest.map { String(format: "%02x", $0) }.joined()
-        )
-    }
-
-    private func regularFiles(
-        in directory: URL,
-        relativePath: String
-    ) throws -> [(relativePath: String, url: URL)] {
-        let children = try FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [
-                .isDirectoryKey,
-                .isRegularFileKey,
-                .isSymbolicLinkKey,
-            ]
-        )
-        var files: [(relativePath: String, url: URL)] = []
-        for child in children {
-            let values = try child.resourceValues(forKeys: [
-                .isDirectoryKey,
-                .isRegularFileKey,
-                .isSymbolicLinkKey,
-            ])
-            guard values.isSymbolicLink != true else {
-                throw LocalLibraryError.artifactMissing
-            }
-            let childPath = relativePath.isEmpty
-                ? child.lastPathComponent
-                : "\(relativePath)/\(child.lastPathComponent)"
-            if values.isDirectory == true {
-                files.append(contentsOf: try regularFiles(
-                    in: child,
-                    relativePath: childPath
-                ))
-            } else if values.isRegularFile == true {
-                files.append((childPath, child))
-            } else {
+        case .artifacts:
+            guard components.count == 2,
+                  UUID(uuidString: components[1]) != nil
+            else {
                 throw LocalLibraryError.artifactMissing
             }
         }
-        return files
-    }
 
-    private func synchronizeFile(_ file: URL) throws {
-        let handle = try FileHandle(forWritingTo: file)
-        defer { try? handle.close() }
-        try handle.synchronize()
-    }
-
-    private func synchronizeDirectory(_ directory: URL) throws {
-        let descriptor = open(directory.path, O_RDONLY | O_DIRECTORY)
-        guard descriptor >= 0 else {
-            throw posixError()
+        let scopeRoot = scope == .staging ? stagingRoot : artifactsRoot
+        let standardized = components.dropFirst().reduce(scopeRoot) {
+            $0.appending(path: $1)
+        }.standardizedFileURL
+        guard Self.isStrictDescendant(standardized, of: scopeRoot) else {
+            throw LocalLibraryError.artifactMissing
         }
-        defer { close(descriptor) }
-        guard fsync(descriptor) == 0 else {
-            throw posixError()
+        let resolved = standardized.resolvingSymlinksInPath()
+        guard Self.isStrictDescendant(resolved, of: scopeRoot) else {
+            throw LocalLibraryError.artifactMissing
         }
+        return resolved
     }
 
-    private func url(for relativePath: String) -> URL {
-        root.appending(path: relativePath)
+    private static func pathsOverlap(_ first: URL, _ second: URL) -> Bool {
+        first == second
+            || isStrictDescendant(first, of: second)
+            || isStrictDescendant(second, of: first)
     }
 
-    private func posixError() -> POSIXError {
-        POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+    private static func isStrictDescendant(
+        _ candidate: URL,
+        of parent: URL
+    ) -> Bool {
+        let candidateComponents = candidate.standardizedFileURL.pathComponents
+        let parentComponents = parent.standardizedFileURL.pathComponents
+        guard candidateComponents.count > parentComponents.count else {
+            return false
+        }
+        return candidateComponents.prefix(parentComponents.count)
+            .elementsEqual(parentComponents)
     }
 }
