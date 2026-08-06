@@ -1,0 +1,30 @@
+Tests/DocumentImportTests/WebResourceLocalizerTests.swift
+  s_413052984bbc8e::t_afde362b9da946 172-216,219-227,234,238,244-246,299-324,326,332-333,336,339,341-343,345,351-362
+Tests/DocumentImportTests/LocalHTTPFixtureServer.swift
+  s_413052984bbc8e::t_afde362b9da946 43,156-164,166,245-252
+  s_413052984bbc8e::t_5174e44a13583e 101-102,106-108,110-111,154,188,228-240
+  s_413052984bbc8e::t_af07ad2f1903ea 155
+Sources/DocumentImport/Internal/WebResourceLocalizer.swift
+  s_413052984bbc8e::t_4192e50a77d2b1 20,22
+Sources/DocumentImport/Internal/WebArtifactRenderer.swift
+  s_413052984bbc8e::t_4192e50a77d2b1 98-101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "79b76652015bb5953805b18cf89115d1c7b7ac89",
+  "prompts": {},
+  "logical_commit_id": "79b76652015bb5953805b18cf89115d1c7b7ac89",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 152,
+      "total_deletions": 12
+    }
+  }
+}
