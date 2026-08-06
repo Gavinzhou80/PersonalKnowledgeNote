@@ -302,6 +302,10 @@ enum WebImportCheckpointCodec {
             guard payload.count <= maximumPayloadByteCount else {
                 throw WebImportCheckpointError.invalidPackage
             }
+            let decoded = try validateAndDecodePreparedPayload(payload)
+            guard decoded == prepared else {
+                throw WebImportCheckpointError.invalidPackage
+            }
             let metadata = WebImportCheckpointMetadata.prepared(
                 .init(
                     payloadByteCount: payload.count,
@@ -389,16 +393,7 @@ enum WebImportCheckpointCodec {
                 byteCount: preparedMetadata.payloadByteCount,
                 sha256: preparedMetadata.payloadSHA256
             )
-            try PreparedWebPublicationCheckpointV1WireValidator.validate(
-                payload
-            )
-            let checkpoint = try jsonDecoder().decode(
-                PreparedWebPublicationCheckpointV1.self,
-                from: payload
-            )
-            let prepared = try checkpoint.domainValue()
-            try validate(prepared)
-            return prepared
+            return try validateAndDecodePreparedPayload(payload)
         } catch let error as WebImportCheckpointError {
             throw error
         } catch {
@@ -491,6 +486,30 @@ enum WebImportCheckpointCodec {
             WebImportCheckpointMetadata.self,
             from: data
         )
+    }
+
+    private static func validateAndDecodePreparedPayload(
+        _ payload: Data
+    ) throws -> PreparedWebPublication {
+        do {
+            guard payload.count <= maximumPayloadByteCount else {
+                throw WebImportCheckpointError.invalidPackage
+            }
+            try PreparedWebPublicationCheckpointV1WireValidator.validate(
+                payload
+            )
+            let checkpoint = try jsonDecoder().decode(
+                PreparedWebPublicationCheckpointV1.self,
+                from: payload
+            )
+            let prepared = try checkpoint.domainValue()
+            try validate(prepared)
+            return prepared
+        } catch let error as WebImportCheckpointError {
+            throw error
+        } catch {
+            throw WebImportCheckpointError.invalidPackage
+        }
     }
 
     private static func validatePayload(

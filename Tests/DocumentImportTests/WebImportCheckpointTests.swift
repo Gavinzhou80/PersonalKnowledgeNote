@@ -90,6 +90,47 @@ struct WebImportCheckpointTests {
     }
 
     @Test
+    func writerOnlyReturnsPreparedPackagesItsReaderAccepts() throws {
+        let prepared = makeLargePreparedWebPublication(blockCount: 5_000)
+        let package = try WebImportCheckpointCodec.writePrepared(prepared)
+        defer { try? FileManager.default.removeItem(at: package.url) }
+        let payload = try Data(
+            contentsOf: package.url.appending(path: "candidate.json")
+        )
+
+        #expect(payload.count < 8 * 1_024 * 1_024)
+        #expect(
+            try WebImportCheckpointCodec.readPrepared(at: package.url)
+                == prepared
+        )
+    }
+
+    @Test
+    func writerRejectsPreparedGraphsBeyondTheJSONValueBudget() throws {
+        let prepared = makeLargePreparedWebPublication(blockCount: 7_000)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        let payload = try encoder.encode(
+            PreparedWebPublicationCheckpointV1(prepared)
+        )
+        let packagesBefore = try checkpointTemporaryPackageNames()
+        var unexpectedPackageURL: URL?
+        defer {
+            if let unexpectedPackageURL {
+                try? FileManager.default.removeItem(at: unexpectedPackageURL)
+            }
+        }
+
+        #expect(payload.count < 8 * 1_024 * 1_024)
+        #expect(throws: WebImportCheckpointError.invalidPackage) {
+            let package = try WebImportCheckpointCodec.writePrepared(prepared)
+            unexpectedPackageURL = package.url
+        }
+        #expect(try checkpointTemporaryPackageNames() == packagesBefore)
+    }
+
+    @Test
     func preparedReaderRejectsDuplicateEvidenceEntryIDs() throws {
         let package = try WebImportCheckpointCodec.writePrepared(
             makeRichPreparedWebPublication()
@@ -650,7 +691,7 @@ struct WebImportCheckpointTests {
 
     @Test
     func strictJSONRejectsNestingBeyondTheCheckpointLimit() throws {
-        let depth = 65
+        let depth = WebCheckpointJSONLimits.maximumDepth + 1
         let json = String(repeating: "[", count: depth)
             + "0"
             + String(repeating: "]", count: depth)
@@ -662,9 +703,10 @@ struct WebImportCheckpointTests {
 
     @Test
     func strictJSONRejectsContainersBeyondTheEntryLimit() throws {
-        let json = "[" + Array(repeating: "0", count: 4_097).joined(
-            separator: ","
-        ) + "]"
+        let json = "[" + Array(
+            repeating: "0",
+            count: WebCheckpointJSONLimits.maximumContainerEntryCount + 1
+        ).joined(separator: ",") + "]"
 
         #expect(throws: WebImportCheckpointError.invalidPackage) {
             try StrictJSONValidator.validate(Data(json.utf8))
@@ -674,10 +716,20 @@ struct WebImportCheckpointTests {
     @Test
     func strictJSONRejectsDocumentsBeyondTheTotalValueLimit() throws {
         let fullContainer = "["
-            + Array(repeating: "0", count: 4_096).joined(separator: ",")
+            + Array(
+                repeating: "0",
+                count: WebCheckpointJSONLimits.maximumContainerEntryCount
+            ).joined(separator: ",")
             + "]"
+        let containerCount =
+            WebCheckpointJSONLimits.maximumTotalValueCount
+                / WebCheckpointJSONLimits.maximumContainerEntryCount
+                + 1
         let json = "["
-            + Array(repeating: fullContainer, count: 4).joined(separator: ",")
+            + Array(
+                repeating: fullContainer,
+                count: containerCount
+            ).joined(separator: ",")
             + "]"
 
         #expect(throws: WebImportCheckpointError.invalidPackage) {
@@ -991,6 +1043,62 @@ private func makeRichPreparedWebPublication(
             contentHash: String(repeating: "c", count: 64)
         ),
         issues: [issue]
+    )
+}
+
+private func makeLargePreparedWebPublication(
+    blockCount: Int
+) -> PreparedWebPublication {
+    let documentID = SourceDocumentID(
+        UUID(uuidString: "dddddddd-1111-1111-1111-111111111111")!
+    )
+    let blockIDs = (0..<blockCount).map { index in
+        SourceBlockID(
+            UUID(
+                uuidString: String(
+                    format: "dddddddd-2222-2222-2222-%012x",
+                    index
+                )
+            )!
+        )
+    }
+    let blocks = blockIDs.enumerated().map { index, blockID in
+        SourceBlock(
+            id: blockID,
+            canonicalText: "Block \(index)",
+            role: .paragraph
+        )
+    }
+    let evidence = Dictionary(uniqueKeysWithValues: blockIDs.enumerated().map {
+        index, blockID in
+        (blockID, SourceEvidence.web(locator: "#block-\(index)"))
+    })
+    let document = SourceDocumentContent(
+        documentID: documentID,
+        importedMetadata: ImportedDocumentMetadata(
+            title: "Large prepared fixture",
+            author: nil
+        ),
+        blocks: blocks,
+        structure: SourceStructure(orderedBlockIDs: blockIDs),
+        evidence: evidence
+    )
+    return PreparedWebPublication(
+        documentID: documentID,
+        fingerprint: ContentFingerprint(String(repeating: "d", count: 64)),
+        document: document,
+        originalSource: .webpage(
+            URL(string: "https://example.test/large")!
+        ),
+        stagedArtifactID: UUID(
+            uuidString: "dddddddd-3333-3333-3333-333333333333"
+        )!,
+        stagedDescriptor: SourceArtifactDescriptor(
+            kind: .webPackage,
+            byteCount: 1,
+            contentHash: String(repeating: "e", count: 64)
+        ),
+        issues: []
     )
 }
 

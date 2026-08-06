@@ -2,8 +2,11 @@ import Foundation
 
 enum WebCheckpointJSONLimits {
     static let maximumDepth = 64
-    static let maximumContainerEntryCount = 4_096
-    static let maximumTotalValueCount = 16_384
+    // An 8 MiB JSON array can hold roughly four million one-byte values
+    // plus separators. These lower caps keep Foundation object allocation
+    // bounded while still allowing prepared graphs with thousands of blocks.
+    static let maximumContainerEntryCount = 16_384
+    static let maximumTotalValueCount = 100_000
 }
 
 enum StrictJSONValidator {
