@@ -2,7 +2,19 @@ import Foundation
 import KnowledgeCore
 import SwiftSoup
 
+final class StaticArticleExtractorDiagnostics: @unchecked Sendable {
+    var evidenceIndexDocumentPasses = 0
+    var evidenceFullDocumentSelectorQueries = 0
+    var indexedDocumentElementCount = 0
+}
+
 struct StaticArticleExtractor: Sendable {
+    private let diagnostics: StaticArticleExtractorDiagnostics?
+
+    init(diagnostics: StaticArticleExtractorDiagnostics? = nil) {
+        self.diagnostics = diagnostics
+    }
+
     func extract(html: Data, sourceURL: URL) throws -> ExtractedWebArticle {
         guard let source = String(data: html, encoding: .utf8) else {
             throw StaticWebBuildError.unreadableHTML
@@ -21,14 +33,11 @@ struct StaticArticleExtractor: Sendable {
             throw StaticWebBuildError.noReadableBlocks
         }
         let structured = try structuredMetadata(in: document)
-        let idCounts = try document.select("[id]").array().reduce(into: [String: Int]()) { counts, element in
-            let id = element.id()
-            if !id.isEmpty { counts[id, default: 0] += 1 }
-        }
+        let evidenceIndex = try buildEvidenceIndex(in: document)
+        let idCounts = evidenceIndex.idCounts
         let originalRootSelector = try uniqueSelector(
             for: originalRoot,
-            in: document,
-            idCounts: idCounts
+            evidenceIndex: evidenceIndex
         )
         let fragment = try SwiftSoup.parseBodyFragment(
             try originalRoot.outerHtml(),
@@ -42,7 +51,7 @@ struct StaticArticleExtractor: Sendable {
             clonedRoot: root,
             idCounts: idCounts,
             rootSelector: originalRootSelector,
-            document: document
+            evidenceIndex: evidenceIndex
         )
         try clean(root)
         let rootSelector = originalRootSelector
@@ -486,6 +495,38 @@ struct StaticArticleExtractor: Sendable {
         return node.getChildNodes().map(rawText).joined()
     }
 
+    private func buildEvidenceIndex(in document: Document) throws -> EvidenceIndex {
+        diagnostics?.evidenceIndexDocumentPasses += 1
+        let elements = try document.getAllElements().array()
+        diagnostics?.indexedDocumentElementCount = elements.count
+        var index = EvidenceIndex()
+        for element in elements {
+            let owner = ObjectIdentifier(element)
+            let id = element.id()
+            if !id.isEmpty {
+                index.idCounts[id, default: 0] += 1
+                if index.idCounts[id] == 1 {
+                    index.uniqueIDOwners[id] = owner
+                } else {
+                    index.uniqueIDOwners[id] = nil
+                }
+            }
+            for name in Self.stableEvidenceAttributeNames {
+                guard let value = try? element.attr(name), !value.isEmpty else {
+                    continue
+                }
+                let key = EvidenceAttributeKey(name: name, value: value)
+                index.stableAttributeCounts[key, default: 0] += 1
+                if index.stableAttributeCounts[key] == 1 {
+                    index.uniqueStableAttributeOwners[key] = owner
+                } else {
+                    index.uniqueStableAttributeOwners[key] = nil
+                }
+            }
+        }
+        return index
+    }
+
     static func cssIdentifierEscaped(_ value: String) -> String {
         let scalars = Array(value.unicodeScalars)
         var result = ""
@@ -562,7 +603,7 @@ struct StaticArticleExtractor: Sendable {
         clonedRoot: Element,
         idCounts: [String: Int],
         rootSelector: String,
-        document: Document
+        evidenceIndex: EvidenceIndex
     ) throws {
         let originals = try originalRoot.getAllElements().array()
         let clones = try clonedRoot.getAllElements().array()
@@ -579,8 +620,7 @@ struct StaticArticleExtractor: Sendable {
                     for: original,
                     root: originalRoot,
                     rootSelector: rootSelector,
-                    document: document,
-                    idCounts: idCounts
+                    evidenceIndex: evidenceIndex
                 )
             )
         }
@@ -590,20 +630,20 @@ struct StaticArticleExtractor: Sendable {
         for element: Element,
         root: Element,
         rootSelector: String,
-        document: Document,
-        idCounts: [String: Int]
+        evidenceIndex: EvidenceIndex
     ) throws -> String {
         if element === root { return rootSelector }
         let id = element.id()
         if !id.isEmpty,
-           idCounts[id] == 1,
+           evidenceIndex.idCounts[id] == 1,
+           evidenceIndex.uniqueIDOwners[id] == ObjectIdentifier(element),
            let selector = idSelector(id),
-           try selectorUniquelyMatches(selector, element: element, in: document) {
+           !selector.isEmpty {
             return selector
         }
         if let selector = try uniqueStableAttributeSelector(
             for: element,
-            in: document,
+            evidenceIndex: evidenceIndex,
             includeTag: false
         ) {
             return selector
@@ -616,19 +656,19 @@ struct StaticArticleExtractor: Sendable {
 
     private func uniqueSelector(
         for element: Element,
-        in document: Document,
-        idCounts: [String: Int]
+        evidenceIndex: EvidenceIndex
     ) throws -> String {
         let id = element.id()
         if !id.isEmpty,
-           idCounts[id] == 1,
+           evidenceIndex.idCounts[id] == 1,
+           evidenceIndex.uniqueIDOwners[id] == ObjectIdentifier(element),
            let selector = idSelector(id),
-           try selectorUniquelyMatches(selector, element: element, in: document) {
+           !selector.isEmpty {
             return selector
         }
         if let selector = try uniqueStableAttributeSelector(
             for: element,
-            in: document,
+            evidenceIndex: evidenceIndex,
             includeTag: true
         ) {
             return selector
@@ -638,7 +678,7 @@ struct StaticArticleExtractor: Sendable {
 
     private func uniqueStableAttributeSelector(
         for element: Element,
-        in document: Document,
+        evidenceIndex: EvidenceIndex,
         includeTag: Bool
     ) throws -> String? {
         for name in ["data-testid", "itemprop", "aria-label", "role"] {
@@ -647,22 +687,17 @@ struct StaticArticleExtractor: Sendable {
                 let code = scalar.value
                 return code >= 0x20 && code != 0x7F && code != 0x22 && code != 0x5C
             }) else { continue }
+            let key = EvidenceAttributeKey(name: name, value: value)
+            guard evidenceIndex.stableAttributeCounts[key] == 1,
+                  evidenceIndex.uniqueStableAttributeOwners[key]
+                    == ObjectIdentifier(element) else {
+                continue
+            }
             let prefix = includeTag ? element.tagName().lowercased() : ""
             let selector = "\(prefix)[\(name)=\"\(cssStringEscaped(value))\"]"
-            if try selectorUniquelyMatches(selector, element: element, in: document) {
-                return selector
-            }
+            return selector
         }
         return nil
-    }
-
-    private func selectorUniquelyMatches(
-        _ selector: String,
-        element: Element,
-        in document: Document
-    ) throws -> Bool {
-        let matches = try document.select(selector).array()
-        return matches.count == 1 && matches[0] === element
     }
 
     private func fullStructuralPath(for element: Element) -> String {
@@ -703,6 +738,28 @@ struct StaticArticleExtractor: Sendable {
     }
 
     private static let originalEvidenceAttribute = "data-document-import-original-evidence"
+    private static let stableEvidenceAttributeNames = [
+        "data-testid", "itemprop", "aria-label", "role",
+    ]
+}
+
+private struct EvidenceAttributeKey: Hashable {
+    let name: String
+    let value: String
+
+    init(name: String, value: String) {
+        self.name = name.lowercased()
+        self.value = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+}
+
+private struct EvidenceIndex {
+    var idCounts: [String: Int] = [:]
+    var uniqueIDOwners: [String: ObjectIdentifier] = [:]
+    var stableAttributeCounts: [EvidenceAttributeKey: Int] = [:]
+    var uniqueStableAttributeOwners: [EvidenceAttributeKey: ObjectIdentifier] = [:]
 }
 
 private struct StructuredMetadata {

@@ -537,3 +537,26 @@ func duplicateStableSemanticAttributesFallBackToStructuralEvidence() throws {
         #expect(try original.select(block.evidenceLocator).size() == 1)
     }
 }
+
+@Test
+func evidenceIndexUsesOneDocumentPassAndNoPerElementSelectorScans() throws {
+    let paragraphs = (0..<200).map { index in
+        "<p data-testid=\"item-\(index)\">Item \(index).</p>"
+    }.joined()
+    let html = "<html><body><article id=\"large-root\">\(paragraphs)</article></body></html>"
+    let diagnostics = StaticArticleExtractorDiagnostics()
+    let result = try StaticArticleExtractor(diagnostics: diagnostics).extract(
+        html: Data(html.utf8),
+        sourceURL: URL(string: "https://fixture.invalid/large-evidence")!
+    )
+
+    #expect(result.blocks.count == 200)
+    #expect(diagnostics.evidenceIndexDocumentPasses == 1)
+    #expect(diagnostics.evidenceFullDocumentSelectorQueries == 0)
+    #expect(diagnostics.indexedDocumentElementCount >= 203)
+
+    let original = try SwiftSoup.parse(html)
+    for block in result.blocks {
+        #expect(try original.select(block.evidenceLocator).size() == 1)
+    }
+}
