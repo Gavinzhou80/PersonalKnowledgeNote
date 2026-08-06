@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "KnowledgeCore", targets: ["KnowledgeCore"]),
         .library(name: "LocalLibrary", targets: ["LocalLibrary"]),
+        .library(name: "DocumentImport", targets: ["DocumentImport"]),
         .library(name: "AppSupport", targets: ["AppSupport"]),
     ],
     dependencies: [
@@ -28,8 +29,12 @@ let package = Package(
             ]
         ),
         .target(
-            name: "AppSupport",
+            name: "DocumentImport",
             dependencies: ["KnowledgeCore", "LocalLibrary"]
+        ),
+        .target(
+            name: "AppSupport",
+            dependencies: ["KnowledgeCore", "LocalLibrary", "DocumentImport"]
         ),
         .target(
             name: "TestFixtures",
@@ -50,6 +55,15 @@ let package = Package(
                 "LocalLibrary",
                 "TestFixtures",
                 .product(name: "GRDB", package: "GRDB.swift"),
+            ]
+        ),
+        .testTarget(
+            name: "DocumentImportTests",
+            dependencies: [
+                "DocumentImport",
+                "KnowledgeCore",
+                "LocalLibrary",
+                "TestFixtures",
             ]
         ),
         .testTarget(
