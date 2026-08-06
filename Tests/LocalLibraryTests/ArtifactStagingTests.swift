@@ -85,6 +85,37 @@ func webPackageIsCopiedIntoTaskOwnedStaging() async throws {
 }
 
 @Test
+func documentImportUsesLocalLibraryDescriptorAuthority() async throws {
+    let temporaryRoot = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(temporaryRoot) }
+    let libraryRoot = temporaryRoot.appending(path: "Library")
+    let package = temporaryRoot.appending(path: "WebPackage")
+    let assets = package.appending(path: "assets")
+    try FileManager.default.createDirectory(
+        at: assets,
+        withIntermediateDirectories: true
+    )
+    try Data("<html><body><img src=\"assets/hero.svg\"></body></html>".utf8)
+        .write(to: package.appending(path: "index.html"))
+    try Data("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".utf8)
+        .write(to: assets.appending(path: "hero.svg"))
+
+    let described = try LocalLibrary.describeWebPackage(at: package)
+    let library = try await LocalLibrary.open(at: libraryRoot)
+    let workspace = try await library.accept(
+        .webpage(try #require(URL(string: "https://example.com/article")))
+    )
+    let snapshot = try await workspace.snapshot()
+
+    let staged = try await workspace.stageArtifact(
+        .package(package, descriptor: described),
+        expectedRevision: snapshot.revision
+    )
+
+    #expect(staged.descriptor == described)
+}
+
+@Test
 func webPackageHashUsesUnambiguousManifestBoundaries() throws {
     let temporaryRoot = try makeTemporaryLibraryRoot()
     defer { removeTemporaryLibraryRoot(temporaryRoot) }

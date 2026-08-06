@@ -28,6 +28,40 @@ public actor LocalLibrary {
         )
     }
 
+    public static func describeWebPackage(
+        at packageURL: URL
+    ) throws -> SourceArtifactDescriptor {
+        try withLocalLibraryErrorTranslation {
+            guard packageURL.isFileURL,
+                  FileManager.default.fileExists(atPath: packageURL.path)
+            else {
+                throw LocalLibraryError.artifactMissing
+            }
+            let values = try packageURL.resourceValues(forKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+            ])
+            guard values.isDirectory == true,
+                  values.isSymbolicLink != true
+            else {
+                throw LocalLibraryError.artifactMissing
+            }
+            let verification = try ManagedArtifactPayload
+                .verifyAndSynchronize(
+                    payload: packageURL,
+                    isDirectory: true
+                )
+            guard verification.byteCount > 0 else {
+                throw LocalLibraryError.artifactMissing
+            }
+            return SourceArtifactDescriptor(
+                kind: .webPackage,
+                byteCount: verification.byteCount,
+                contentHash: verification.contentHash
+            )
+        }
+    }
+
     static func openForTesting(
         at root: URL,
         faultInjector: PublicationFaultInjector

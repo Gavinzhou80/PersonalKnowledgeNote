@@ -38,24 +38,6 @@ enum StableWebIdentity {
         return ContentFingerprint(sha256Hex(identity))
     }
 
-    static func packageDescriptor(
-        relativePath: String,
-        contents: Data
-    ) -> SourceArtifactDescriptor {
-        let path = Data(relativePath.utf8)
-        var manifest = Data([1])
-        append(UInt64(path.count), to: &manifest)
-        manifest.append(path)
-        append(UInt64(contents.count), to: &manifest)
-        manifest.append(contents)
-
-        return SourceArtifactDescriptor(
-            kind: .webPackage,
-            byteCount: UInt64(contents.count),
-            contentHash: sha256Hex(manifest)
-        )
-    }
-
     private static func append(_ value: String, to data: inout Data) {
         let encoded = Data(value.utf8)
         append(UInt64(encoded.count), to: &data)

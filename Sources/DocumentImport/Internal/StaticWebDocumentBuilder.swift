@@ -1,5 +1,6 @@
 import Foundation
 import KnowledgeCore
+import LocalLibrary
 
 enum StaticWebBuildError: Error, Equatable, Sendable {
     case unreadableHTML
@@ -57,10 +58,14 @@ struct StaticWebDocumentBuilder: Sendable {
             title: title,
             blocks: extractedBlocks
         )
-        let descriptor = StableWebIdentity.packageDescriptor(
-            relativePath: "index.html",
-            contents: packageContents
-        )
+        let packageURL = try writePackage(contents: packageContents)
+        let descriptor: SourceArtifactDescriptor
+        do {
+            descriptor = try LocalLibrary.describeWebPackage(at: packageURL)
+        } catch {
+            try? FileManager.default.removeItem(at: packageURL)
+            throw error
+        }
         let content = SourceDocumentContent(
             documentID: documentID,
             importedMetadata: ImportedDocumentMetadata(
@@ -75,8 +80,6 @@ struct StaticWebDocumentBuilder: Sendable {
             content: content,
             artifact: descriptor
         )
-        let packageURL = try writePackage(contents: packageContents)
-
         return StaticWebImportProduct(
             packageURL: packageURL,
             descriptor: descriptor,
