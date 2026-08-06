@@ -92,7 +92,11 @@ public actor LocalLibrary {
             let database = try LibraryDatabase(
                 url: root.appending(path: "library.sqlite")
             )
-            let managedArtifacts = try ManagedArtifacts(root: root)
+            let managedArtifacts = try ManagedArtifacts(
+                root: root,
+                checkpointArtifactFaultInjector:
+                    checkpointArtifactFaultInjector
+            )
             try PublicationRecovery(
                 database: database,
                 managedArtifacts: managedArtifacts

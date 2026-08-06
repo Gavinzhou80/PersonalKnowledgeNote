@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import GRDB
 import KnowledgeCore
@@ -12,6 +13,321 @@ struct InvalidPersistedCheckpointDescriptor: Sendable {
 private struct RawCheckpointArtifactDescriptor: Codable {
     let byteCount: Int64
     let contentHash: String
+}
+
+private final class CheckpointRaceController: @unchecked Sendable {
+    private let lock = NSLock()
+    private let target: CheckpointArtifactFaultPoint
+    private let action: @Sendable () throws -> Void
+    private var armed = false
+    private var fired = false
+
+    init(
+        target: CheckpointArtifactFaultPoint,
+        action: @escaping @Sendable () throws -> Void
+    ) {
+        self.target = target
+        self.action = action
+    }
+
+    func arm() {
+        lock.lock()
+        armed = true
+        lock.unlock()
+    }
+
+    func hit(_ point: CheckpointArtifactFaultPoint) throws {
+        lock.lock()
+        let shouldRun = armed && !fired && point == target
+        if shouldRun {
+            fired = true
+        }
+        lock.unlock()
+        if shouldRun {
+            try action()
+        }
+    }
+
+    var injector: CheckpointArtifactFaultInjector {
+        CheckpointArtifactFaultInjector { [self] point in
+            try hit(point)
+        }
+    }
+}
+
+@Test
+func sourceChildSymlinkSwapIsRejectedWithoutCopyingExternalBytes()
+    async throws
+{
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let package = try makeCheckpointPackage(body: Data("owned".utf8))
+    defer { try? FileManager.default.removeItem(at: package) }
+    let external = root.appending(path: "external-source.bin")
+    try Data("external-secret".utf8).write(to: external)
+    let payload = package.appending(path: "payload.bin")
+    let race = CheckpointRaceController(
+        target: .beforeOpeningCheckpointSourceChild
+    ) {
+        try FileManager.default.removeItem(at: payload)
+        try FileManager.default.createSymbolicLink(
+            at: payload,
+            withDestinationURL: external
+        )
+    }
+    let library = try await LocalLibrary.openForTesting(
+        at: root.appending(path: "Library"),
+        checkpointArtifactFaultInjector: race.injector
+    )
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/source-symlink-race")!)
+    )
+    let initial = try await workspace.snapshot()
+    race.arm()
+
+    await #expect(throws: LocalLibraryError.artifactMissing) {
+        _ = try await workspace.replaceCheckpointArtifact(
+            packageURL: package,
+            update: CheckpointUpdate(
+                expectedRevision: initial.revision,
+                ordinal: 1,
+                envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+            )
+        )
+    }
+    #expect(try Data(contentsOf: external) == Data("external-secret".utf8))
+    #expect(try await workspace.checkpointArtifactCount() == 0)
+    #expect(try await workspace.snapshot().revision == initial.revision)
+}
+
+@Test
+func sourceChildSpecialFileSwapIsRejectedWithoutManagedBytes()
+    async throws
+{
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let package = try makeCheckpointPackage(body: Data("owned".utf8))
+    defer { try? FileManager.default.removeItem(at: package) }
+    let payload = package.appending(path: "payload.bin")
+    let race = CheckpointRaceController(
+        target: .beforeOpeningCheckpointSourceChild
+    ) {
+        try FileManager.default.removeItem(at: payload)
+        guard mkfifo(payload.path, S_IRUSR | S_IWUSR) == 0 else {
+            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+        }
+    }
+    let library = try await LocalLibrary.openForTesting(
+        at: root.appending(path: "Library"),
+        checkpointArtifactFaultInjector: race.injector
+    )
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/source-special-race")!)
+    )
+    let initial = try await workspace.snapshot()
+    race.arm()
+
+    await #expect(throws: LocalLibraryError.artifactMissing) {
+        _ = try await workspace.replaceCheckpointArtifact(
+            packageURL: package,
+            update: CheckpointUpdate(
+                expectedRevision: initial.revision,
+                ordinal: 1,
+                envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+            )
+        )
+    }
+    #expect(try await workspace.checkpointArtifactCount() == 0)
+    #expect(try await workspace.snapshot().revision == initial.revision)
+}
+
+@Test
+func growingSourceFileStopsAtOneOverLimitAndCleansPartialDestination()
+    async throws
+{
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let package = try makeCheckpointPackage(fileSizes: [
+        "a.bin": Int(CheckpointPackageLimits.maximumFileByteCount),
+    ])
+    defer { try? FileManager.default.removeItem(at: package) }
+    let growingFile = package.appending(path: "a.bin")
+    let race = CheckpointRaceController(
+        target: .afterOpeningCheckpointSourceFileBeforeRead
+    ) {
+        let handle = try FileHandle(forWritingTo: growingFile)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data([0x42]))
+        try handle.synchronize()
+    }
+    let library = try await LocalLibrary.openForTesting(
+        at: root.appending(path: "Library"),
+        checkpointArtifactFaultInjector: race.injector
+    )
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/source-growth-race")!)
+    )
+    let initial = try await workspace.snapshot()
+    race.arm()
+
+    await #expect(throws: LocalLibraryError.artifactMissing) {
+        _ = try await workspace.replaceCheckpointArtifact(
+            packageURL: package,
+            update: CheckpointUpdate(
+                expectedRevision: initial.revision,
+                ordinal: 1,
+                envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+            )
+        )
+    }
+    #expect(
+        try FileManager.default.attributesOfItem(atPath: growingFile.path)[
+            .size
+        ] as? Int == Int(CheckpointPackageLimits.maximumFileByteCount) + 1
+    )
+    #expect(try await workspace.checkpointArtifactCount() == 0)
+    #expect(try await workspace.snapshot().revision == initial.revision)
+}
+
+@Test
+func managedArtifactDirectorySymlinkSwapCannotRedirectLoad()
+    async throws
+{
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let library = try await LocalLibrary.open(at: libraryRoot)
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/managed-artifact-race")!)
+    )
+    let package = try makeCheckpointPackage(body: Data("owned".utf8))
+    defer { try? FileManager.default.removeItem(at: package) }
+    let attached = try await workspace.replaceCheckpointArtifact(
+        packageURL: package,
+        update: CheckpointUpdate(
+            expectedRevision: try await workspace.snapshot().revision,
+            ordinal: 1,
+            envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+        )
+    )
+    let artifactDirectory = libraryRoot.appending(
+        path: ManagedArtifactPath.checkpoint(
+            taskID: workspace.taskID,
+            artifactID: attached.artifact.rawValue
+        ).relativePath
+    )
+    let parked = artifactDirectory.deletingLastPathComponent().appending(
+        path: "\(attached.artifact.rawValue.uuidString)-PARKED"
+    )
+    let external = try makeCheckpointPackage(body: Data("external".utf8))
+    defer { try? FileManager.default.removeItem(at: external) }
+    let race = CheckpointRaceController(
+        target: .beforeOpeningManagedCheckpointChild
+    ) {
+        try FileManager.default.moveItem(at: artifactDirectory, to: parked)
+        try FileManager.default.createSymbolicLink(
+            at: artifactDirectory,
+            withDestinationURL: external
+        )
+    }
+    let faulting = try await LocalLibrary.openForTesting(
+        at: libraryRoot,
+        checkpointArtifactFaultInjector: race.injector
+    )
+    let faultingWorkspace = try #require(
+        try await faulting.importWorkspace(id: workspace.taskID)
+    )
+    race.arm()
+
+    await #expect(throws: LocalLibraryError.artifactMissing) {
+        _ = try await faultingWorkspace.loadCheckpointArtifact(
+            attached.artifact
+        )
+    }
+    #expect(try Data(contentsOf: external.appending(path: "payload.bin"))
+        == Data("external".utf8))
+    #expect(try await faultingWorkspace.snapshot().checkpointArtifact
+        == attached.artifact)
+
+    try FileManager.default.removeItem(at: artifactDirectory)
+    try FileManager.default.moveItem(at: parked, to: artifactDirectory)
+    #expect(
+        try await faultingWorkspace.loadCheckpointArtifact(attached.artifact)
+            .files["payload.bin"] == Data("owned".utf8)
+    )
+}
+
+@Test
+func managedTaskDirectorySymlinkSwapCannotDeleteExternalContent()
+    async throws
+{
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let libraryRoot = root.appending(path: "Library")
+    let library = try await LocalLibrary.open(at: libraryRoot)
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/managed-task-race")!)
+    )
+    let package = try makeCheckpointPackage(body: Data("owned".utf8))
+    defer { try? FileManager.default.removeItem(at: package) }
+    let attached = try await workspace.replaceCheckpointArtifact(
+        packageURL: package,
+        update: CheckpointUpdate(
+            expectedRevision: try await workspace.snapshot().revision,
+            ordinal: 1,
+            envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+        )
+    )
+    let taskDirectory = libraryRoot.appending(
+        path: "Checkpoints/\(workspace.taskID.rawValue.uuidString)"
+    )
+    let parked = taskDirectory.deletingLastPathComponent().appending(
+        path: "\(workspace.taskID.rawValue.uuidString)-PARKED"
+    )
+    let external = root.appending(path: "external-task")
+    try FileManager.default.createDirectory(
+        at: external,
+        withIntermediateDirectories: true
+    )
+    let marker = external.appending(path: "do-not-delete.txt")
+    try Data("external".utf8).write(to: marker)
+    let race = CheckpointRaceController(
+        target: .afterPinningManagedCheckpointTaskDirectory
+    ) {
+        try FileManager.default.moveItem(at: taskDirectory, to: parked)
+        try FileManager.default.createSymbolicLink(
+            at: taskDirectory,
+            withDestinationURL: external
+        )
+    }
+    let faulting = try await LocalLibrary.openForTesting(
+        at: libraryRoot,
+        checkpointArtifactFaultInjector: race.injector
+    )
+    let faultingWorkspace = try #require(
+        try await faulting.importWorkspace(id: workspace.taskID)
+    )
+    race.arm()
+
+    await #expect(throws: LocalLibraryError.artifactMissing) {
+        _ = try await faultingWorkspace.removeCheckpointArtifact(
+            expectedRevision: attached.snapshot.revision
+        )
+    }
+    #expect(try Data(contentsOf: marker) == Data("external".utf8))
+    let committed = try await faultingWorkspace.snapshot()
+    #expect(committed.checkpoint == nil)
+    #expect(committed.checkpointArtifact == nil)
+
+    try FileManager.default.removeItem(at: taskDirectory)
+    try FileManager.default.moveItem(at: parked, to: taskDirectory)
+    let reopened = try await LocalLibrary.open(at: libraryRoot)
+    let recovered = try #require(
+        try await reopened.importWorkspace(id: workspace.taskID)
+    )
+    #expect(try await recovered.checkpointArtifactCount() == 0)
+    #expect(try Data(contentsOf: marker) == Data("external".utf8))
 }
 
 @Test(arguments: [

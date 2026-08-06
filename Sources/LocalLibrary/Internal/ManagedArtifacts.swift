@@ -3,6 +3,11 @@ import Foundation
 import KnowledgeCore
 
 enum CheckpointArtifactFaultPoint: Equatable, Sendable {
+    case afterOpeningCheckpointSourceRootBeforeTraversal
+    case beforeOpeningCheckpointSourceChild
+    case afterOpeningCheckpointSourceFileBeforeRead
+    case afterPinningManagedCheckpointTaskDirectory
+    case beforeOpeningManagedCheckpointChild
     case afterNewCopyBeforeDatabaseMutation
     case afterCheckpointArtifactRowMutationBeforeTaskUpdate
     case afterDatabaseCommitBeforeOldRemoval
@@ -178,10 +183,13 @@ struct ManagedArtifacts {
     private let root: URL
     private let stagingRoot: URL
     private let artifactsRoot: URL
-    private let checkpointsRoot: URL
+    private let checkpointFileSystem: CheckpointFileSystem
     private let quarantineRoot: URL
 
-    init(root requestedRoot: URL) throws {
+    init(
+        root requestedRoot: URL,
+        checkpointArtifactFaultInjector: CheckpointArtifactFaultInjector = .none
+    ) throws {
         let fileManager = FileManager.default
         let standardizedRoot = requestedRoot.standardizedFileURL
         try fileManager.createDirectory(
@@ -268,7 +276,11 @@ struct ManagedArtifacts {
         root = resolvedRoot
         stagingRoot = resolvedStagingRoot
         artifactsRoot = resolvedArtifactsRoot
-        checkpointsRoot = resolvedCheckpointsRoot
+        checkpointFileSystem = try CheckpointFileSystem(
+            libraryRoot: resolvedRoot,
+            checkpointsRoot: resolvedCheckpointsRoot,
+            faultInjector: checkpointArtifactFaultInjector
+        )
         quarantineRoot = resolvedQuarantineRoot
         try ManagedArtifactPayload.synchronizeDirectory(resolvedRoot)
     }
@@ -317,48 +329,21 @@ struct ManagedArtifacts {
         at source: URL,
         for taskID: ImportTaskID
     ) throws -> CheckpointArtifactPlacement {
-        let verifiedSource = try validateSource(
-            source,
-            expectsDirectory: true
-        )
-        _ = try ManagedArtifactPayload.verifyCheckpointPackage(
-            payload: verifiedSource,
-            loadFiles: false
-        )
         let artifactID = UUID()
         let path = ManagedArtifactPath.checkpoint(
             taskID: taskID,
             artifactID: artifactID
         )
-        let container = try resolve(path)
-        let taskDirectory = container.deletingLastPathComponent()
-        guard !FileManager.default.fileExists(atPath: container.path) else {
-            throw LocalLibraryError.artifactOwnershipViolation
-        }
-        try FileManager.default.createDirectory(
-            at: taskDirectory,
-            withIntermediateDirectories: true
+        let descriptor = try checkpointFileSystem.copyPackage(
+            at: source,
+            taskID: taskID,
+            artifactID: artifactID
         )
-
-        var completed = false
-        defer {
-            if !completed {
-                try? removeCheckpointPath(path)
-            }
-        }
-        try FileManager.default.copyItem(at: verifiedSource, to: container)
-        let verification = try ManagedArtifactPayload.verifyCheckpointPackage(
-            payload: container,
-            loadFiles: false
-        )
-        try ManagedArtifactPayload.synchronizeDirectory(taskDirectory)
-        try ManagedArtifactPayload.synchronizeDirectory(checkpointsRoot)
-        completed = true
         return try CheckpointArtifactPlacement(
             taskID: taskID,
             artifact: ManagedCheckpointArtifact(
                 rawValue: artifactID,
-                descriptor: verification.descriptor
+                descriptor: descriptor
             ),
             path: path
         )
@@ -367,148 +352,32 @@ struct ManagedArtifacts {
     func loadCheckpointPackage(
         _ placement: CheckpointArtifactPlacement
     ) throws -> VerifiedCheckpointPackage {
-        let container = try resolve(placement.path)
-        guard FileManager.default.fileExists(atPath: container.path) else {
-            throw LocalLibraryError.artifactMissing
-        }
-        let verification = try ManagedArtifactPayload.verifyCheckpointPackage(
-            payload: container,
-            loadFiles: true
-        )
-        guard verification.descriptor == placement.artifact.descriptor else {
-            throw LocalLibraryError.artifactMissing
-        }
-        return VerifiedCheckpointPackage(
-            descriptor: verification.descriptor,
-            files: verification.files
+        try checkpointFileSystem.loadPackage(
+            taskID: placement.taskID,
+            artifactID: placement.artifact.rawValue,
+            expectedDescriptor: placement.artifact.descriptor
         )
     }
 
     func removeCheckpointArtifact(
         _ cleanup: CheckpointArtifactCleanup
     ) throws {
-        try removeCheckpointPath(cleanup.placement.path)
+        try checkpointFileSystem.removePackage(
+            taskID: cleanup.placement.taskID,
+            artifactID: cleanup.placement.artifact.rawValue
+        )
     }
 
     func checkpointArtifactCount(for taskID: ImportTaskID) throws -> Int {
-        let taskComponent = taskID.rawValue.uuidString
-        try rejectSymbolicLinks(
-            from: checkpointsRoot,
-            components: [taskComponent]
-        )
-        let taskDirectory = checkpointsRoot
-            .appending(path: taskComponent)
-            .standardizedFileURL
-        guard taskDirectory.resolvingSymlinksInPath() == taskDirectory else {
-            throw LocalLibraryError.artifactMissing
-        }
-        guard FileManager.default.fileExists(atPath: taskDirectory.path) else {
-            return 0
-        }
-        let entries = try FileManager.default.contentsOfDirectory(
-            at: taskDirectory,
-            includingPropertiesForKeys: [
-                .isDirectoryKey,
-                .isSymbolicLinkKey,
-            ]
-        )
-        for entry in entries {
-            guard let artifactID = UUID(
-                uuidString: entry.lastPathComponent
-            ), artifactID.uuidString == entry.lastPathComponent,
-                  try !Self.isSymbolicLink(entry),
-                  entry.resolvingSymlinksInPath()
-                    == entry.standardizedFileURL,
-                  try entry.resourceValues(
-                    forKeys: [.isDirectoryKey]
-                  ).isDirectory == true
-            else {
-                throw LocalLibraryError.artifactMissing
-            }
-        }
-        return entries.count
+        try checkpointFileSystem.packageCount(taskID: taskID)
     }
 
     func removeUnownedCheckpoints(
         ownedPaths: Set<ManagedArtifactPath>
     ) throws {
-        for path in ownedPaths {
-            guard case .checkpoint = path else {
-                throw corruptManagedArtifactOwnership()
-            }
-        }
-        let fileManager = FileManager.default
-        let taskDirectories = try fileManager.contentsOfDirectory(
-            at: checkpointsRoot,
-            includingPropertiesForKeys: [
-                .isDirectoryKey,
-                .isSymbolicLinkKey,
-            ]
+        try checkpointFileSystem.removeUnownedPackages(
+            ownedPaths: ownedPaths
         )
-        for taskDirectory in taskDirectories {
-            guard let taskUUID = UUID(
-                uuidString: taskDirectory.lastPathComponent
-            ), taskUUID.uuidString == taskDirectory.lastPathComponent,
-                  try !Self.isSymbolicLink(taskDirectory),
-                  taskDirectory.resolvingSymlinksInPath()
-                    == taskDirectory.standardizedFileURL,
-                  try taskDirectory.resourceValues(
-                    forKeys: [.isDirectoryKey]
-                  ).isDirectory == true
-            else {
-                throw corruptManagedArtifactOwnership()
-            }
-            for container in try fileManager.contentsOfDirectory(
-                at: taskDirectory,
-                includingPropertiesForKeys: [
-                    .isDirectoryKey,
-                    .isSymbolicLinkKey,
-                ]
-            ) {
-                guard let artifactID = UUID(
-                    uuidString: container.lastPathComponent
-                ), artifactID.uuidString == container.lastPathComponent,
-                      try !Self.isSymbolicLink(container),
-                      container.resolvingSymlinksInPath()
-                        == container.standardizedFileURL,
-                      try container.resourceValues(
-                        forKeys: [.isDirectoryKey]
-                      ).isDirectory == true
-                else {
-                    throw corruptManagedArtifactOwnership()
-                }
-                let path = ManagedArtifactPath.checkpoint(
-                    taskID: ImportTaskID(taskUUID),
-                    artifactID: artifactID
-                )
-                guard !ownedPaths.contains(path) else {
-                    continue
-                }
-                do {
-                    try fileManager.removeItem(at: container)
-                    try ManagedArtifactPayload.synchronizeDirectory(
-                        taskDirectory
-                    )
-                } catch {
-                    continue
-                }
-            }
-            let remaining = try fileManager.contentsOfDirectory(
-                at: taskDirectory,
-                includingPropertiesForKeys: nil
-            )
-            if remaining.isEmpty {
-                do {
-                    try fileManager.removeItem(at: taskDirectory)
-                    try ManagedArtifactPayload.synchronizeDirectory(
-                        checkpointsRoot
-                    )
-                } catch {
-                    continue
-                }
-            }
-        }
-        try? ManagedArtifactPayload.synchronizeDirectory(checkpointsRoot)
     }
 
     func finalRelativePath(documentID: SourceDocumentID) -> String {
@@ -733,6 +602,12 @@ struct ManagedArtifacts {
     }
 
     func exists(_ path: ManagedArtifactPath) throws -> Bool {
+        if case .checkpoint(let taskID, let artifactID) = path {
+            return try checkpointFileSystem.packageExists(
+                taskID: taskID,
+                artifactID: artifactID
+            )
+        }
         let managedURL = try resolve(path)
         return FileManager.default.fileExists(atPath: managedURL.path)
     }
@@ -797,27 +672,6 @@ struct ManagedArtifacts {
         let parent = managedURL.deletingLastPathComponent()
         try FileManager.default.removeItem(at: managedURL)
         try ManagedArtifactPayload.synchronizeDirectory(parent)
-    }
-
-    private func removeCheckpointPath(_ path: ManagedArtifactPath) throws {
-        guard case .checkpoint = path else {
-            throw corruptManagedArtifactOwnership()
-        }
-        let managedURL = try resolve(path)
-        let taskDirectory = managedURL.deletingLastPathComponent()
-        guard FileManager.default.fileExists(atPath: managedURL.path) else {
-            return
-        }
-        try FileManager.default.removeItem(at: managedURL)
-        try ManagedArtifactPayload.synchronizeDirectory(taskDirectory)
-        let remaining = try FileManager.default.contentsOfDirectory(
-            at: taskDirectory,
-            includingPropertiesForKeys: nil
-        )
-        if remaining.isEmpty {
-            try FileManager.default.removeItem(at: taskDirectory)
-            try ManagedArtifactPayload.synchronizeDirectory(checkpointsRoot)
-        }
     }
 
     func removeAbandonedStagedArtifact(
@@ -1078,7 +932,7 @@ struct ManagedArtifacts {
         case .artifacts:
             scopeRoot = artifactsRoot
         case .checkpoints:
-            scopeRoot = checkpointsRoot
+            throw LocalLibraryError.artifactMissing
         }
         let components = path.identityComponents
         try rejectSymbolicLinks(
