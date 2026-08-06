@@ -2,20 +2,35 @@ import Foundation
 import KnowledgeCore
 import SwiftSoup
 
-final class StaticArticleExtractorDiagnostics: @unchecked Sendable {
-    var evidenceIndexDocumentPasses = 0
-    var evidenceFullDocumentSelectorQueries = 0
-    var indexedDocumentElementCount = 0
+struct EvidenceExtractionMetrics: Sendable {
+    var documentPasses = 0
+    var indexedElementCount = 0
+    var ordinalComputations = 0
 }
 
 struct StaticArticleExtractor: Sendable {
-    private let diagnostics: StaticArticleExtractorDiagnostics?
-
-    init(diagnostics: StaticArticleExtractorDiagnostics? = nil) {
-        self.diagnostics = diagnostics
+    func extract(html: Data, sourceURL: URL) throws -> ExtractedWebArticle {
+        try extractWithMetrics(html: html, sourceURL: sourceURL).article
     }
 
-    func extract(html: Data, sourceURL: URL) throws -> ExtractedWebArticle {
+    func extractWithMetrics(
+        html: Data,
+        sourceURL: URL
+    ) throws -> (article: ExtractedWebArticle, metrics: EvidenceExtractionMetrics) {
+        var metrics = EvidenceExtractionMetrics()
+        let article = try extractArticle(
+            html: html,
+            sourceURL: sourceURL,
+            metrics: &metrics
+        )
+        return (article, metrics)
+    }
+
+    private func extractArticle(
+        html: Data,
+        sourceURL: URL,
+        metrics: inout EvidenceExtractionMetrics
+    ) throws -> ExtractedWebArticle {
         guard let source = String(data: html, encoding: .utf8) else {
             throw StaticWebBuildError.unreadableHTML
         }
@@ -33,7 +48,10 @@ struct StaticArticleExtractor: Sendable {
             throw StaticWebBuildError.noReadableBlocks
         }
         let structured = try structuredMetadata(in: document)
-        let evidenceIndex = try buildEvidenceIndex(in: document)
+        let evidenceIndex = try buildEvidenceIndex(
+            in: document,
+            metrics: &metrics
+        )
         let idCounts = evidenceIndex.idCounts
         let originalRootSelector = try uniqueSelector(
             for: originalRoot,
@@ -357,58 +375,14 @@ struct StaticArticleExtractor: Sendable {
 
     private func evidence(
         _ element: Element,
-        root: Element,
-        idCounts: [String: Int],
-        allowCapturedOriginal: Bool = true
+        root _: Element,
+        idCounts _: [String: Int]
     ) -> String {
-        if allowCapturedOriginal,
-           let original = try? element.attr(Self.originalEvidenceAttribute),
-           !original.isEmpty {
-            return original
+        guard let original = try? element.attr(Self.originalEvidenceAttribute),
+              !original.isEmpty else {
+            preconditionFailure("Missing original evidence on retained element")
         }
-        let id = element.id()
-        if !id.isEmpty, idCounts[id] == 1 {
-            if let selector = idSelector(id) { return selector }
-        }
-        if let selector = stableAttributeSelector(element, includeTag: false) { return selector }
-        var parts: [String] = []
-        var current: Element? = element
-        while let node = current, node !== root {
-            let tag = node.tagName().lowercased()
-            var ordinal = 1
-            if let parent = node.parent() {
-                for sibling in parent.children().array() {
-                    if sibling === node { break }
-                    if sibling.tagName().lowercased() == tag { ordinal += 1 }
-                }
-            }
-            parts.append("\(tag):nth-of-type(\(ordinal))")
-            current = node.parent()
-        }
-        parts.append(selectorForRoot(root, idCounts: idCounts))
-        return parts.reversed().joined(separator: " > ")
-    }
-
-    private func selectorForRoot(_ root: Element, idCounts: [String: Int]) -> String {
-        let id = root.id()
-        if !id.isEmpty, idCounts[id] == 1 {
-            if let selector = idSelector(id) { return selector }
-        }
-        if let selector = stableAttributeSelector(root, includeTag: true) { return selector }
-        return root.tagName().lowercased()
-    }
-
-    private func stableAttributeSelector(_ element: Element, includeTag: Bool) -> String? {
-        for name in ["data-testid", "itemprop", "aria-label", "role"] {
-            guard let value = try? element.attr(name), !value.isEmpty else { continue }
-            guard value.unicodeScalars.allSatisfy({ scalar in
-                let code = scalar.value
-                return code >= 0x20 && code != 0x7F && code != 0x22 && code != 0x5C
-            }) else { continue }
-            let prefix = includeTag ? element.tagName().lowercased() : ""
-            return "\(prefix)[\(name)=\"\(cssStringEscaped(value))\"]"
-        }
-        return nil
+        return original
     }
 
     private func metadataContent(_ document: Document, selector: String, attribute: String) throws -> String? {
@@ -495,13 +469,28 @@ struct StaticArticleExtractor: Sendable {
         return node.getChildNodes().map(rawText).joined()
     }
 
-    private func buildEvidenceIndex(in document: Document) throws -> EvidenceIndex {
-        diagnostics?.evidenceIndexDocumentPasses += 1
+    private func buildEvidenceIndex(
+        in document: Document,
+        metrics: inout EvidenceExtractionMetrics
+    ) throws -> EvidenceIndex {
+        metrics.documentPasses += 1
         let elements = try document.getAllElements().array()
-        diagnostics?.indexedDocumentElementCount = elements.count
+        metrics.indexedElementCount = elements.count
         var index = EvidenceIndex()
+        var siblingTagCounts: [ObjectIdentifier: [String: Int]] = [:]
         for element in elements {
             let owner = ObjectIdentifier(element)
+            if let parent = element.parent() {
+                let parentID = ObjectIdentifier(parent)
+                let tag = element.tagName().lowercased()
+                let ordinal = siblingTagCounts[parentID, default: [:]][tag, default: 0] + 1
+                siblingTagCounts[parentID, default: [:]][tag] = ordinal
+                index.tagOrdinals[owner] = ordinal
+                metrics.ordinalComputations += 1
+            } else {
+                index.tagOrdinals[owner] = 1
+                metrics.ordinalComputations += 1
+            }
             let id = element.id()
             if !id.isEmpty {
                 index.idCounts[id, default: 0] += 1
@@ -650,7 +639,8 @@ struct StaticArticleExtractor: Sendable {
         }
         return rootSelector + " > " + relativeStructuralPath(
             from: element,
-            to: root
+            to: root,
+            evidenceIndex: evidenceIndex
         )
     }
 
@@ -673,7 +663,7 @@ struct StaticArticleExtractor: Sendable {
         ) {
             return selector
         }
-        return fullStructuralPath(for: element)
+        return fullStructuralPath(for: element, evidenceIndex: evidenceIndex)
     }
 
     private func uniqueStableAttributeSelector(
@@ -700,12 +690,15 @@ struct StaticArticleExtractor: Sendable {
         return nil
     }
 
-    private func fullStructuralPath(for element: Element) -> String {
+    private func fullStructuralPath(
+        for element: Element,
+        evidenceIndex: EvidenceIndex
+    ) -> String {
         var parts: [String] = []
         var current: Element? = element
         while let node = current {
             if node is Document { break }
-            parts.append(structuralComponent(for: node))
+            parts.append(structuralComponent(for: node, evidenceIndex: evidenceIndex))
             current = node.parent()
         }
         return parts.reversed().joined(separator: " > ")
@@ -713,27 +706,25 @@ struct StaticArticleExtractor: Sendable {
 
     private func relativeStructuralPath(
         from element: Element,
-        to root: Element
+        to root: Element,
+        evidenceIndex: EvidenceIndex
     ) -> String {
         var parts: [String] = []
         var current: Element? = element
         while let node = current, node !== root {
-            parts.append(structuralComponent(for: node))
+            parts.append(structuralComponent(for: node, evidenceIndex: evidenceIndex))
             current = node.parent()
         }
         return parts.reversed().joined(separator: " > ")
     }
 
-    private func structuralComponent(for element: Element) -> String {
+    private func structuralComponent(
+        for element: Element,
+        evidenceIndex: EvidenceIndex
+    ) -> String {
         let tag = element.tagName().lowercased()
         if tag == "html" || tag == "body" { return tag }
-        var ordinal = 1
-        if let parent = element.parent() {
-            for sibling in parent.children().array() {
-                if sibling === element { break }
-                if sibling.tagName().lowercased() == tag { ordinal += 1 }
-            }
-        }
+        let ordinal = evidenceIndex.tagOrdinals[ObjectIdentifier(element)] ?? 1
         return "\(tag):nth-of-type(\(ordinal))"
     }
 
@@ -760,6 +751,7 @@ private struct EvidenceIndex {
     var uniqueIDOwners: [String: ObjectIdentifier] = [:]
     var stableAttributeCounts: [EvidenceAttributeKey: Int] = [:]
     var uniqueStableAttributeOwners: [EvidenceAttributeKey: ObjectIdentifier] = [:]
+    var tagOrdinals: [ObjectIdentifier: Int] = [:]
 }
 
 private struct StructuredMetadata {
