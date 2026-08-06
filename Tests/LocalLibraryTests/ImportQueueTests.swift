@@ -93,6 +93,23 @@ func migratesV1ImportTasksIntoDurableQueue() async throws {
 }
 
 @Test
+func malformedV1TaskIdentifierIsCorruptDuringMigration() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    try ImportQueueTestDriver.createMalformedV1TaskIdentifierFixture(at: root)
+
+    do {
+        _ = try await LocalLibrary.open(at: root)
+        Issue.record("Expected malformed v1 task identifier corruption")
+    } catch let error as LocalLibraryError {
+        guard case .corruptLibrary = error else {
+            Issue.record("Expected corruptLibrary, got \(error)")
+            return
+        }
+    }
+}
+
+@Test
 func claimRevisesClaimedAndShiftedQueuedTasksOnce() async throws {
     let root = try makeTemporaryLibraryRoot()
     defer { removeTemporaryLibraryRoot(root) }
@@ -707,6 +724,33 @@ private enum ImportQueueTestDriver {
             working: working,
             abandoned: abandoned
         )
+    }
+
+    static func createMalformedV1TaskIdentifierFixture(
+        at root: URL
+    ) throws {
+        let queue = try DatabaseQueue(
+            path: root.appending(path: "library.sqlite").path
+        )
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("v1_local_library") { db in
+            try createV1Schema(in: db)
+        }
+        try migrator.migrate(queue)
+        try queue.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO import_tasks (
+                        task_id, source_kind, source_value, attempt, revision,
+                        state, checkpoint_ordinal, checkpoint_codec_version,
+                        checkpoint_payload, staged_artifact_id, outcome_json
+                    ) VALUES (
+                        X'80', 'webpage', 'https://example.test/malformed-v1',
+                        1, 0, 'accepted', NULL, NULL, NULL, NULL, NULL
+                    )
+                    """
+            )
+        }
     }
 
     static func importRows(at root: URL) throws -> [ImportRow] {

@@ -83,12 +83,16 @@ enum SchemaMigrations {
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT task_id, state
+                    SELECT task_id
                     FROM import_tasks
                     ORDER BY rowid
                     """
             )
             for (offset, row) in rows.enumerated() {
+                let taskID = try row.decode(
+                    String.self,
+                    forColumn: "task_id"
+                )
                 let sequence = Int64(offset) + 1
                 try db.execute(
                     sql: """
@@ -103,7 +107,7 @@ enum SchemaMigrations {
                     arguments: [
                         sequence,
                         sequence,
-                        row["task_id"] as String,
+                        taskID,
                     ]
                 )
             }
