@@ -63,7 +63,11 @@ struct WebArtifactRenderer: Sendable {
             return "<pre><code\(attribute)>\(escape(block.canonicalText))</code></pre>"
         case .image:
             guard let key = block.imageKey, let reference = media[key] else {
-                return block.canonicalText.isEmpty ? "" : "<p data-missing-image=\"true\">\(escape(block.canonicalText))</p>"
+                guard !block.canonicalText.isEmpty else {
+                    return "<div data-missing-image=\"true\" aria-hidden=\"true\"></div>"
+                }
+                let alt = escape(block.canonicalText)
+                return "<div data-missing-image=\"true\" role=\"img\" aria-label=\"\(alt)\">\(alt)</div>"
             }
             return "<img src=\"\(escape(reference.artifactRelativePath))\" alt=\"\(escape(reference.altText ?? block.canonicalText))\">"
         case .caption: return "<figcaption>\(inline(block))</figcaption>"
