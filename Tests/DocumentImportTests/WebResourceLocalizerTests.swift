@@ -88,6 +88,59 @@ func rejectsInvalidUnsafeAndOversizedImagesWithoutFailingTheBatch() async throws
 }
 
 @Test
+func validatesDeclaredImageContentBeforePublishingAssets() async throws {
+    let validPNG = try #require(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+    let validGIF = try #require(Data(base64Encoded: "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="))
+    let validSVG = Data("<svg xmlns='http://www.w3.org/2000/svg' width='8' height='6'><path d='M0 0h8v6H0z'/></svg>".utf8)
+    let activeSVG = Data("<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'><script>alert(1)</script></svg>".utf8)
+    let remoteSVG = Data("<svg xmlns='http://www.w3.org/2000/svg'><image href='https://tracker.invalid/pixel.png'/></svg>".utf8)
+    let server = try await LocalHTTPFixtureServer.start { path in
+        switch path {
+        case "/valid.png": .init(headers: ["Content-Type": "image/png"], body: validPNG)
+        case "/valid.svg": .init(headers: ["Content-Type": "image/svg+xml"], body: validSVG)
+        case "/fake.png": .init(headers: ["Content-Type": "image/png"], body: Data("<html>error</html>".utf8))
+        case "/truncated.png": .init(headers: ["Content-Type": "image/png"], body: validPNG.prefix(24))
+        case "/mismatch.png": .init(headers: ["Content-Type": "image/png"], body: validGIF)
+        case "/malformed.svg": .init(headers: ["Content-Type": "image/svg+xml"], body: Data("<svg><path></svg>".utf8))
+        case "/wrong-namespace.svg": .init(headers: ["Content-Type": "image/svg+xml"], body: Data("<svg xmlns='urn:not-svg'></svg>".utf8))
+        case "/active.svg": .init(headers: ["Content-Type": "image/svg+xml"], body: activeSVG)
+        default: .init(headers: ["Content-Type": "image/svg+xml"], body: remoteSVG)
+        }
+    }
+    defer { server.stop() }
+    let package = try temporaryPackage()
+    defer { try? FileManager.default.removeItem(at: package) }
+    let invalidKeys = ["fake", "truncated", "mismatch", "malformed", "namespace", "active", "remote"]
+    let candidates = [
+        candidate("png", server.url("valid.png")),
+        candidate("svg", server.url("valid.svg")),
+        candidate("fake", server.url("fake.png")),
+        candidate("truncated", server.url("truncated.png")),
+        candidate("mismatch", server.url("mismatch.png")),
+        candidate("malformed", server.url("malformed.svg")),
+        candidate("namespace", server.url("wrong-namespace.svg")),
+        candidate("active", server.url("active.svg")),
+        candidate("remote", server.url("remote.svg")),
+    ]
+
+    let result = try await WebResourceLocalizer().localize(candidates, into: package)
+
+    #expect(result.mediaByCandidateKey["png"]?.mimeType == "image/png")
+    #expect(result.mediaByCandidateKey["png"]?.pixelWidth == 1)
+    #expect(result.mediaByCandidateKey["png"]?.pixelHeight == 1)
+    #expect(result.mediaByCandidateKey["svg"]?.mimeType == "image/svg+xml")
+    for key in invalidKeys {
+        #expect(result.mediaByCandidateKey[key] == nil)
+    }
+    #expect(result.issues.count == invalidKeys.count)
+    let assets = try FileManager.default.contentsOfDirectory(
+        at: package.appending(path: "assets"),
+        includingPropertiesForKeys: nil
+    )
+    #expect(assets.count == 2)
+}
+
+@Test
 func rendererCreatesClosedParseableOfflinePackage() async throws {
     let svg = Data("<svg xmlns='http://www.w3.org/2000/svg'><text>&amp;</text></svg>".utf8)
     let server = try await LocalHTTPFixtureServer.start { _ in

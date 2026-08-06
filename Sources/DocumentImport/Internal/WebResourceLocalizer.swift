@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
+import ImageIO
 import KnowledgeCore
+import UniformTypeIdentifiers
 
 struct WebLocalizationResult: Sendable {
     let mediaByCandidateKey: [String: SourceMediaReference]
@@ -62,7 +64,13 @@ struct WebResourceLocalizer: Sendable {
         var issues: [WebLocalizationIssue] = []
         for candidate in candidates {
             switch downloads[candidate.resolvedURL] ?? .unavailable {
-            case .available(let data, let mimeType, let fileExtension):
+            case .available(
+                let data,
+                let mimeType,
+                let fileExtension,
+                let pixelWidth,
+                let pixelHeight
+            ):
                 let digest = SHA256.hash(data: data)
                     .map { String(format: "%02x", $0) }.joined()
                 let relativePath = "assets/\(digest).\(fileExtension)"
@@ -75,8 +83,8 @@ struct WebResourceLocalizer: Sendable {
                     artifactRelativePath: relativePath,
                     mimeType: mimeType,
                     altText: candidate.altText,
-                    pixelWidth: nil,
-                    pixelHeight: nil
+                    pixelWidth: pixelWidth,
+                    pixelHeight: pixelHeight
                 )
             case .unavailable:
                 issues.append(WebLocalizationIssue(
@@ -120,8 +128,18 @@ struct WebResourceLocalizer: Sendable {
                 }
                 data.append(byte)
             }
-            guard !data.isEmpty else { return .unavailable }
-            return .available(data, normalized, fileExtension)
+            guard !data.isEmpty,
+                  let validated = validateImage(
+                    data,
+                    declaredMIMEType: normalized
+                  ) else { return .unavailable }
+            return .available(
+                validated.data,
+                normalized,
+                fileExtension,
+                validated.pixelWidth,
+                validated.pixelHeight
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -146,6 +164,103 @@ struct WebResourceLocalizer: Sendable {
         case "image/webp": "webp"
         case "image/avif": "avif"
         default: nil
+        }
+    }
+
+    private func validateImage(
+        _ data: Data,
+        declaredMIMEType: String
+    ) -> ValidatedImage? {
+        if declaredMIMEType == "image/svg+xml" {
+            return validateSVG(data).map {
+                ValidatedImage(
+                    data: $0,
+                    pixelWidth: nil,
+                    pixelHeight: nil
+                )
+            }
+        }
+        guard let expectedType = imageTypeIdentifier(for: declaredMIMEType),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              CGImageSourceGetCount(source) > 0,
+              CGImageSourceGetType(source) as String? == expectedType,
+              let properties = CGImageSourceCopyPropertiesAtIndex(
+                source,
+                0,
+                [kCGImageSourceShouldCache: false] as CFDictionary
+              ) as? [CFString: Any],
+              let width = positiveDimension(properties[kCGImagePropertyPixelWidth]),
+              let height = positiveDimension(properties[kCGImagePropertyPixelHeight]),
+              width <= 100_000,
+              height <= 100_000,
+              UInt64(width) * UInt64(height) <= 100_000_000,
+              CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 1,
+                    kCGImageSourceShouldCache: false,
+                ] as CFDictionary
+              ) != nil else {
+            return nil
+        }
+        return ValidatedImage(data: data, pixelWidth: width, pixelHeight: height)
+    }
+
+    private func imageTypeIdentifier(for mimeType: String) -> String? {
+        UTType(mimeType: mimeType)?.identifier
+    }
+
+    private func positiveDimension(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber else { return nil }
+        let dimension = number.intValue
+        return dimension > 0 ? dimension : nil
+    }
+
+    private func validateSVG(_ data: Data) -> Data? {
+        guard String(data: data, encoding: .utf8) != nil else { return nil }
+        do {
+            let document = try XMLDocument(
+                data: data,
+                options: [.nodeLoadExternalEntitiesNever]
+            )
+            guard document.dtd == nil,
+                  try document.nodes(forXPath: "//processing-instruction()").isEmpty,
+                  let root = document.rootElement(),
+                  (root.localName ?? root.name)?.lowercased() == "svg",
+                  root.uri == "http://www.w3.org/2000/svg" else {
+                return nil
+            }
+            let forbiddenElements: Set<String> = [
+                "script", "foreignobject", "iframe", "object", "embed",
+                "audio", "video", "image", "feimage", "use", "style",
+                "animate", "animatemotion", "animatetransform", "set",
+            ]
+            for case let element as XMLElement in try document.nodes(forXPath: "//*") {
+                let name = (element.localName ?? element.name ?? "").lowercased()
+                guard !forbiddenElements.contains(name) else { return nil }
+                for attribute in element.attributes ?? [] {
+                    let attributeName = (attribute.localName ?? attribute.name ?? "").lowercased()
+                    if attributeName == "xmlns" || attribute.name?.lowercased().hasPrefix("xmlns:") == true {
+                        continue
+                    }
+                    let value = (attribute.stringValue ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased()
+                    guard !attributeName.hasPrefix("on"),
+                          !["href", "src", "style"].contains(attributeName),
+                          !value.contains("url("),
+                          !value.contains("@import"),
+                          !value.contains("http://"),
+                          !value.contains("https://"),
+                          !value.hasPrefix("//") else { return nil }
+                }
+            }
+            return data
+        } catch {
+            return nil
         }
     }
 
@@ -180,6 +295,12 @@ struct WebResourceLocalizer: Sendable {
 }
 
 private enum DownloadResult: Sendable {
-    case available(Data, String, String)
+    case available(Data, String, String, Int?, Int?)
     case unavailable
+}
+
+private struct ValidatedImage: Sendable {
+    let data: Data
+    let pixelWidth: Int?
+    let pixelHeight: Int?
 }
