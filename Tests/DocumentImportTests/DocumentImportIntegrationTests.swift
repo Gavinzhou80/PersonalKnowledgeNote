@@ -155,10 +155,10 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
         try await library.sourceDocument(id: fixedDocumentID)
     )
     let headingID = SourceBlockID(try #require(
-        UUID(uuidString: "2e76281c-b8ea-1037-decd-5cedb52b146b")
+        UUID(uuidString: "06ceb40e-49dc-3174-9f71-aaf5a3adfb55")
     ))
     let paragraphID = SourceBlockID(try #require(
-        UUID(uuidString: "681f3b68-bc94-2a86-4b1f-94cc768557d5")
+        UUID(uuidString: "5e397cd3-3162-97e5-5d6d-f58467c74121")
     ))
     let expectedContent = SourceDocumentContent(
         documentID: fixedDocumentID,

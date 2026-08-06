@@ -201,7 +201,7 @@ func duplicateImageURLIssuesReferenceEachFinalImageBlock() async throws {
 }
 
 @Test
-func missingImageWithoutAltPublishesIssueWithoutTrapping() async throws {
+func missingImageWithoutAltIsOmittedWithoutDanglingGraphData() async throws {
     let server = try await LocalHTTPFixtureServer.start { _ in
         .init(status: 404, headers: ["Content-Type": "text/plain"])
     }
@@ -213,6 +213,38 @@ func missingImageWithoutAltPublishesIssueWithoutTrapping() async throws {
             responseBytes: Data("""
             <html><body><article><h1>Missing image</h1><p>Body.</p>
             <figure><img src="missing.svg"><figcaption>Readable caption.</figcaption></figure>
+            <img src="also-missing.svg">
+            </article></body></html>
+            """.utf8)
+        ),
+        documentID: SourceDocumentID()
+    )
+    defer { try? FileManager.default.removeItem(at: product.packageURL) }
+    let content = product.document.content
+    #expect(!content.blocks.contains { $0.role == .image })
+    #expect(content.blocks.contains { $0.role == .caption })
+    #expect(content.structure.relations.isEmpty)
+    #expect(Set(content.evidence.keys) == Set(content.structure.orderedBlockIDs))
+    #expect(product.issues == [
+        .init(code: .optionalWebImageUnavailable, relatedBlockID: nil),
+        .init(code: .optionalWebImageUnavailable, relatedBlockID: nil),
+    ])
+}
+
+@Test
+func localizedImageWithoutAltRemainsAuthoritativeMedia() async throws {
+    let svg = Data("<svg xmlns='http://www.w3.org/2000/svg'></svg>".utf8)
+    let server = try await LocalHTTPFixtureServer.start { _ in
+        .init(headers: ["Content-Type": "image/svg+xml"], body: svg)
+    }
+    defer { server.stop() }
+    let product = try await StaticWebDocumentBuilder().build(
+        AcquiredWebPage(
+            finalURL: server.url("article/index.html"),
+            mimeType: "text/html",
+            responseBytes: Data("""
+            <html><body><article><h1>Localized image</h1><p>Body.</p>
+            <img src="image.svg">
             </article></body></html>
             """.utf8)
         ),
@@ -224,10 +256,8 @@ func missingImageWithoutAltPublishesIssueWithoutTrapping() async throws {
     )
 
     #expect(image.canonicalText.isEmpty)
-    #expect(image.media == nil)
-    #expect(product.issues == [
-        .init(code: .optionalWebImageUnavailable, relatedBlockID: image.id),
-    ])
+    #expect(image.media != nil)
+    #expect(product.issues.isEmpty)
 }
 
 private final class StaticWebStageRecorder: @unchecked Sendable {
@@ -267,10 +297,10 @@ func staticFixtureBuildsDeterministicManagedWebContent() async throws {
     let secondBlockIDs = second.document.content.blocks.map(\.id)
     let expectedBlockIDs = [
         SourceBlockID(try #require(
-            UUID(uuidString: "2e76281c-b8ea-1037-decd-5cedb52b146b")
+            UUID(uuidString: "06ceb40e-49dc-3174-9f71-aaf5a3adfb55")
         )),
         SourceBlockID(try #require(
-            UUID(uuidString: "681f3b68-bc94-2a86-4b1f-94cc768557d5")
+            UUID(uuidString: "5e397cd3-3162-97e5-5d6d-f58467c74121")
         )),
     ]
 
@@ -296,7 +326,7 @@ func staticFixtureBuildsDeterministicManagedWebContent() async throws {
     #expect(first.fingerprint == second.fingerprint)
     #expect(
         first.fingerprint.rawValue
-            == "c32d24ad88305e1bf7aa138649ad8906e4f616605ef101f3b5088137676932e9"
+            == "1589e7ceb1b1e96146617351359fd58c14bd5e853d6a3ace62dd092eafe09028"
     )
     #expect(first.descriptor == second.descriptor)
     #expect(first.document.artifact == first.descriptor)

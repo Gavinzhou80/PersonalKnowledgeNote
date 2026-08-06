@@ -63,8 +63,14 @@ struct StaticWebDocumentBuilder: Sendable {
                 into: packageURL
             )
             try Task.checkCancellation()
+            let authoritativeBlocks = article.blocks.filter { block in
+                guard block.role == .image else { return true }
+                if !block.canonicalText.isEmpty { return true }
+                guard let imageKey = block.imageKey else { return false }
+                return localized.mediaByCandidateKey[imageKey] != nil
+            }
             stageObserver(.assignIdentities)
-            let identities = article.blocks.enumerated().map { index, block in
+            let identities = authoritativeBlocks.enumerated().map { index, block in
                 StableWebIdentity.blockID(
                     category: block.category,
                     role: block.role,
@@ -73,12 +79,12 @@ struct StaticWebDocumentBuilder: Sendable {
                 )
             }
             let imageBlockIDs = Dictionary(uniqueKeysWithValues:
-                zip(article.blocks, identities).compactMap { block, id in
+                zip(authoritativeBlocks, identities).compactMap { block, id in
                     block.imageKey.map { ($0, id) }
                 }
             )
             stageObserver(.buildRelations)
-            let relations = zip(article.blocks, identities).compactMap {
+            let relations = zip(authoritativeBlocks, identities).compactMap {
                 extracted, captionID -> SourceRelation? in
                 guard let targetKey = extracted.relationTargetKey,
                       let imageID = imageBlockIDs[targetKey]
@@ -98,7 +104,7 @@ struct StaticWebDocumentBuilder: Sendable {
             stageObserver(.describePackage)
             let descriptor = try LocalLibrary.describeWebPackage(at: packageURL)
             stageObserver(.validateContent)
-            let blocks = zip(article.blocks, identities).map { extracted, id in
+            let blocks = zip(authoritativeBlocks, identities).map { extracted, id in
                 SourceBlock(
                     id: id,
                     canonicalText: extracted.canonicalText,
@@ -111,7 +117,7 @@ struct StaticWebDocumentBuilder: Sendable {
                 )
             }
             let evidence = Dictionary(uniqueKeysWithValues:
-                zip(article.blocks, identities).map {
+                zip(authoritativeBlocks, identities).map {
                     ($1, SourceEvidence.web(locator: $0.evidenceLocator))
                 }
             )
@@ -133,7 +139,7 @@ struct StaticWebDocumentBuilder: Sendable {
                 issues: issues
             )
             let fingerprint = StableWebIdentity.fingerprint(
-                blocks: article.blocks.map {
+                blocks: authoritativeBlocks.map {
                     ($0.category, $0.role, $0.canonicalText)
                 }
             )

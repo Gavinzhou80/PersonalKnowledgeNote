@@ -636,34 +636,41 @@ func mediaBlockWithCanonicalAltTextSurvivesOptionalImageFailure() throws {
 }
 
 @Test
-func emptyCanonicalTextIsValidForImageMediaSemantics() throws {
-    for media in [
-        SourceMediaReference?.none,
-        SourceMediaReference(
-            kind: .image,
-            artifactRelativePath: "assets/image.png",
-            mimeType: "image/png",
-            altText: nil,
-            pixelWidth: nil,
-            pixelHeight: nil
-        ),
-    ] {
-        let encoded = try JSONEncoder().encode(
-            UncheckedSemanticSourceBlock(
-                id: SourceBlockID(),
-                canonicalText: "",
-                category: .media,
-                role: .image,
-                inlineMarkup: [],
-                media: media
-            )
+func emptyImageCanonicalTextRequiresLocalizedMedia() throws {
+    let unavailable = try JSONEncoder().encode(
+        UncheckedSemanticSourceBlock(
+            id: SourceBlockID(),
+            canonicalText: "",
+            category: .media,
+            role: .image,
+            inlineMarkup: [],
+            media: nil
         )
-        let decoded = try JSONDecoder().decode(SourceBlock.self, from: encoded)
-        #expect(decoded.category == .media)
-        #expect(decoded.role == .image)
-        #expect(decoded.canonicalText.isEmpty)
-        #expect(decoded.media == media)
+    )
+    #expect(throws: DecodingError.self) {
+        try JSONDecoder().decode(SourceBlock.self, from: unavailable)
     }
+
+    let localizedMedia = SourceMediaReference(
+        kind: .image,
+        artifactRelativePath: "assets/image.png",
+        mimeType: "image/png",
+        altText: nil,
+        pixelWidth: nil,
+        pixelHeight: nil
+    )
+    let localized = try JSONEncoder().encode(
+        UncheckedSemanticSourceBlock(
+            id: SourceBlockID(),
+            canonicalText: "",
+            category: .media,
+            role: .image,
+            inlineMarkup: [],
+            media: localizedMedia
+        )
+    )
+    let decoded = try JSONDecoder().decode(SourceBlock.self, from: localized)
+    #expect(decoded.media == localizedMedia)
 }
 
 @Test

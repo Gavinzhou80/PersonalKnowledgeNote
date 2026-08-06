@@ -13,6 +13,7 @@ enum StableWebIdentity {
     ) -> SourceBlockID {
         var identity = Data()
         append(ruleVersion, to: &identity)
+        append("block-id", to: &identity)
         append(category.rawValue, to: &identity)
         append(stableRole(role), to: &identity)
         append(String(ordinal), to: &identity)
@@ -33,6 +34,7 @@ enum StableWebIdentity {
     ) -> ContentFingerprint {
         var identity = Data()
         append(ruleVersion, to: &identity)
+        append("principal-fingerprint", to: &identity)
         for block in blocks where block.role != .image {
             append(block.category.rawValue, to: &identity)
             append(stableRole(block.role), to: &identity)
