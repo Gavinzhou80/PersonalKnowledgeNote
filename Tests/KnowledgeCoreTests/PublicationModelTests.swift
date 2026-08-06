@@ -593,14 +593,6 @@ func decodingRejectsInvalidMediaReferences() throws {
 
 @Test
 func decodingRejectsInvalidBlockCategoryRoleOrEmptyMediaText() throws {
-    let media = SourceMediaReference(
-        kind: .image,
-        artifactRelativePath: "assets/image.png",
-        mimeType: "image/png",
-        altText: nil,
-        pixelWidth: nil,
-        pixelHeight: nil
-    )
     let invalidBlocks = [
         UncheckedSemanticSourceBlock(
             id: SourceBlockID(),
@@ -609,14 +601,6 @@ func decodingRejectsInvalidBlockCategoryRoleOrEmptyMediaText() throws {
             role: .codeBlock(language: nil),
             inlineMarkup: [],
             media: nil
-        ),
-        UncheckedSemanticSourceBlock(
-            id: SourceBlockID(),
-            canonicalText: "",
-            category: .media,
-            role: .image,
-            inlineMarkup: [],
-            media: media
         ),
     ]
 
@@ -649,6 +633,37 @@ func mediaBlockWithCanonicalAltTextSurvivesOptionalImageFailure() throws {
     #expect(decoded.category == .media)
     #expect(decoded.role == .image)
     #expect(decoded.media == nil)
+}
+
+@Test
+func emptyCanonicalTextIsValidForImageMediaSemantics() throws {
+    for media in [
+        SourceMediaReference?.none,
+        SourceMediaReference(
+            kind: .image,
+            artifactRelativePath: "assets/image.png",
+            mimeType: "image/png",
+            altText: nil,
+            pixelWidth: nil,
+            pixelHeight: nil
+        ),
+    ] {
+        let encoded = try JSONEncoder().encode(
+            UncheckedSemanticSourceBlock(
+                id: SourceBlockID(),
+                canonicalText: "",
+                category: .media,
+                role: .image,
+                inlineMarkup: [],
+                media: media
+            )
+        )
+        let decoded = try JSONDecoder().decode(SourceBlock.self, from: encoded)
+        #expect(decoded.category == .media)
+        #expect(decoded.role == .image)
+        #expect(decoded.canonicalText.isEmpty)
+        #expect(decoded.media == media)
+    }
 }
 
 @Test

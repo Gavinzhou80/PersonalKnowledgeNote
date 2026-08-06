@@ -1,13 +1,12 @@
 import Foundation
 import KnowledgeCore
-import LocalLibrary
 
 struct WebArtifactRenderer: Sendable {
     func render(
         _ article: ExtractedWebArticle,
         localizedMedia: [String: SourceMediaReference],
         into packageURL: URL
-    ) throws -> SourceArtifactDescriptor {
+    ) throws {
         let body = renderBlocks(article.blocks, media: localizedMedia)
         let title = escape(article.metadata.title)
         let html = """
@@ -18,7 +17,6 @@ struct WebArtifactRenderer: Sendable {
         """
         let destination = packageURL.appending(path: "index.html")
         try Data(html.utf8).write(to: destination, options: [.atomic])
-        return try LocalLibrary.describeWebPackage(at: packageURL)
     }
 
     private func renderBlocks(

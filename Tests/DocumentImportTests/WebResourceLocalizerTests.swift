@@ -22,18 +22,13 @@ func localizesDuplicateImagesOnceAndRecordsOptionalFailures() async throws {
     defer { try? FileManager.default.removeItem(at: package) }
     let goodURL = server.url("hero.svg")
     let missingURL = server.url("missing.svg")
-    let relatedID = SourceBlockID(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!)
     let candidates = [
         candidate("first", goodURL, alt: "Hero"),
         candidate("duplicate", goodURL, alt: "Second alt"),
         candidate("missing", missingURL),
     ]
 
-    let result = try await WebResourceLocalizer().localize(
-        candidates,
-        into: package,
-        relatedBlockIDs: ["missing": relatedID]
-    )
+    let result = try await WebResourceLocalizer().localize(candidates, into: package)
 
     #expect(probe.count(for: "/hero.svg") == 1)
     #expect(result.mediaByCandidateKey["first"]?.artifactRelativePath == result.mediaByCandidateKey["duplicate"]?.artifactRelativePath)
@@ -41,8 +36,9 @@ func localizesDuplicateImagesOnceAndRecordsOptionalFailures() async throws {
     let relativePath = "assets/\(digest).svg"
     #expect(result.mediaByCandidateKey["first"]?.artifactRelativePath == relativePath)
     #expect(try Data(contentsOf: package.appending(path: relativePath)) == svg)
-    #expect(result.issues == [.init(code: .optionalWebImageUnavailable, relatedBlockID: relatedID)])
-    #expect(!String(decoding: try JSONEncoder().encode(result.issues), as: UTF8.self).contains(missingURL.absoluteString))
+    #expect(result.issues == [
+        .init(code: .optionalWebImageUnavailable, candidateKey: "missing"),
+    ])
 }
 
 @Test
@@ -116,7 +112,8 @@ func rendererCreatesClosedParseableOfflinePackage() async throws {
         imageCandidates: [candidate("hero", imageURL)]
     )
     let localized = try await WebResourceLocalizer().localize(article.imageCandidates, into: package)
-    let rendered = try WebArtifactRenderer().render(article, localizedMedia: localized.mediaByCandidateKey, into: package)
+    try WebArtifactRenderer().render(article, localizedMedia: localized.mediaByCandidateKey, into: package)
+    let rendered = try LocalLibrary.describeWebPackage(at: package)
     server.stop()
 
     let htmlURL = package.appending(path: "index.html")

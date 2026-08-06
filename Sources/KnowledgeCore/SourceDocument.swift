@@ -146,10 +146,6 @@ public struct SourceBlock: Hashable, Codable, Sendable {
         inlineMarkup: [InlineMarkup],
         media: SourceMediaReference?
     ) throws {
-        guard !canonicalText.isEmpty else {
-            throw ValidationError.emptyCanonicalText
-        }
-
         switch (category, role) {
         case (.text, .heading(let level)):
             guard (1...6).contains(level) else {
@@ -166,11 +162,13 @@ public struct SourceBlock: Hashable, Codable, Sendable {
             throw ValidationError.invalidCategoryRole
         }
 
+        if category != .media, canonicalText.isEmpty {
+            throw ValidationError.emptyCanonicalText
+        }
+
         switch category {
         case .media:
-            guard media != nil || !canonicalText.isEmpty else {
-                throw ValidationError.invalidMediaAssociation
-            }
+            break
         case .text, .code:
             guard media == nil else {
                 throw ValidationError.invalidMediaAssociation

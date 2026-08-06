@@ -4,7 +4,12 @@ import KnowledgeCore
 
 struct WebLocalizationResult: Sendable {
     let mediaByCandidateKey: [String: SourceMediaReference]
-    let issues: [KnowledgeCore.ImportIssue]
+    let issues: [WebLocalizationIssue]
+}
+
+struct WebLocalizationIssue: Equatable, Sendable {
+    let code: KnowledgeCore.ImportIssue.Code
+    let candidateKey: String
 }
 
 struct WebResourceLocalizer: Sendable {
@@ -13,8 +18,7 @@ struct WebResourceLocalizer: Sendable {
 
     func localize(
         _ candidates: [WebImageCandidate],
-        into packageURL: URL,
-        relatedBlockIDs: [String: SourceBlockID] = [:]
+        into packageURL: URL
     ) async throws -> WebLocalizationResult {
         let assetsURL = try prepareAssetsDirectory(in: packageURL)
         var seenURLs = Set<URL>()
@@ -55,7 +59,7 @@ struct WebResourceLocalizer: Sendable {
         }
 
         var media: [String: SourceMediaReference] = [:]
-        var issues: [KnowledgeCore.ImportIssue] = []
+        var issues: [WebLocalizationIssue] = []
         for candidate in candidates {
             switch downloads[candidate.resolvedURL] ?? .unavailable {
             case .available(let data, let mimeType, let fileExtension):
@@ -75,9 +79,9 @@ struct WebResourceLocalizer: Sendable {
                     pixelHeight: nil
                 )
             case .unavailable:
-                issues.append(KnowledgeCore.ImportIssue(
+                issues.append(WebLocalizationIssue(
                     code: .optionalWebImageUnavailable,
-                    relatedBlockID: relatedBlockIDs[candidate.stableKey]
+                    candidateKey: candidate.stableKey
                 ))
             }
         }

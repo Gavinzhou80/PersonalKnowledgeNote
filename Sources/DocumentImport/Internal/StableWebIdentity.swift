@@ -33,7 +33,7 @@ enum StableWebIdentity {
     ) -> ContentFingerprint {
         var identity = Data()
         append(ruleVersion, to: &identity)
-        for block in blocks {
+        for block in blocks where block.role != .image {
             append(block.category.rawValue, to: &identity)
             append(stableRole(block.role), to: &identity)
             append(normalized(block.text), to: &identity)

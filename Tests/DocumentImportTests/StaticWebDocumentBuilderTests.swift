@@ -47,6 +47,56 @@ func stableWebIdentityUsesVersionedSemanticInputs() {
 }
 
 @Test
+func principalFingerprintIgnoresOptionalImagePresenceButKeepsReadableCaption() {
+    let body: [(SourceBlockCategory, SourceBlockRole, String)] = [
+        (.text, .heading(level: 1), "Article"),
+        (.text, .paragraph, "Body"),
+        (.text, .caption, "Readable caption"),
+    ]
+    let withImage = [
+        body[0], body[1],
+        (.media, .image, "Optional alt"),
+        body[2],
+    ]
+
+    #expect(
+        StableWebIdentity.fingerprint(blocks: body)
+            == StableWebIdentity.fingerprint(blocks: withImage)
+    )
+    #expect(
+        StableWebIdentity.fingerprint(blocks: body)
+            != StableWebIdentity.fingerprint(blocks: [
+                body[0], body[1], (.text, .caption, "Changed caption"),
+            ])
+    )
+    #expect(
+        StableWebIdentity.fingerprint(blocks: body)
+            != StableWebIdentity.fingerprint(blocks: [
+                (.text, .heading(level: 1), "Changed article"),
+                body[1], body[2],
+            ])
+    )
+}
+
+@Test
+func builderRunsPipelineInRequiredOrder() async throws {
+    let recorder = StaticWebStageRecorder()
+    let page = AcquiredWebPage(
+        sourceURL: URL(string: "https://fixture.invalid/order")!,
+        html: Data("<html><body><article><h1>Order</h1><p>Body.</p></article></body></html>".utf8)
+    )
+    let product = try await StaticWebDocumentBuilder(
+        stageObserver: recorder.record
+    ).build(page, documentID: SourceDocumentID())
+    defer { try? FileManager.default.removeItem(at: product.packageURL) }
+
+    #expect(recorder.events == [
+        .extract, .localize, .assignIdentities, .buildRelations,
+        .render, .describePackage, .validateContent,
+    ])
+}
+
+@Test
 func richWebDocumentBuilderProducesAuthoritativeGraph() async throws {
     let fixture = try Data(contentsOf: FixtureCatalog.richArticleURL)
     let image = try Data(contentsOf: FixtureCatalog.richArticleHeroURL)
@@ -148,6 +198,49 @@ func duplicateImageURLIssuesReferenceEachFinalImageBlock() async throws {
 
     #expect(imageIDs.count == 2)
     #expect(product.issues.map(\.relatedBlockID) == imageIDs.map(Optional.some))
+}
+
+@Test
+func missingImageWithoutAltPublishesIssueWithoutTrapping() async throws {
+    let server = try await LocalHTTPFixtureServer.start { _ in
+        .init(status: 404, headers: ["Content-Type": "text/plain"])
+    }
+    defer { server.stop() }
+    let product = try await StaticWebDocumentBuilder().build(
+        AcquiredWebPage(
+            finalURL: server.url("article/index.html"),
+            mimeType: "text/html",
+            responseBytes: Data("""
+            <html><body><article><h1>Missing image</h1><p>Body.</p>
+            <figure><img src="missing.svg"><figcaption>Readable caption.</figcaption></figure>
+            </article></body></html>
+            """.utf8)
+        ),
+        documentID: SourceDocumentID()
+    )
+    defer { try? FileManager.default.removeItem(at: product.packageURL) }
+    let image = try #require(
+        product.document.content.blocks.first { $0.role == .image }
+    )
+
+    #expect(image.canonicalText.isEmpty)
+    #expect(image.media == nil)
+    #expect(product.issues == [
+        .init(code: .optionalWebImageUnavailable, relatedBlockID: image.id),
+    ])
+}
+
+private final class StaticWebStageRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [StaticWebBuildStage] = []
+
+    var events: [StaticWebBuildStage] {
+        lock.withLock { stored }
+    }
+
+    func record(_ stage: StaticWebBuildStage) {
+        lock.withLock { stored.append(stage) }
+    }
 }
 
 @Test
