@@ -67,14 +67,16 @@ struct StaticArticleExtractor: Sendable {
 
     private func readableRoot(in document: Document) throws -> Element? {
         for selector in ["article", "main"] {
-            let candidates = try document.select(selector).array()
+            let candidates = try document.select(selector).array().filter {
+                !shouldRemoveSubtree($0)
+            }
             if let best = try candidates.max(by: { try score($0) < score($1) }), try score(best) > 0 {
                 return best
             }
         }
         guard let body = document.body() else { return nil }
         let candidates = try body.select("[role=main],section,div").array().filter {
-            !isNoise($0) && !hasNoiseAncestor($0, stopAt: body)
+            !shouldRemoveSubtree($0) && !hasNoiseAncestor($0, stopAt: body)
         }
         if let best = try candidates.max(by: { try score($0) < score($1) }), try score(best) > 0 {
             return best
@@ -158,7 +160,7 @@ struct StaticArticleExtractor: Sendable {
     private func hasNoiseAncestor(_ element: Element, stopAt root: Element) -> Bool {
         var parent = element.parent()
         while let current = parent, current !== root {
-            if isNoise(current) { return true }
+            if shouldRemoveSubtree(current) { return true }
             parent = current.parent()
         }
         return false
@@ -274,8 +276,15 @@ struct StaticArticleExtractor: Sendable {
         return (builder.text, builder.markup)
     }
 
-    private func evidence(_ element: Element, root: Element, idCounts: [String: Int]) -> String {
-        if let original = try? element.attr(Self.originalEvidenceAttribute), !original.isEmpty {
+    private func evidence(
+        _ element: Element,
+        root: Element,
+        idCounts: [String: Int],
+        allowCapturedOriginal: Bool = true
+    ) -> String {
+        if allowCapturedOriginal,
+           let original = try? element.attr(Self.originalEvidenceAttribute),
+           !original.isEmpty {
             return original
         }
         let id = element.id()
@@ -415,7 +424,12 @@ struct StaticArticleExtractor: Sendable {
         for (original, clone) in zip(originals, clones) {
             try clone.attr(
                 Self.originalEvidenceAttribute,
-                evidence(original, root: originalRoot, idCounts: idCounts)
+                evidence(
+                    original,
+                    root: originalRoot,
+                    idCounts: idCounts,
+                    allowCapturedOriginal: false
+                )
             )
         }
     }

@@ -301,3 +301,33 @@ func evidenceKeepsOriginalNthOfTypeAfterNoiseSiblingRemoval() throws {
     #expect(result.blocks.map(\.canonicalText) == ["Retained paragraph."])
     #expect(result.blocks[0].evidenceLocator == "#original-positions > p:nth-of-type(2)")
 }
+
+@Test
+func candidateSelectionRejectsAConventionalNoiseRoot() throws {
+    let html = Data("""
+    <html><body>
+      <article class="related"><h1>Related heading</h1><p>Related one.</p><p>Related two.</p></article>
+      <article id="primary"><h1>Primary heading</h1><p>Primary body.</p></article>
+    </body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/root-noise")!
+    )
+    #expect(result.rootSelector == "#primary")
+    #expect(result.blocks.map(\.canonicalText) == ["Primary heading", "Primary body."])
+}
+
+@Test
+func sourceCannotInjectTheInternalOriginalEvidenceMarker() throws {
+    let html = Data("""
+    <html><body><article id="trusted-root">
+      <p data-document-import-original-evidence="#attacker-controlled">Trusted paragraph.</p>
+    </article></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/untrusted-marker")!
+    )
+    #expect(result.blocks[0].evidenceLocator == "#trusted-root > p:nth-of-type(1)")
+}
