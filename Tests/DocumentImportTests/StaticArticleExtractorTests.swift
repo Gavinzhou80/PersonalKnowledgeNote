@@ -163,6 +163,34 @@ func ignoresNonExactMetaLikeTagNamesAndKeepsScanning(
 }
 
 @Test(arguments: [
+    #"<div data-note="<meta charset='iso-8859-1'>">ignored</div>"#,
+    #"<div data-note='<meta charset="iso-8859-1">'>ignored</div>"#,
+    #"<!bogus "<meta charset='iso-8859-1'>">"#,
+    #"<?bogus '<meta charset="iso-8859-1">'>"#,
+])
+func ignoresMetaCharsetLiteralsInsideOtherMarkupAndKeepsScanning(
+    misleadingMarkup: String
+) throws {
+    let bytes = Data("""
+    <html><head>
+      \(misleadingMarkup)
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/quoted-meta-literal")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test(arguments: [
     "<meta http-equiv='refresh' content='text/html; charset=windows-1252'>",
     "<meta http-equiv='content-type' content='text/html; encoding=windows-1252'>",
 ])

@@ -183,21 +183,37 @@ struct StaticArticleExtractor: Sendable {
             }
             let nameStart = index + 1
             let delimiterIndex = nameStart + 4
-            guard bytesMatchIgnoringASCIICase(
+            if bytesMatchIgnoringASCIICase(
                 "meta",
                 in: bytes,
                 at: nameStart
             ), delimiterIndex < bytes.count,
-               isHTMLTagNameDelimiter(bytes[delimiterIndex]),
-               let tagEnd = htmlTagEnd(in: bytes, startingAt: delimiterIndex)
+               isHTMLTagNameDelimiter(bytes[delimiterIndex]) {
+                guard let tagEnd = htmlTagEnd(
+                    in: bytes,
+                    startingAt: delimiterIndex
+                ) else {
+                    break
+                }
+                let asciiBytes = bytes[index...tagEnd].map { byte in
+                    byte < 0x80 ? byte : UInt8(ascii: " ")
+                }
+                tags.append(String(decoding: asciiBytes, as: UTF8.self))
+                index = tagEnd + 1
+                continue
+            }
+            guard nameStart < bytes.count,
+                  isHTMLMarkupStartByte(bytes[nameStart])
             else {
                 index += 1
                 continue
             }
-            let asciiBytes = bytes[index...tagEnd].map { byte in
-                byte < 0x80 ? byte : UInt8(ascii: " ")
+            guard let tagEnd = htmlTagEnd(
+                in: bytes,
+                startingAt: nameStart + 1
+            ) else {
+                break
             }
-            tags.append(String(decoding: asciiBytes, as: UTF8.self))
             index = tagEnd + 1
         }
         return tags
@@ -230,6 +246,14 @@ struct StaticArticleExtractor: Sendable {
         byte == UInt8(ascii: "/")
             || byte == UInt8(ascii: ">")
             || [0x09, 0x0A, 0x0C, 0x0D, 0x20].contains(byte)
+    }
+
+    private func isHTMLMarkupStartByte(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: "!")
+            || byte == UInt8(ascii: "?")
+            || byte == UInt8(ascii: "/")
+            || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+            || (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte)
     }
 
     private func bytesMatch(
