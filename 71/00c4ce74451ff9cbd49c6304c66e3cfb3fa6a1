@@ -1,0 +1,30 @@
+Tests/DocumentImportTests/WebResourceLocalizerTests.swift
+  s_413052984bbc8e::t_bda171c7065d26 139-193
+Sources/DocumentImport/Internal/WebArtifactRenderer.swift
+  s_413052984bbc8e::t_4e569872b71bfb 30-32,35-39
+  s_413052984bbc8e::t_14aa14700bb112 29
+Tests/DocumentImportTests/StaticWebDocumentBuilderTests.swift
+  s_413052984bbc8e::t_bda171c7065d26 263-314
+Sources/DocumentImport/Internal/StaticWebDocumentBuilder.swift
+  s_413052984bbc8e::t_14aa14700bb112 115
+  s_413052984bbc8e::t_4e569872b71bfb 66-80,86,88-89,93-95,99,113-114,116,127-128,150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7100c4ce74451ff9cbd49c6304c66e3cfb3fa6a1",
+  "prompts": {},
+  "logical_commit_id": "7100c4ce74451ff9cbd49c6304c66e3cfb3fa6a1",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 146,
+      "total_deletions": 24
+    }
+  }
+}
