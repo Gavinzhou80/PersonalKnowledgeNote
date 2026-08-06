@@ -15,7 +15,7 @@ struct ImportTaskRecord:
     var attempt: Int64
     var revision: Int64
     var state: String
-    var journalSequence: Int64
+    var journalSequence: Int64?
     var queueSequence: Int64?
     var failureCodecVersion: Int64?
     var failurePayload: Data?
@@ -233,6 +233,16 @@ extension ImportTaskState {
             return false
         }
     }
+
+    var requiresCancellationRequested: Bool {
+        switch self {
+        case .cancelling, .cancelled:
+            return true
+        case .accepted, .working, .queued, .running, .failed,
+             .publicationPending, .completed, .abandoned:
+            return false
+        }
+    }
 }
 
 extension ImportTaskRecord {
@@ -240,14 +250,16 @@ extension ImportTaskRecord {
         stagedArtifact: StagedArtifactRecord?
     ) throws -> DurableImportSnapshot {
         guard let rawTaskID = UUID(uuidString: taskID),
-              let decodedJournalSequence = UInt64(exactly: journalSequence),
+              let rawJournalSequence = journalSequence,
+              let decodedJournalSequence = UInt64(exactly: rawJournalSequence),
               decodedJournalSequence > 0,
               let decodedAttempt = UInt(exactly: attempt),
               decodedAttempt > 0,
               let decodedRevision = UInt64(exactly: revision),
               let decodedState = ImportTaskState(rawValue: state),
               decodedState.isValidDurableState,
-              cancellationRequested == false
+              cancellationRequested
+                == decodedState.requiresCancellationRequested
         else {
             throw corruptLibrary()
         }

@@ -1210,8 +1210,9 @@ final class LibraryDatabase: Sendable {
     private func validateJournalSequences(
         _ tasks: [ImportTaskRecord]
     ) throws {
-        let sequences = tasks.map(\.journalSequence)
-        guard sequences.allSatisfy({ $0 > 0 }),
+        let sequences = tasks.compactMap(\.journalSequence)
+        guard sequences.count == tasks.count,
+              sequences.allSatisfy({ $0 > 0 }),
               Set(sequences).count == sequences.count
         else {
             throw corruptLibraryError()

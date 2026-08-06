@@ -201,7 +201,8 @@ func claimIsNilWhileExclusiveStateExists(
         try ImportQueueTestDriver.setState(
             .cancelling,
             at: root,
-            taskID: running.taskID
+            taskID: running.taskID,
+            cancellationRequested: true
         )
         _ = try await library.accept(
             .webpage(URL(string: "https://example.test/queued")!)
@@ -311,6 +312,55 @@ func duplicateJournalSequenceCorruptsSingleTaskSnapshot() async throws {
     }
 }
 
+@Test
+func nullJournalSequenceIsCorruptAcrossPublicReadPaths() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let library = try await LocalLibrary.open(at: root)
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/null-journal")!)
+    )
+    try ImportQueueTestDriver.clearJournalSequence(
+        at: root,
+        taskID: workspace.taskID
+    )
+
+    await expectCorruptOperation("workspace snapshot") {
+        _ = try await workspace.snapshot()
+    }
+    await expectCorruptOperation("import workspace lookup") {
+        _ = try await library.importWorkspace(id: workspace.taskID)
+    }
+    await expectCorruptOperation("retained imports") {
+        _ = try await library.retainedImports()
+    }
+}
+
+@Test(arguments: CancellationFlagCase.all)
+func cancellationRequestedMatchesDurableState(
+    testCase: CancellationFlagCase
+) throws {
+    let record = try makeCancellationFlagRecord(testCase)
+
+    do {
+        let snapshot = try record.snapshot(stagedArtifact: nil)
+        if testCase.isValid {
+            #expect(snapshot.state == testCase.state)
+        } else {
+            Issue.record("Expected invalid cancellation flag for \(testCase.state)")
+        }
+    } catch let error as LocalLibraryError {
+        if testCase.isValid {
+            Issue.record("Expected valid cancellation flag, got \(error)")
+        } else {
+            guard case .corruptLibrary = error else {
+                Issue.record("Expected corruptLibrary, got \(error)")
+                return
+            }
+        }
+    }
+}
+
 enum QueueBlockingState: CaseIterable, Sendable {
     case running
     case cancelling
@@ -327,6 +377,71 @@ enum InvalidDurableQueueRow: CaseIterable, Sendable {
     case failedWithInvalidFailureCodec
     case nonfailedWithFailure
     case cancellationRequested
+}
+
+struct CancellationFlagCase: Sendable {
+    let state: ImportTaskState
+    let cancellationRequested: Bool
+    let isValid: Bool
+
+    static let all: [CancellationFlagCase] = [
+        .init(state: .cancelling, cancellationRequested: true, isValid: true),
+        .init(state: .cancelled, cancellationRequested: true, isValid: true),
+        .init(state: .cancelling, cancellationRequested: false, isValid: false),
+        .init(state: .cancelled, cancellationRequested: false, isValid: false),
+        .init(state: .queued, cancellationRequested: false, isValid: true),
+        .init(state: .running, cancellationRequested: false, isValid: true),
+        .init(state: .failed, cancellationRequested: false, isValid: true),
+        .init(state: .completed, cancellationRequested: false, isValid: true),
+        .init(
+            state: .publicationPending,
+            cancellationRequested: false,
+            isValid: true
+        ),
+        .init(state: .abandoned, cancellationRequested: false, isValid: true),
+        .init(state: .queued, cancellationRequested: true, isValid: false),
+        .init(state: .running, cancellationRequested: true, isValid: false),
+        .init(state: .failed, cancellationRequested: true, isValid: false),
+        .init(state: .completed, cancellationRequested: true, isValid: false),
+        .init(
+            state: .publicationPending,
+            cancellationRequested: true,
+            isValid: false
+        ),
+        .init(state: .accepted, cancellationRequested: true, isValid: false),
+        .init(state: .working, cancellationRequested: true, isValid: false),
+        .init(state: .abandoned, cancellationRequested: true, isValid: false),
+    ]
+}
+
+private func makeCancellationFlagRecord(
+    _ testCase: CancellationFlagCase
+) throws -> ImportTaskRecord {
+    let failureVersion: Int64? = testCase.state == .failed ? 1 : nil
+    let failurePayload = testCase.state == .failed ? Data("failure".utf8) : nil
+    let outcome = testCase.state == .completed
+        ? try DomainJSON.encode(
+            PublicationOutcome.published(documentID: SourceDocumentID())
+        )
+        : nil
+    return ImportTaskRecord(
+        taskID: UUID().uuidString,
+        sourceKind: "webpage",
+        sourceValue: "https://example.test/cancellation-matrix",
+        attempt: 1,
+        revision: 0,
+        state: testCase.state.rawValue,
+        journalSequence: 1,
+        queueSequence: testCase.state == .queued ? 1 : nil,
+        failureCodecVersion: failureVersion,
+        failurePayload: failurePayload,
+        cancellationRequested: testCase.cancellationRequested,
+        checkpointOrdinal: nil,
+        checkpointCodecVersion: nil,
+        checkpointPayload: nil,
+        stagedArtifactID: nil,
+        outcomeJSON: outcome
+    )
 }
 
 private func makePreparedPublication(
@@ -384,6 +499,23 @@ private func expectCorruptRetainedImports(_ library: LocalLibrary) async {
         }
     } catch {
         Issue.record("Expected LocalLibraryError, got \(error)")
+    }
+}
+
+private func expectCorruptOperation(
+    _ label: String,
+    operation: () async throws -> Void
+) async {
+    do {
+        try await operation()
+        Issue.record("Expected corrupt \(label)")
+    } catch let error as LocalLibraryError {
+        guard case .corruptLibrary = error else {
+            Issue.record("Expected corruptLibrary from \(label), got \(error)")
+            return
+        }
+    } catch {
+        Issue.record("Expected LocalLibraryError from \(label), got \(error)")
     }
 }
 
@@ -537,12 +669,37 @@ private enum ImportQueueTestDriver {
     static func setState(
         _ state: ImportTaskState,
         at root: URL,
+        taskID: ImportTaskID,
+        cancellationRequested: Bool = false
+    ) throws {
+        try databaseQueue(at: root).write { db in
+            try db.execute(
+                sql: """
+                    UPDATE import_tasks
+                    SET state = ?, cancellation_requested = ?
+                    WHERE task_id = ?
+                    """,
+                arguments: [
+                    state.rawValue,
+                    cancellationRequested,
+                    taskID.rawValue.uuidString,
+                ]
+            )
+        }
+    }
+
+    static func clearJournalSequence(
+        at root: URL,
         taskID: ImportTaskID
     ) throws {
         try databaseQueue(at: root).write { db in
             try db.execute(
-                sql: "UPDATE import_tasks SET state = ? WHERE task_id = ?",
-                arguments: [state.rawValue, taskID.rawValue.uuidString]
+                sql: """
+                    UPDATE import_tasks
+                    SET journal_sequence = NULL
+                    WHERE task_id = ?
+                    """,
+                arguments: [taskID.rawValue.uuidString]
             )
         }
     }
