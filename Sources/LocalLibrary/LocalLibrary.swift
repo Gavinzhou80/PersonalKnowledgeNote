@@ -337,6 +337,8 @@ private func withLocalLibraryErrorTranslation<Value>(
         throw error
     } catch let error as InjectedPublicationFault {
         throw error
+    } catch is RowDecodingError {
+        throw LocalLibraryError.corruptLibrary(diagnosticID: UUID())
     } catch let error as DatabaseError {
         switch error.resultCode {
         case .SQLITE_CORRUPT, .SQLITE_NOTADB:

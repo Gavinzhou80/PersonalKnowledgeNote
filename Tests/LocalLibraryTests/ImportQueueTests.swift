@@ -268,6 +268,61 @@ func queueClockOverflowIsRejectedWithoutPersistingTask() async throws {
     #expect(try ImportQueueTestDriver.clock(at: root) == UInt64(Int64.max))
 }
 
+@Test
+func staleQueueClockRejectsAcceptanceAndRollsBack() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let library = try await LocalLibrary.open(at: root)
+    _ = try await library.accept(
+        .webpage(URL(string: "https://example.test/clock-1")!)
+    )
+    _ = try await library.accept(
+        .webpage(URL(string: "https://example.test/clock-2")!)
+    )
+    let before = try await library.retainedImports()
+    try ImportQueueTestDriver.setClock(1, at: root)
+
+    await expectCorruptOperation("stale queue clock acceptance") {
+        _ = try await library.accept(
+            .webpage(URL(string: "https://example.test/clock-3")!)
+        )
+    }
+
+    let after = try await library.retainedImports()
+    #expect(after.map(\.taskID) == before.map(\.taskID))
+    #expect(after.map(\.journalSequence) == before.map(\.journalSequence))
+    #expect(after.map(\.revision) == before.map(\.revision))
+    #expect(try LocalLibraryTestDriver.taskCount(at: root) == 2)
+    #expect(try ImportQueueTestDriver.clock(at: root) == 1)
+}
+
+@Test(arguments: WrongDurableStorageType.allCases)
+func wrongDurableStorageTypesAreCorruptAcrossReadPaths(
+    corruption: WrongDurableStorageType
+) async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let library = try await LocalLibrary.open(at: root)
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/wrong-storage")!)
+    )
+    try ImportQueueTestDriver.corruptStorageType(
+        corruption,
+        at: root,
+        taskID: workspace.taskID
+    )
+
+    await expectCorruptOperation("workspace snapshot") {
+        _ = try await workspace.snapshot()
+    }
+    await expectCorruptOperation("import workspace lookup") {
+        _ = try await library.importWorkspace(id: workspace.taskID)
+    }
+    await expectCorruptOperation("retained imports") {
+        _ = try await library.retainedImports()
+    }
+}
+
 @Test(arguments: InvalidDurableQueueRow.allCases)
 func invalidV2ImportTaskRowsAreCorrupt(
     corruption: InvalidDurableQueueRow
@@ -310,6 +365,44 @@ func duplicateJournalSequenceCorruptsSingleTaskSnapshot() async throws {
             return
         }
     }
+}
+
+@Test
+func retainedCompletedHistoryUsesConstantAssociationQueryCount() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let externalPDF = root.appending(path: "history.pdf")
+    try FileManager.default.copyItem(
+        at: FixtureCatalog.minimalPDFURL,
+        to: externalPDF
+    )
+    let libraryRoot = root.appending(path: "Library")
+    let library = try await LocalLibrary.open(at: libraryRoot)
+    let workspace = try await library.accept(.pdfFile(externalPDF))
+    let accepted = try await workspace.snapshot()
+    let artifact = try #require(accepted.stagedArtifact)
+    let content = makeFixtureContent()
+    _ = try await workspace.finish(
+        PublicationCandidate(
+            fingerprint: ContentFingerprint("query-count-history"),
+            artifact: artifact,
+            document: content,
+            originalSource: .pdfFile(externalPDF)
+        ),
+        expectedRevision: accepted.revision
+    )
+    let singleCount = try ImportQueueTestDriver
+        .retainedImportStatementCount(at: libraryRoot)
+    try ImportQueueTestDriver.insertCompletedDuplicateHistory(
+        count: 12,
+        documentID: content.documentID,
+        at: libraryRoot
+    )
+
+    let manyCount = try ImportQueueTestDriver
+        .retainedImportStatementCount(at: libraryRoot)
+
+    #expect(manyCount == singleCount)
 }
 
 @Test
@@ -377,6 +470,11 @@ enum InvalidDurableQueueRow: CaseIterable, Sendable {
     case failedWithInvalidFailureCodec
     case nonfailedWithFailure
     case cancellationRequested
+}
+
+enum WrongDurableStorageType: CaseIterable, Sendable {
+    case journalSequence
+    case failurePayload
 }
 
 struct CancellationFlagCase: Sendable {
@@ -700,6 +798,89 @@ private enum ImportQueueTestDriver {
                     WHERE task_id = ?
                     """,
                 arguments: [taskID.rawValue.uuidString]
+            )
+        }
+    }
+
+    static func corruptStorageType(
+        _ corruption: WrongDurableStorageType,
+        at root: URL,
+        taskID: ImportTaskID
+    ) throws {
+        try databaseQueue(at: root).write { db in
+            let assignment: String
+            switch corruption {
+            case .journalSequence:
+                assignment = "journal_sequence = 'wrong-type'"
+            case .failurePayload:
+                assignment = "failure_payload = 42"
+            }
+            try db.execute(
+                sql: "UPDATE import_tasks SET \(assignment) WHERE task_id = ?",
+                arguments: [taskID.rawValue.uuidString]
+            )
+        }
+    }
+
+    static func retainedImportStatementCount(at root: URL) throws -> Int {
+        try LibraryDatabase(
+            url: root.appending(path: "library.sqlite")
+        ).retainedImportStatementCountForTesting()
+    }
+
+    static func insertCompletedDuplicateHistory(
+        count: Int,
+        documentID: SourceDocumentID,
+        at root: URL
+    ) throws {
+        try databaseQueue(at: root).write { db in
+            let currentMaximum = try Int64.fetchOne(
+                db,
+                sql: "SELECT MAX(journal_sequence) FROM import_tasks"
+            ) ?? 0
+            for offset in 1...count {
+                let sourceValue = "https://example.test/history-\(offset)"
+                let outcome = try DomainJSON.encode(
+                    PublicationOutcome.alreadyImported(
+                        documentID: documentID,
+                        location: .library,
+                        provenanceAdded: true
+                    )
+                )
+                try db.execute(
+                    sql: """
+                        INSERT INTO import_tasks (
+                            task_id, source_kind, source_value, attempt,
+                            revision, state, checkpoint_ordinal,
+                            checkpoint_codec_version, checkpoint_payload,
+                            staged_artifact_id, outcome_json, journal_sequence,
+                            queue_sequence, failure_codec_version,
+                            failure_payload, cancellation_requested
+                        ) VALUES (
+                            ?, 'webpage', ?, 1, 1, 'completed',
+                            NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, NULL, 0
+                        )
+                        """,
+                    arguments: [
+                        UUID().uuidString,
+                        sourceValue,
+                        outcome,
+                        currentMaximum + Int64(offset),
+                    ]
+                )
+                try SourceProvenanceRecord(
+                    documentID: documentID.rawValue.uuidString,
+                    sourceKind: "webpage",
+                    sourceValue: sourceValue
+                ).insert(db)
+            }
+            try db.execute(
+                sql: """
+                    UPDATE import_queue_clock
+                    SET last_sequence = ?
+                    WHERE singleton = 1
+                    """,
+                arguments: [currentMaximum + Int64(count)]
             )
         }
     }

@@ -29,6 +29,140 @@ private struct PublicationStateBundle {
     let outcome: PublicationOutcome?
 }
 
+private struct PreparedPublicationTask {
+    let task: ImportTaskRecord
+    let stagedArtifact: StagedArtifactRecord?
+    let intent: PublicationIntentRecord?
+    let snapshot: DurableImportSnapshot
+    let outcome: PublicationOutcome?
+    let state: ImportTaskState
+    let associatedDocumentID: String?
+}
+
+private struct DecodedPublicationDocument {
+    let record: SourceDocumentRecord
+    let stored: StoredSourceDocument
+}
+
+private struct PublicationSourceKey: Hashable {
+    let kind: String
+    let value: String
+}
+
+private struct DecodedPublicationProvenance {
+    let record: SourceProvenanceRecord
+    let stored: StoredSourceProvenance
+}
+
+private struct DecodedPublicationProvenanceCollection {
+    let bySource: [PublicationSourceKey: DecodedPublicationProvenance]
+
+    var isEmpty: Bool { bySource.isEmpty }
+}
+
+private struct PublicationAssociationBatch {
+    let stagedArtifactsByTaskID: [String: StagedArtifactRecord]
+    let intentsByTaskID: [String: PublicationIntentRecord]
+    var documentsByID: [String: SourceDocumentRecord] = [:]
+    var provenanceByDocumentID: [String: [SourceProvenanceRecord]] = [:]
+    var loadedDocumentIDs: Set<String> = []
+    var decodedDocumentsByID: [String: DecodedPublicationDocument] = [:]
+    var decodedProvenanceByDocumentID:
+        [String: DecodedPublicationProvenanceCollection] = [:]
+
+    init(taskIDs: [String], in db: Database) throws {
+        stagedArtifactsByTaskID = try uniqueRecords(
+            try StagedArtifactRecord
+                .filter(taskIDs.contains(Column("task_id")))
+                .fetchAll(db),
+            keyedBy: \.taskID
+        )
+        intentsByTaskID = try uniqueRecords(
+            try PublicationIntentRecord
+                .filter(taskIDs.contains(Column("task_id")))
+                .fetchAll(db),
+            keyedBy: \.taskID
+        )
+    }
+
+    mutating func loadDocuments(
+        ids: Set<String>,
+        in db: Database
+    ) throws {
+        let missingIDs = Array(ids.subtracting(loadedDocumentIDs))
+        guard !missingIDs.isEmpty else {
+            return
+        }
+        let documents = try SourceDocumentRecord
+            .filter(missingIDs.contains(Column("document_id")))
+            .fetchAll(db)
+        for (id, record) in try uniqueRecords(
+            documents,
+            keyedBy: \.documentID
+        ) {
+            documentsByID[id] = record
+        }
+        let provenance = try SourceProvenanceRecord
+            .filter(missingIDs.contains(Column("document_id")))
+            .fetchAll(db)
+        for (documentID, records) in Dictionary(
+            grouping: provenance,
+            by: \.documentID
+        ) {
+            provenanceByDocumentID[documentID] = records
+        }
+        loadedDocumentIDs.formUnion(missingIDs)
+    }
+
+    mutating func document(
+        id: String
+    ) throws -> DecodedPublicationDocument? {
+        if let decoded = decodedDocumentsByID[id] {
+            return decoded
+        }
+        guard let record = documentsByID[id] else {
+            return nil
+        }
+        let decoded = DecodedPublicationDocument(
+            record: record,
+            stored: try record.decoded()
+        )
+        decodedDocumentsByID[id] = decoded
+        return decoded
+    }
+
+    mutating func provenance(
+        documentID: String
+    ) throws -> DecodedPublicationProvenanceCollection {
+        if let decoded = decodedProvenanceByDocumentID[documentID] {
+            return decoded
+        }
+        var bySource: [
+            PublicationSourceKey: DecodedPublicationProvenance
+        ] = [:]
+        for record in provenanceByDocumentID[documentID] ?? [] {
+            let key = PublicationSourceKey(
+                kind: record.sourceKind,
+                value: record.sourceValue
+            )
+            guard bySource.updateValue(
+                DecodedPublicationProvenance(
+                    record: record,
+                    stored: try record.decoded()
+                ),
+                forKey: key
+            ) == nil else {
+                throw corruptLibraryError()
+            }
+        }
+        let decoded = DecodedPublicationProvenanceCollection(
+            bySource: bySource
+        )
+        decodedProvenanceByDocumentID[documentID] = decoded
+        return decoded
+    }
+}
+
 final class LibraryDatabase: Sendable {
     private let queue: DatabaseQueue
 
@@ -261,12 +395,21 @@ final class LibraryDatabase: Sendable {
 
     func retainedImports() throws -> [DurableImportSnapshot] {
         try queue.read { db in
-            let tasks = try ImportTaskRecord.fetchAll(db)
-            try validateJournalSequences(tasks)
-            return try publicationStateBundles(for: tasks, in: db)
-                .map(\.snapshot)
-                .filter { $0.state != .abandoned }
-                .sorted(by: retainedImportOrdering)
+            try retainedImports(in: db)
+        }
+    }
+
+    func retainedImportStatementCountForTesting() throws -> Int {
+        try queue.read { db in
+            var statementCount = 0
+            db.trace(options: .statement) { event in
+                if case .statement = event {
+                    statementCount += 1
+                }
+            }
+            defer { db.trace(options: []) }
+            _ = try retainedImports(in: db)
+            return statementCount
         }
     }
 
@@ -274,7 +417,16 @@ final class LibraryDatabase: Sendable {
         try queue.write { db in
             let tasks = try ImportTaskRecord.fetchAll(db)
             try validateJournalSequences(tasks)
-            _ = try publicationStateBundles(for: tasks, in: db)
+            try validatePublicationAssociationRoots(in: db)
+            var associations = try PublicationAssociationBatch(
+                taskIDs: tasks.map(\.taskID),
+                in: db
+            )
+            _ = try publicationStateBundles(
+                for: tasks,
+                in: db,
+                associations: &associations
+            )
             guard !tasks.contains(where: {
                 $0.state == ImportTaskState.running.rawValue
                     || $0.state == ImportTaskState.cancelling.rawValue
@@ -318,7 +470,8 @@ final class LibraryDatabase: Sendable {
 
             let bundles = try publicationStateBundles(
                 for: [claimed] + shifted,
-                in: db
+                in: db,
+                associations: &associations
             )
             guard let claimedSnapshot = bundles.first?.snapshot else {
                 throw corruptLibraryError()
@@ -980,6 +1133,21 @@ final class LibraryDatabase: Sendable {
         for tasks: [ImportTaskRecord],
         in db: Database
     ) throws -> [PublicationStateBundle] {
+        try validatePublicationAssociationRoots(in: db)
+        var associations = try PublicationAssociationBatch(
+            taskIDs: tasks.map(\.taskID),
+            in: db
+        )
+        return try publicationStateBundles(
+            for: tasks,
+            in: db,
+            associations: &associations
+        )
+    }
+
+    private func validatePublicationAssociationRoots(
+        in db: Database
+    ) throws {
         try validateJournalSequenceTable(in: db)
         let orphanedHiddenDocumentCount = try Int.fetchOne(
             db,
@@ -996,16 +1164,21 @@ final class LibraryDatabase: Sendable {
         guard orphanedHiddenDocumentCount == 0 else {
             throw corruptLibraryError()
         }
+    }
 
-        return try tasks.map { task in
-            let stagedArtifact = try stagedArtifact(for: task, in: db)
-            let intent = try PublicationIntentRecord.fetchOne(
-                db,
-                key: task.taskID
-            )
-            let snapshot = try task.snapshot(
-                stagedArtifact: stagedArtifact
-            )
+    private func publicationStateBundles(
+        for tasks: [ImportTaskRecord],
+        in db: Database,
+        associations: inout PublicationAssociationBatch
+    ) throws -> [PublicationStateBundle] {
+        var prepared: [PreparedPublicationTask] = []
+        prepared.reserveCapacity(tasks.count)
+        var associatedDocumentIDs: Set<String> = []
+        for task in tasks {
+            let stagedArtifact = associations
+                .stagedArtifactsByTaskID[task.taskID]
+            let intent = associations.intentsByTaskID[task.taskID]
+            let snapshot = try task.snapshot(stagedArtifact: stagedArtifact)
             let outcome = try task.storedOutcome()
             guard let state = ImportTaskState(rawValue: task.state) else {
                 throw corruptLibraryError()
@@ -1020,30 +1193,71 @@ final class LibraryDatabase: Sendable {
             } else {
                 associatedDocumentID = intent?.documentID
             }
-            let document = try associatedDocumentID.flatMap {
-                try SourceDocumentRecord.fetchOne(db, key: $0)
+            if let associatedDocumentID {
+                associatedDocumentIDs.insert(associatedDocumentID)
             }
-            let provenance = try associatedDocumentID.map {
-                try SourceProvenanceRecord
-                    .filter(Column("document_id") == $0)
-                    .fetchAll(db)
-            } ?? []
-            try validateStoredPublicationState(
-                task: task,
-                state: state,
-                stagedArtifact: stagedArtifact,
-                intent: intent,
-                document: document,
-                provenance: provenance,
-                outcome: outcome
-            )
-            return PublicationStateBundle(
-                task: task,
-                stagedArtifact: stagedArtifact,
-                snapshot: snapshot,
-                outcome: outcome
+            prepared.append(
+                PreparedPublicationTask(
+                    task: task,
+                    stagedArtifact: stagedArtifact,
+                    intent: intent,
+                    snapshot: snapshot,
+                    outcome: outcome,
+                    state: state,
+                    associatedDocumentID: associatedDocumentID
+                )
             )
         }
+        try associations.loadDocuments(ids: associatedDocumentIDs, in: db)
+
+        var bundles: [PublicationStateBundle] = []
+        bundles.reserveCapacity(tasks.count)
+        for item in prepared {
+            let document: DecodedPublicationDocument?
+            let provenance: DecodedPublicationProvenanceCollection
+            if let associatedDocumentID = item.associatedDocumentID {
+                document = try associations.document(
+                    id: associatedDocumentID
+                )
+                provenance = try associations.provenance(
+                    documentID: associatedDocumentID
+                )
+            } else {
+                document = nil
+                provenance = DecodedPublicationProvenanceCollection(
+                    bySource: [:]
+                )
+            }
+            try validateStoredPublicationState(
+                task: item.task,
+                state: item.state,
+                stagedArtifact: item.stagedArtifact,
+                intent: item.intent,
+                document: document,
+                provenance: provenance,
+                outcome: item.outcome
+            )
+            bundles.append(
+                PublicationStateBundle(
+                    task: item.task,
+                    stagedArtifact: item.stagedArtifact,
+                    snapshot: item.snapshot,
+                    outcome: item.outcome
+                )
+            )
+        }
+        return bundles
+    }
+
+    private func retainedImports(
+        in db: Database
+    ) throws -> [DurableImportSnapshot] {
+        let tasks = try ImportTaskRecord.fetchAll(db)
+        try validateJournalSequences(tasks)
+        return try publicationStateBundles(for: tasks, in: db)
+            .map(\.snapshot)
+            .filter { $0.state != .abandoned }
+            .sorted(by: retainedImportOrdering)
     }
 
     private func validateStoredPublicationState(
@@ -1051,8 +1265,8 @@ final class LibraryDatabase: Sendable {
         state: ImportTaskState,
         stagedArtifact: StagedArtifactRecord?,
         intent: PublicationIntentRecord?,
-        document: SourceDocumentRecord?,
-        provenance: [SourceProvenanceRecord],
+        document: DecodedPublicationDocument?,
+        provenance: DecodedPublicationProvenanceCollection,
         outcome: PublicationOutcome?
     ) throws {
         switch state {
@@ -1065,25 +1279,30 @@ final class LibraryDatabase: Sendable {
             else {
                 throw corruptLibraryError()
             }
-            let storedDocument = try document.decoded()
+            let documentRecord = document.record
+            let storedDocument = document.stored
             let taskSource = try SourceColumns.decode(
                 kind: task.sourceKind,
                 value: task.sourceValue
             )
             let taskSourceColumns = try SourceColumns.encode(taskSource)
-            let decodedProvenance = try provenance.map { record in
-                (record, try record.decoded())
-            }
+            let storedProvenance = provenance.bySource[
+                PublicationSourceKey(
+                    kind: task.sourceKind,
+                    value: task.sourceValue
+                )
+            ]
             guard taskSourceColumns.kind == task.sourceKind,
                   taskSourceColumns.value == task.sourceValue,
                   storedDocument.visibility == .visible,
-                  decodedProvenance.contains(where: { record, decoded in
-                      record.documentID == document.documentID
-                          && record.sourceKind == task.sourceKind
-                          && record.sourceValue == task.sourceValue
-                          && decoded.documentID == storedDocument.documentID
-                          && decoded.source == taskSource
-                  })
+                  let storedProvenance,
+                  storedProvenance.record.documentID
+                    == documentRecord.documentID,
+                  storedProvenance.record.sourceKind == task.sourceKind,
+                  storedProvenance.record.sourceValue == task.sourceValue,
+                  storedProvenance.stored.documentID
+                    == storedDocument.documentID,
+                  storedProvenance.stored.source == taskSource
             else {
                 throw corruptLibraryError()
             }
@@ -1109,12 +1328,14 @@ final class LibraryDatabase: Sendable {
                   task.stagedArtifactID == stagedArtifact.artifactID,
                   intent.taskID == task.taskID,
                   intent.stagedArtifactID == stagedArtifact.artifactID,
-                  intent.documentID == document.documentID,
+                  intent.documentID == document.record.documentID,
                   let rawTaskID = UUID(uuidString: task.taskID),
                   let rawArtifactID = UUID(
                     uuidString: stagedArtifact.artifactID
                   ),
-                  let rawDocumentID = UUID(uuidString: document.documentID)
+                  let rawDocumentID = UUID(
+                    uuidString: document.record.documentID
+                  )
             else {
                 throw corruptLibraryError()
             }
@@ -1132,7 +1353,7 @@ final class LibraryDatabase: Sendable {
                 stagedRelativePath: stagedArtifact.relativePath,
                 finalRelativePath: intent.finalRelativePath
             )
-            let storedDocument = try document.decoded()
+            let storedDocument = document.stored
             guard storedDocument.documentID
                     == publicationIntent.documentID,
                   storedDocument.location == .library,
@@ -1155,6 +1376,7 @@ final class LibraryDatabase: Sendable {
     }
 
     private func allocateQueueSequence(in db: Database) throws -> Int64 {
+        try validateJournalSequenceTable(in: db)
         let rows = try Row.fetchAll(
             db,
             sql: """
@@ -1162,10 +1384,25 @@ final class LibraryDatabase: Sendable {
                 FROM import_queue_clock
                 """
         )
-        guard rows.count == 1,
-              rows[0]["singleton"] as Int64 == 1,
-              let lastSequence = rows[0]["last_sequence"] as Int64?,
+        guard rows.count == 1 else {
+            throw corruptLibraryError()
+        }
+        let singleton = try rows[0].decode(
+            Int64.self,
+            forColumn: "singleton"
+        )
+        let lastSequence = try rows[0].decode(
+            Int64.self,
+            forColumn: "last_sequence"
+        )
+        let maximumJournalSequence = try Int64.fetchOne(
+            db,
+            sql: "SELECT MAX(journal_sequence) FROM import_tasks"
+        ) ?? 0
+        guard singleton == 1,
               lastSequence >= 0,
+              maximumJournalSequence >= 0,
+              lastSequence >= maximumJournalSequence,
               lastSequence < Int64.max
         else {
             throw corruptLibraryError()
@@ -1233,10 +1470,22 @@ final class LibraryDatabase: Sendable {
         ) else {
             throw corruptLibraryError()
         }
-        let totalCount: Int64 = stats["total_count"]
-        let presentCount: Int64 = stats["present_count"]
-        let uniqueCount: Int64 = stats["unique_count"]
-        let minimumSequence: Int64? = stats["minimum_sequence"]
+        let totalCount = try stats.decode(
+            Int64.self,
+            forColumn: "total_count"
+        )
+        let presentCount = try stats.decode(
+            Int64.self,
+            forColumn: "present_count"
+        )
+        let uniqueCount = try stats.decode(
+            Int64.self,
+            forColumn: "unique_count"
+        )
+        let minimumSequence = try stats.decode(
+            Int64?.self,
+            forColumn: "minimum_sequence"
+        )
         guard totalCount == presentCount,
               totalCount == uniqueCount,
               totalCount == 0 || (minimumSequence ?? 0) > 0
@@ -1282,6 +1531,23 @@ final class LibraryDatabase: Sendable {
         }
         return AbandonedStagedArtifactCleanup(path: expectedPath)
     }
+}
+
+private func uniqueRecords<Record, Key: Hashable>(
+    _ records: [Record],
+    keyedBy keyPath: KeyPath<Record, Key>
+) throws -> [Key: Record] {
+    var result: [Key: Record] = [:]
+    result.reserveCapacity(records.count)
+    for record in records {
+        guard result.updateValue(
+            record,
+            forKey: record[keyPath: keyPath]
+        ) == nil else {
+            throw corruptLibraryError()
+        }
+    }
+    return result
 }
 
 private func corruptLibraryError() -> LocalLibraryError {
