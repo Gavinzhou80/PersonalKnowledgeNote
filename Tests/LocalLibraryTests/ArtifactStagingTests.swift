@@ -80,7 +80,7 @@ func webPackageIsCopiedIntoTaskOwnedStaging() async throws {
             )
     )
     #expect(stagedSnapshot.stagedArtifact == artifact)
-    #expect(stagedSnapshot.state == .working)
+    #expect(stagedSnapshot.state == .running)
     #expect(stagedSnapshot.revision == snapshot.revision + 1)
 }
 

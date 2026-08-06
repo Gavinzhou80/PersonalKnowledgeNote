@@ -40,26 +40,61 @@ public struct PublicationCandidate: Sendable {
 
 public struct DurableImportSnapshot: Sendable {
     public let taskID: ImportTaskID
+    package let journalSequence: UInt64
+    public let queueSequence: UInt64?
     public let attempt: UInt
     public let revision: UInt64
     public let state: ImportTaskState
+    public let failure: ImportTaskFailureEnvelope?
     public let checkpoint: CheckpointEnvelope?
     public let stagedArtifact: StagedArtifact?
 
     package init(
         taskID: ImportTaskID,
+        journalSequence: UInt64,
+        queueSequence: UInt64?,
         attempt: UInt,
         revision: UInt64,
         state: ImportTaskState,
+        failure: ImportTaskFailureEnvelope?,
         checkpoint: CheckpointEnvelope?,
         stagedArtifact: StagedArtifact?
     ) {
         self.taskID = taskID
+        self.journalSequence = journalSequence
+        self.queueSequence = queueSequence
         self.attempt = attempt
         self.revision = revision
         self.state = state
+        self.failure = failure
         self.checkpoint = checkpoint
         self.stagedArtifact = stagedArtifact
+    }
+}
+
+package struct DurableQueueMutation: Sendable {
+    package let primary: DurableImportSnapshot
+    package let queueUpdates: [DurableImportSnapshot]
+
+    package init(
+        primary: DurableImportSnapshot,
+        queueUpdates: [DurableImportSnapshot]
+    ) {
+        self.primary = primary
+        self.queueUpdates = queueUpdates
+    }
+}
+
+package struct DurableQueueClaim: Sendable {
+    package let claimed: DurableImportSnapshot
+    package let queueUpdates: [DurableImportSnapshot]
+
+    package init(
+        claimed: DurableImportSnapshot,
+        queueUpdates: [DurableImportSnapshot]
+    ) {
+        self.claimed = claimed
+        self.queueUpdates = queueUpdates
     }
 }
 

@@ -95,7 +95,7 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     )
     let durableAcquiring = try await workspace.snapshot()
     #expect(durableAcquiring.revision == acquiring.revision)
-    #expect(durableAcquiring.state == .working)
+    #expect(durableAcquiring.state == .running)
 
     var handleUpdates = handle.updates().makeAsyncIterator()
     let authoritative = try #require(await handleUpdates.next())

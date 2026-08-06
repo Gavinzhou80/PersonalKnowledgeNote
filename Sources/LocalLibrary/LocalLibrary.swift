@@ -145,6 +145,18 @@ public actor LocalLibrary {
         }
     }
 
+    package func retainedImports() throws -> [DurableImportSnapshot] {
+        try withLocalLibraryErrorTranslation {
+            try database.retainedImports()
+        }
+    }
+
+    package func claimNextRunnable() throws -> DurableQueueClaim? {
+        try withLocalLibraryErrorTranslation {
+            try database.claimNextRunnable()
+        }
+    }
+
     public func importWorkspace(
         id: ImportTaskID
     ) async throws -> ImportWorkspace? {

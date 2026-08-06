@@ -26,7 +26,7 @@ func checkpointSurvivesReopenAndAdvancesRevision() async throws {
 
     #expect(snapshot.revision == accepted.initialRevision + 1)
     #expect(snapshot.checkpoint == envelope)
-    #expect(snapshot.state == .working)
+    #expect(snapshot.state == .running)
     do {
         _ = try await recovered.checkpoint(
             CheckpointUpdate(

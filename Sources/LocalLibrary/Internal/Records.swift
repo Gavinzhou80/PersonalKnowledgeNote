@@ -15,6 +15,11 @@ struct ImportTaskRecord:
     var attempt: Int64
     var revision: Int64
     var state: String
+    var journalSequence: Int64
+    var queueSequence: Int64?
+    var failureCodecVersion: Int64?
+    var failurePayload: Data?
+    var cancellationRequested: Bool
     var checkpointOrdinal: Int64?
     var checkpointCodecVersion: Int64?
     var checkpointPayload: Data?
@@ -28,6 +33,11 @@ struct ImportTaskRecord:
         case attempt
         case revision
         case state
+        case journalSequence = "journal_sequence"
+        case queueSequence = "queue_sequence"
+        case failureCodecVersion = "failure_codec_version"
+        case failurePayload = "failure_payload"
+        case cancellationRequested = "cancellation_requested"
         case checkpointOrdinal = "checkpoint_ordinal"
         case checkpointCodecVersion = "checkpoint_codec_version"
         case checkpointPayload = "checkpoint_payload"
@@ -214,11 +224,12 @@ enum DomainJSON {
 }
 
 extension ImportTaskState {
-    var isValidForLegacyV1Columns: Bool {
+    var isValidDurableState: Bool {
         switch self {
-        case .accepted, .working, .publicationPending, .completed, .abandoned:
+        case .queued, .running, .cancelling, .failed, .cancelled,
+             .publicationPending, .completed, .abandoned:
             return true
-        case .queued, .running, .cancelling, .failed, .cancelled:
+        case .accepted, .working:
             return false
         }
     }
@@ -229,28 +240,76 @@ extension ImportTaskRecord {
         stagedArtifact: StagedArtifactRecord?
     ) throws -> DurableImportSnapshot {
         guard let rawTaskID = UUID(uuidString: taskID),
+              let decodedJournalSequence = UInt64(exactly: journalSequence),
+              decodedJournalSequence > 0,
               let decodedAttempt = UInt(exactly: attempt),
               decodedAttempt > 0,
               let decodedRevision = UInt64(exactly: revision),
               let decodedState = ImportTaskState(rawValue: state),
-              decodedState.isValidForLegacyV1Columns
+              decodedState.isValidDurableState,
+              cancellationRequested == false
         else {
             throw corruptLibrary()
         }
 
         _ = try SourceColumns.decode(kind: sourceKind, value: sourceValue)
+        let decodedQueueSequence = try decodeQueueSequence(
+            for: decodedState
+        )
+        let failure = try decodeFailure(for: decodedState)
         let checkpoint = try decodeCheckpoint()
         let artifact = try decodeStagedArtifact(stagedArtifact)
         try validateOutcome(for: decodedState)
 
         return DurableImportSnapshot(
             taskID: ImportTaskID(rawTaskID),
+            journalSequence: decodedJournalSequence,
+            queueSequence: decodedQueueSequence,
             attempt: decodedAttempt,
             revision: decodedRevision,
             state: decodedState,
+            failure: failure,
             checkpoint: checkpoint,
             stagedArtifact: artifact
         )
+    }
+
+    private func decodeQueueSequence(
+        for state: ImportTaskState
+    ) throws -> UInt64? {
+        switch (state, queueSequence) {
+        case (.queued, let rawSequence?):
+            guard let sequence = UInt64(exactly: rawSequence), sequence > 0
+            else {
+                throw corruptLibrary()
+            }
+            return sequence
+        case (.queued, nil), (_, .some):
+            throw corruptLibrary()
+        case (_, nil):
+            return nil
+        }
+    }
+
+    private func decodeFailure(
+        for state: ImportTaskState
+    ) throws -> ImportTaskFailureEnvelope? {
+        switch (state, failureCodecVersion, failurePayload) {
+        case (.failed, let rawVersion?, let payload?):
+            guard let version = UInt16(exactly: rawVersion),
+                  payload.count <= 1_048_576
+            else {
+                throw corruptLibrary()
+            }
+            return ImportTaskFailureEnvelope(
+                codecVersion: version,
+                payload: payload
+            )
+        case (.failed, _, _), (_, .some, _), (_, _, .some):
+            throw corruptLibrary()
+        case (_, nil, nil):
+            return nil
+        }
     }
 
     private func decodeCheckpoint() throws -> CheckpointEnvelope? {
@@ -315,7 +374,7 @@ extension ImportTaskRecord {
 
     func storedOutcome() throws -> PublicationOutcome? {
         guard let state = ImportTaskState(rawValue: state),
-              state.isValidForLegacyV1Columns
+              state.isValidDurableState
         else {
             throw corruptLibrary()
         }

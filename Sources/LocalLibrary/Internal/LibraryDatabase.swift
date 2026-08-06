@@ -49,15 +49,19 @@ final class LibraryDatabase: Sendable {
     ) throws {
         let sourceColumns = try SourceColumns.encode(source)
         try queue.write { db in
+            let sequence = try allocateQueueSequence(in: db)
             try ImportTaskRecord(
                 taskID: id.rawValue.uuidString,
                 sourceKind: sourceColumns.kind,
                 sourceValue: sourceColumns.value,
                 attempt: 1,
-                revision: placement == nil ? 0 : 1,
-                state: placement == nil
-                    ? ImportTaskState.accepted.rawValue
-                    : ImportTaskState.working.rawValue,
+                revision: 0,
+                state: ImportTaskState.queued.rawValue,
+                journalSequence: sequence,
+                queueSequence: sequence,
+                failureCodecVersion: nil,
+                failurePayload: nil,
+                cancellationRequested: false,
                 checkpointOrdinal: nil,
                 checkpointCodecVersion: nil,
                 checkpointPayload: nil,
@@ -92,11 +96,11 @@ final class LibraryDatabase: Sendable {
                 throw LocalLibraryError.staleRevision(current: currentRevision)
             }
             guard let state = ImportTaskState(rawValue: task.state),
-                  state.isValidForLegacyV1Columns
+                  state.isValidDurableState
             else {
                 throw corruptLibraryError()
             }
-            guard state != .completed, state != .abandoned else {
+            guard state == .queued || state == .running else {
                 throw LocalLibraryError.invalidTaskState
             }
             guard task.stagedArtifactID == nil else {
@@ -110,8 +114,9 @@ final class LibraryDatabase: Sendable {
                 taskID: taskID,
                 placement: placement
             ).insert(db)
+            try removeFromActiveQueueIfNeeded(task: &task, in: db)
             task.stagedArtifactID = placement.artifact.rawValue.uuidString
-            task.state = ImportTaskState.working.rawValue
+            task.state = ImportTaskState.running.rawValue
             task.revision += 1
             try task.update(db)
         }
@@ -137,14 +142,11 @@ final class LibraryDatabase: Sendable {
                 )
             }
             guard let state = ImportTaskState(rawValue: task.state),
-                  state.isValidForLegacyV1Columns
+                  state.isValidDurableState
             else {
                 throw corruptLibraryError()
             }
-            guard state != .completed,
-                  state != .abandoned,
-                  state != .publicationPending
-            else {
+            guard state == .queued || state == .running else {
                 throw LocalLibraryError.invalidTaskState
             }
             guard update.envelope.payload.count <= 1_048_576 else {
@@ -172,7 +174,8 @@ final class LibraryDatabase: Sendable {
                 update.envelope.codecVersion
             )
             task.checkpointPayload = update.envelope.payload
-            task.state = ImportTaskState.working.rawValue
+            try removeFromActiveQueueIfNeeded(task: &task, in: db)
+            task.state = ImportTaskState.running.rawValue
             task.revision += 1
             try task.update(db)
 
@@ -218,6 +221,7 @@ final class LibraryDatabase: Sendable {
                 throw corruptLibraryError()
             }
 
+            try removeFromActiveQueueIfNeeded(task: &task, in: db)
             task.state = ImportTaskState.abandoned.rawValue
             task.revision += 1
             try task.update(db)
@@ -252,6 +256,77 @@ final class LibraryDatabase: Sendable {
                 .filter {
                     $0.state != .completed && $0.state != .abandoned
                 }
+        }
+    }
+
+    func retainedImports() throws -> [DurableImportSnapshot] {
+        try queue.read { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            try validateJournalSequences(tasks)
+            return try publicationStateBundles(for: tasks, in: db)
+                .map(\.snapshot)
+                .filter { $0.state != .abandoned }
+                .sorted(by: retainedImportOrdering)
+        }
+    }
+
+    func claimNextRunnable() throws -> DurableQueueClaim? {
+        try queue.write { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            try validateJournalSequences(tasks)
+            _ = try publicationStateBundles(for: tasks, in: db)
+            guard !tasks.contains(where: {
+                $0.state == ImportTaskState.running.rawValue
+                    || $0.state == ImportTaskState.cancelling.rawValue
+                    || $0.state
+                        == ImportTaskState.publicationPending.rawValue
+            }) else {
+                return nil
+            }
+            let queued = tasks
+                .filter { task in
+                    task.state == ImportTaskState.queued.rawValue
+                }
+                .sorted(by: queueRecordOrdering)
+            guard var claimed = queued.first,
+                  let claimedSequence = claimed.queueSequence
+            else {
+                return nil
+            }
+            guard claimed.revision < Int64.max else {
+                throw corruptLibraryError()
+            }
+
+            claimed.queueSequence = nil
+            claimed.state = ImportTaskState.running.rawValue
+            claimed.revision += 1
+            try claimed.update(db)
+
+            var shifted = tasks
+                .filter {
+                    $0.state == ImportTaskState.queued.rawValue
+                        && ($0.queueSequence ?? Int64.min) > claimedSequence
+                }
+                .sorted(by: queueRecordOrdering)
+            for index in shifted.indices {
+                guard shifted[index].revision < Int64.max else {
+                    throw corruptLibraryError()
+                }
+                shifted[index].revision += 1
+                try shifted[index].update(db)
+            }
+
+            let bundles = try publicationStateBundles(
+                for: [claimed] + shifted,
+                in: db
+            )
+            guard let claimedSnapshot = bundles.first?.snapshot else {
+                throw corruptLibraryError()
+            }
+            return DurableQueueClaim(
+                claimed: claimedSnapshot,
+                queueUpdates: bundles.dropFirst().map(\.snapshot)
+            )
         }
     }
 
@@ -356,7 +431,7 @@ final class LibraryDatabase: Sendable {
                 }
                 task.stagedArtifactID = nil
             }
-            task.state = ImportTaskState.working.rawValue
+            task.state = ImportTaskState.running.rawValue
             task.revision += 1
             try task.update(db)
         }
@@ -565,6 +640,7 @@ final class LibraryDatabase: Sendable {
                 stagedArtifactID: stagedRecord.artifactID,
                 finalRelativePath: finalPath.relativePath
             ).insert(db)
+            try removeFromActiveQueueIfNeeded(task: &task, in: db)
             task.state = ImportTaskState.publicationPending.rawValue
             task.revision += 1
             try task.update(db)
@@ -651,6 +727,7 @@ final class LibraryDatabase: Sendable {
                 location: duplicate.location,
                 provenanceAdded: provenanceAdded
             )
+            try removeFromActiveQueueIfNeeded(task: &task, in: db)
             task.outcomeJSON = try DomainJSON.encode(outcome)
             task.state = ImportTaskState.completed.rawValue
             task.stagedArtifactID = nil
@@ -861,7 +938,7 @@ final class LibraryDatabase: Sendable {
         guard let state = ImportTaskState(rawValue: task.state) else {
             throw corruptLibraryError()
         }
-        guard state == .accepted || state == .working,
+        guard state == .queued || state == .running,
               let stagedRecord
         else {
             throw LocalLibraryError.invalidTaskState
@@ -903,6 +980,7 @@ final class LibraryDatabase: Sendable {
         for tasks: [ImportTaskRecord],
         in db: Database
     ) throws -> [PublicationStateBundle] {
+        try validateJournalSequenceTable(in: db)
         let orphanedHiddenDocumentCount = try Int.fetchOne(
             db,
             sql: """
@@ -1066,11 +1144,102 @@ final class LibraryDatabase: Sendable {
             else {
                 throw corruptLibraryError()
             }
-        case .accepted, .working, .abandoned:
+        case .queued, .running, .cancelling, .failed, .cancelled,
+             .abandoned:
             guard outcome == nil, intent == nil else {
                 throw corruptLibraryError()
             }
-        case .queued, .running, .cancelling, .failed, .cancelled:
+        case .accepted, .working:
+            throw corruptLibraryError()
+        }
+    }
+
+    private func allocateQueueSequence(in db: Database) throws -> Int64 {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT singleton, last_sequence
+                FROM import_queue_clock
+                """
+        )
+        guard rows.count == 1,
+              rows[0]["singleton"] as Int64 == 1,
+              let lastSequence = rows[0]["last_sequence"] as Int64?,
+              lastSequence >= 0,
+              lastSequence < Int64.max
+        else {
+            throw corruptLibraryError()
+        }
+        let nextSequence = lastSequence + 1
+        try db.execute(
+            sql: """
+                UPDATE import_queue_clock
+                SET last_sequence = ?
+                WHERE singleton = 1
+                """,
+            arguments: [nextSequence]
+        )
+        return nextSequence
+    }
+
+    private func removeFromActiveQueueIfNeeded(
+        task: inout ImportTaskRecord,
+        in db: Database
+    ) throws {
+        guard let removedSequence = task.queueSequence else {
+            return
+        }
+        guard task.state == ImportTaskState.queued.rawValue else {
+            throw corruptLibraryError()
+        }
+        var shifted = try ImportTaskRecord
+            .filter(Column("state") == ImportTaskState.queued.rawValue)
+            .filter(Column("queue_sequence") > removedSequence)
+            .order(Column("queue_sequence"))
+            .fetchAll(db)
+        for index in shifted.indices {
+            guard shifted[index].revision < Int64.max else {
+                throw corruptLibraryError()
+            }
+            shifted[index].revision += 1
+            try shifted[index].update(db)
+        }
+        task.queueSequence = nil
+    }
+
+    private func validateJournalSequences(
+        _ tasks: [ImportTaskRecord]
+    ) throws {
+        let sequences = tasks.map(\.journalSequence)
+        guard sequences.allSatisfy({ $0 > 0 }),
+              Set(sequences).count == sequences.count
+        else {
+            throw corruptLibraryError()
+        }
+    }
+
+    private func validateJournalSequenceTable(in db: Database) throws {
+        guard let stats = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT
+                    COUNT(*) AS total_count,
+                    COUNT(journal_sequence) AS present_count,
+                    COUNT(DISTINCT journal_sequence) AS unique_count,
+                    MIN(journal_sequence) AS minimum_sequence
+                FROM import_tasks
+                """
+        ) else {
+            throw corruptLibraryError()
+        }
+        let totalCount: Int64 = stats["total_count"]
+        let presentCount: Int64 = stats["present_count"]
+        let uniqueCount: Int64 = stats["unique_count"]
+        let minimumSequence: Int64? = stats["minimum_sequence"]
+        guard totalCount == presentCount,
+              totalCount == uniqueCount,
+              totalCount == 0 || (minimumSequence ?? 0) > 0
+        else {
             throw corruptLibraryError()
         }
     }
@@ -1116,4 +1285,42 @@ final class LibraryDatabase: Sendable {
 
 private func corruptLibraryError() -> LocalLibraryError {
     LocalLibraryError.corruptLibrary(diagnosticID: UUID())
+}
+
+private func queueRecordOrdering(
+    _ lhs: ImportTaskRecord,
+    _ rhs: ImportTaskRecord
+) -> Bool {
+    (lhs.queueSequence ?? Int64.max) < (rhs.queueSequence ?? Int64.max)
+}
+
+private func retainedImportOrdering(
+    _ lhs: DurableImportSnapshot,
+    _ rhs: DurableImportSnapshot
+) -> Bool {
+    let lhsRank = retainedImportRank(lhs.state)
+    let rhsRank = retainedImportRank(rhs.state)
+    guard lhsRank == rhsRank else {
+        return lhsRank < rhsRank
+    }
+    if lhs.state == .queued, rhs.state == .queued {
+        return (lhs.queueSequence ?? UInt64.max)
+            < (rhs.queueSequence ?? UInt64.max)
+    }
+    return lhs.journalSequence < rhs.journalSequence
+}
+
+private func retainedImportRank(_ state: ImportTaskState) -> Int {
+    switch state {
+    case .running, .cancelling, .publicationPending:
+        return 0
+    case .queued:
+        return 1
+    case .failed, .cancelled, .completed:
+        return 2
+    case .abandoned:
+        return 3
+    case .accepted, .working:
+        return 4
+    }
 }
