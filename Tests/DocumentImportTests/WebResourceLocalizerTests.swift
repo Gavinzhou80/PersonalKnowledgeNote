@@ -184,7 +184,8 @@ func rendererKeepsUnavailableImageCaptionExactlyOnce(alt: String) throws {
 
     let html = try String(contentsOf: package.appending(path: "index.html"), encoding: .utf8)
     let parsed = try SwiftSoup.parse(html)
-    #expect(try parsed.select("figure > figcaption").text() == "Readable caption.")
+    #expect(try parsed.select("figure > figcaption").isEmpty())
+    #expect(try parsed.select("article > figcaption").text() == "Readable caption.")
     #expect(try parsed.select("figcaption").count == 1)
     #expect(try parsed.select("img[src]").isEmpty())
     #expect(!html.contains("http://") && !html.contains("https://"))
@@ -299,7 +300,7 @@ func cancellationIsNotPersistedAsAnOptionalImageFailure() async throws {
 }
 
 @Test
-func missingImageWithOnlyCaptionKeepsReadableFigureSemantics() throws {
+func missingImageWithOnlyCaptionKeepsStandaloneReadableSemantics() throws {
     let package = try temporaryPackage()
     defer { try? FileManager.default.removeItem(at: package) }
     let article = ExtractedWebArticle(
@@ -332,9 +333,9 @@ func missingImageWithOnlyCaptionKeepsReadableFigureSemantics() throws {
 
     let html = try String(contentsOf: package.appending(path: "index.html"), encoding: .utf8)
     let parsed = try SwiftSoup.parse(html)
-    #expect(try parsed.select("figure").count == 1)
-    #expect(try parsed.select("figure > [data-missing-image=true]").count == 1)
-    #expect(try parsed.select("figure > figcaption").text() == "Readable fallback caption")
+    #expect(try parsed.select("figure").isEmpty())
+    #expect(try parsed.select("article > [data-missing-image=true]").count == 1)
+    #expect(try parsed.select("article > figcaption").text() == "Readable fallback caption")
     #expect(try parsed.select("figcaption").count == 1)
     #expect(try parsed.select("img,source").isEmpty())
     #expect(!html.contains("http://") && !html.contains("https://"))

@@ -27,8 +27,11 @@ struct WebArtifactRenderer: Sendable {
             block.relationTargetKey.map { ($0, block) }
         }, by: \ .0).mapValues { $0.map(\ .1) }
         let captionConsumingImageKeys = Set<String>(blocks.compactMap { block in
-            guard block.role == .image else { return nil }
-            return block.imageKey
+            guard block.role == .image,
+                  let imageKey = block.imageKey,
+                  media[imageKey] != nil
+            else { return nil }
+            return imageKey
         })
         var rendered: [String] = []
         for block in blocks {
@@ -41,6 +44,7 @@ struct WebArtifactRenderer: Sendable {
             guard !value.isEmpty else { continue }
             if block.role == .image,
                let key = block.imageKey,
+               captionConsumingImageKeys.contains(key),
                let relatedCaptions = captions[key],
                !relatedCaptions.isEmpty {
                 let captionHTML = relatedCaptions.map { render($0, media: media) }
