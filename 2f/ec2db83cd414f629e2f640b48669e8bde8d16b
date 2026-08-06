@@ -1,0 +1,24 @@
+Tests/DocumentImportTests/WebResourceLocalizerTests.swift
+  s_413052984bbc8e::t_54cadbb79aac8e 194-235
+Sources/DocumentImport/Internal/WebArtifactRenderer.swift
+  s_413052984bbc8e::t_4318b10f7278da 66-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "2fec2db83cd414f629e2f640b48669e8bde8d16b",
+  "prompts": {},
+  "logical_commit_id": "2fec2db83cd414f629e2f640b48669e8bde8d16b",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 47,
+      "total_deletions": 1
+    }
+  }
+}
