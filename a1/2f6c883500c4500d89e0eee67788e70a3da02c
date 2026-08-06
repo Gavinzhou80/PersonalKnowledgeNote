@@ -1,0 +1,52 @@
+Tests/DocumentImportTests/DocumentImportIntegrationTests.swift
+  s_413052984bbc8e::t_16716779e684da 200-242,244
+  s_413052984bbc8e::t_edb6fbfa56beee 4,8-14,197
+  s_413052984bbc8e::t_d722ac4de2917a 158,161,186,189
+  s_413052984bbc8e::t_1d2d91e1a5e261 172-174
+  s_be257485cf8e17::t_0a9dc26297c3c9 15,198-199
+Tests/DocumentImportTests/StaticWebDocumentBuilderTests.swift
+  s_413052984bbc8e::t_cee222b86776a5 106-113,121-122
+  s_413052984bbc8e::t_d722ac4de2917a 177,180,194,198,206,234-235,245,308
+  s_413052984bbc8e::t_46aa36a0796a52 126-153
+  s_413052984bbc8e::t_a64b8d199a9d9a 9-105,114-120,123-125,154,167,169,221,250,269,282,300
+Sources/DocumentImport/Internal/StableWebIdentity.swift
+  s_413052984bbc8e::t_45861fd5b6bd59 9-10,16-17,19,32,37-39,42-58
+Tests/KnowledgeCoreTests/PublicationModelTests.swift
+  s_413052984bbc8e::t_5e50abd77b4f25 631-651
+Sources/DocumentImport/Internal/StaticWebDocumentBuilder.swift
+  s_413052984bbc8e::t_5ad7fcaca30bf0 17,119
+  s_413052984bbc8e::t_45861fd5b6bd59 21-34,38-42,44-49,51-100,102-103,105-118,120,127
+Sources/DocumentImport/DocumentImport.swift
+  s_413052984bbc8e::t_b59d9860182ea1 25-28,40-48,60,63-69,71,231,233,266-269,512-513,517-520
+Sources/KnowledgeCore/SourceDocument.swift
+  s_413052984bbc8e::t_45861fd5b6bd59 171
+Sources/DocumentImport/Internal/StaticArticleExtractor.swift
+  s_413052984bbc8e::t_ba65a482fb5d0c 282-287,347-355,361-372
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "a12f6c883500c4500d89e0eee67788e70a3da02c",
+  "prompts": {},
+  "logical_commit_id": "a12f6c883500c4500d89e0eee67788e70a3da02c",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 433,
+      "total_deletions": 515
+    },
+    "s_be257485cf8e17": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fcb6f-2b48-7312-8ffb-daeb6400f100",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>"
+    }
+  }
+}
