@@ -98,12 +98,17 @@ struct URLSessionStaticWebAcquirerTests {
     }
 
     @Test
-    func rejectsChunkedResponseDespiteDeceptiveShortContentLength() async throws {
+    func rejectsDecodedResponseDespiteDeceptiveShortWireContentLength() async throws {
+        let compressedBody = Data(base64Encoded:
+            "H4sIAPwEdGoAA+3BAQ0AAADCoK7vH8IcbkABAAAAAAAAAO8GKkjRagAgAAA="
+        )!
         let server = try await LocalHTTPFixtureServer.start { _ in
             .init(
-                headers: ["Content-Type": "text/html"],
-                body: Data(repeating: 0x62, count: 8_192),
-                framing: .chunked(declaredContentLength: 16)
+                headers: [
+                    "Content-Encoding": "gzip",
+                    "Content-Type": "text/html",
+                ],
+                body: compressedBody
             )
         }
         defer { server.stop() }
