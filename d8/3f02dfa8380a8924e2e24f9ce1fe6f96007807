@@ -1,0 +1,28 @@
+Tests/LocalLibraryTests/ArtifactStagingTests.swift
+  s_413052984bbc8e::t_750aca2171c75e 88
+Sources/LocalLibrary/LocalLibrary.swift
+  s_413052984bbc8e::t_0676521ecd24b7 31
+Tests/DocumentImportTests/StaticWebDocumentBuilderTests.swift
+  s_413052984bbc8e::t_750aca2171c75e 3
+  s_413052984bbc8e::t_67c53f45d1f466 65-66,68
+  s_413052984bbc8e::t_0676521ecd24b7 67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "d83f02dfa8380a8924e2e24f9ce1fe6f96007807",
+  "prompts": {},
+  "logical_commit_id": "d83f02dfa8380a8924e2e24f9ce1fe6f96007807",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 11,
+      "total_deletions": 6
+    }
+  }
+}
