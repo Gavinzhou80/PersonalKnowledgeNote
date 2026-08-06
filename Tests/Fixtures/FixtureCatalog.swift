@@ -7,6 +7,18 @@ public enum FixtureCatalog {
         subdirectory: "Web"
     )
 
+    public static let richArticleURL = requiredResource(
+        name: "index",
+        extension: "html",
+        subdirectory: "Web/RichArticle"
+    )
+
+    public static let richArticleHeroURL = requiredResource(
+        name: "hero",
+        extension: "svg",
+        subdirectory: "Web/RichArticle"
+    )
+
     public static let minimalPDFURL = requiredResource(
         name: "minimal",
         extension: "pdf",
