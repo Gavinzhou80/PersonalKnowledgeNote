@@ -7,6 +7,12 @@ struct TaskSnapshotRegistry {
         case durableCorruption
     }
 
+    struct BatchApplyResult {
+        let changedTaskIDs: Set<ImportTaskID>
+
+        var changed: Bool { !changedTaskIDs.isEmpty }
+    }
+
     private struct AttemptKey: Hashable {
         let taskID: ImportTaskID
         let attempt: UInt
@@ -91,21 +97,123 @@ struct TaskSnapshotRegistry {
     mutating func apply(
         _ durableSnapshots: [DurableImportSnapshot]
     ) throws -> Bool {
+        try applyBatch(durableSnapshots).changed
+    }
+
+    mutating func applyBatch(
+        _ durableSnapshots: [DurableImportSnapshot]
+    ) throws -> BatchApplyResult {
+        try applyBatch(
+            durableSnapshots,
+            replacingSameRevision: false
+        )
+    }
+
+    mutating func reconcileAuthoritative(
+        _ durableSnapshots: [DurableImportSnapshot]
+    ) throws -> BatchApplyResult {
+        try applyBatch(
+            durableSnapshots,
+            replacingSameRevision: true
+        )
+    }
+
+    private mutating func applyBatch(
+        _ durableSnapshots: [DurableImportSnapshot],
+        replacingSameRevision: Bool
+    ) throws -> BatchApplyResult {
         guard isHydrated else {
             throw RegistryError.durableCorruption
         }
+        var seenTaskIDs: Set<ImportTaskID> = []
+        var accepted: [DurableImportSnapshot] = []
+        var sameRevision: [DurableImportSnapshot] = []
         for durable in durableSnapshots where durable.state != .abandoned {
-            if let existing = records[durable.taskID],
-               existing.journalSequence != durable.journalSequence {
+            guard seenTaskIDs.insert(durable.taskID).inserted else {
                 throw RegistryError.durableCorruption
             }
+            guard let existing = records[durable.taskID] else {
+                accepted.append(durable)
+                continue
+            }
+            guard existing.journalSequence == durable.journalSequence else {
+                throw RegistryError.durableCorruption
+            }
+            let current = existing.snapshot
+            if durable.attempt < current.attempt
+                || (durable.attempt == current.attempt
+                    && durable.revision < current.revision) {
+                continue
+            }
+            if durable.attempt == current.attempt,
+               durable.revision == current.revision {
+                if replacingSameRevision {
+                    accepted.append(durable)
+                } else {
+                    sameRevision.append(durable)
+                }
+                continue
+            }
+            guard durable.attempt >= current.attempt,
+                  durable.revision > current.revision else {
+                throw RegistryError.durableCorruption
+            }
+            accepted.append(durable)
         }
 
         let positions = Self.queuePositions(
             in: records,
-            applying: durableSnapshots
+            applyingAccepted: accepted
         )
-        var changed = false
+        for durable in sameRevision {
+            guard let existing = records[durable.taskID],
+                  existing.queueSequence == durable.queueSequence,
+                  try Self.project(
+                    durable,
+                    queuedPosition: positions[durable.taskID]
+                  ) == existing.snapshot else {
+                throw RegistryError.durableCorruption
+            }
+        }
+
+        let acceptedIDs = Set(accepted.map(\.taskID))
+        for record in records.values where !acceptedIDs.contains(
+            record.snapshot.id
+        ) {
+            guard case .queued(let currentPosition) = record.snapshot.state
+            else { continue }
+            guard positions[record.snapshot.id] == currentPosition else {
+                throw RegistryError.durableCorruption
+            }
+        }
+
+        var candidate = records
+        var changedSnapshots: [ImportTaskID: ImportTaskSnapshot] = [:]
+        for durable in accepted {
+            let projected = try Self.project(
+                durable,
+                queuedPosition: positions[durable.taskID]
+            )
+            if var existing = candidate[durable.taskID] {
+                existing.snapshot = projected
+                existing.queueSequence = durable.queueSequence
+                existing.terminal = Self.terminal(for: projected.state)
+                candidate[durable.taskID] = existing
+            } else {
+                candidate[durable.taskID] = Record(
+                    snapshot: projected,
+                    journalSequence: durable.journalSequence,
+                    queueSequence: durable.queueSequence,
+                    terminal: Self.terminal(for: projected.state)
+                )
+            }
+            changedSnapshots[durable.taskID] = projected
+        }
+
+        guard !changedSnapshots.isEmpty else {
+            return BatchApplyResult(changedTaskIDs: [])
+        }
+        records = candidate
         var deliveries: [(
             ImportTaskSnapshot,
             [AsyncStream<ImportTaskSnapshot>.Continuation]
@@ -114,59 +222,26 @@ struct TaskSnapshotRegistry {
             ImportTerminalState,
             [CheckedContinuation<ImportTerminalState, Never>]
         )] = []
-
-        for durable in durableSnapshots {
-            guard durable.state != .abandoned else { continue }
-            let projected = try Self.project(
-                durable,
-                queuedPosition: positions[durable.taskID]
-            )
-            if var existing = records[durable.taskID] {
-                let current = existing.snapshot
-                if durable.attempt < current.attempt
-                    || (durable.attempt == current.attempt
-                        && durable.revision < current.revision) {
-                    continue
-                }
-                if durable.attempt == current.attempt,
-                   durable.revision == current.revision {
-                    guard projected == current else {
-                        throw RegistryError.durableCorruption
-                    }
-                    continue
-                }
-                guard durable.attempt >= current.attempt,
-                      durable.revision > current.revision else {
-                    throw RegistryError.durableCorruption
-                }
-                existing.snapshot = projected
-                existing.queueSequence = durable.queueSequence
-                existing.terminal = Self.terminal(for: projected.state)
-                let observers = Array(existing.observers.values)
-                if let terminal = existing.terminal {
-                    existing.observers.removeAll()
-                    let key = AttemptKey(
-                        taskID: durable.taskID,
-                        attempt: durable.attempt
-                    )
-                    terminalDeliveries.append((
-                        terminal,
-                        waiters.removeValue(forKey: key) ?? []
-                    ))
-                }
-                records[durable.taskID] = existing
-                deliveries.append((projected, observers))
-            } else {
-                records[durable.taskID] = Record(
-                    snapshot: projected,
-                    journalSequence: durable.journalSequence,
-                    queueSequence: durable.queueSequence,
-                    terminal: Self.terminal(for: projected.state)
-                )
+        for durable in accepted {
+            guard let snapshot = changedSnapshots[durable.taskID],
+                  var record = records[durable.taskID] else {
+                preconditionFailure("Committed registry record must exist")
             }
-            changed = true
+            let observers = Array(record.observers.values)
+            if let terminal = record.terminal {
+                record.observers.removeAll()
+                records[durable.taskID] = record
+                let key = AttemptKey(
+                    taskID: durable.taskID,
+                    attempt: durable.attempt
+                )
+                terminalDeliveries.append((
+                    terminal,
+                    waiters.removeValue(forKey: key) ?? []
+                ))
+            }
+            deliveries.append((snapshot, observers))
         }
-
         for (snapshot, observers) in deliveries {
             for observer in observers {
                 observer.yield(snapshot)
@@ -180,8 +255,10 @@ struct TaskSnapshotRegistry {
                 continuation.resume(returning: terminal)
             }
         }
-        if changed { notifyListObservers() }
-        return changed
+        notifyListObservers()
+        return BatchApplyResult(
+            changedTaskIDs: Set(changedSnapshots.keys)
+        )
     }
 
     @discardableResult
@@ -424,7 +501,7 @@ struct TaskSnapshotRegistry {
 
     private static func queuePositions(
         in records: [ImportTaskID: Record],
-        applying updates: [DurableImportSnapshot]
+        applyingAccepted updates: [DurableImportSnapshot]
     ) -> [ImportTaskID: Int] {
         var queued = Dictionary(uniqueKeysWithValues: records.values.compactMap {
             record -> (ImportTaskID, UInt64)? in

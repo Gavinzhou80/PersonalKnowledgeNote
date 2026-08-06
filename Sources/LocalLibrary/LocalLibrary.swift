@@ -164,19 +164,29 @@ public actor LocalLibrary {
     public func accept(
         _ source: OriginalSource
     ) async throws -> ImportWorkspace {
+        try await acceptWithAuthoritativeSnapshots(source).workspace
+    }
+
+    package func acceptWithAuthoritativeSnapshots(
+        _ source: OriginalSource
+    ) async throws -> DurableImportAcceptance {
         try withLocalLibraryErrorTranslation {
             _ = try SourceColumns.encode(source)
             let taskID = ImportTaskID()
+            let snapshots: [DurableImportSnapshot]
             switch source {
             case .webpage:
-                try database.insertAcceptedTask(id: taskID, source: source)
+                snapshots = try database.insertAcceptedTaskReturningRetained(
+                    id: taskID,
+                    source: source
+                )
             case .pdfFile(let externalPDF):
                 let placement = try managedArtifacts.capturePDF(
                     at: externalPDF,
                     for: taskID
                 )
                 do {
-                    try database.insertAcceptedTask(
+                    snapshots = try database.insertAcceptedTaskReturningRetained(
                         id: taskID,
                         source: source,
                         placement: placement
@@ -188,7 +198,10 @@ public actor LocalLibrary {
                     )
                 }
             }
-            return ImportWorkspace(taskID: taskID, library: self)
+            return DurableImportAcceptance(
+                workspace: ImportWorkspace(taskID: taskID, library: self),
+                snapshots: snapshots
+            )
         }
     }
 
@@ -224,6 +237,20 @@ public actor LocalLibrary {
                 () -> DurableQueueClaim? in
                 throw error
             }
+        }
+    }
+
+    package func rollbackClaim(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        previousQueueSequence: UInt64
+    ) throws -> DurableQueueMutation {
+        try withLocalLibraryErrorTranslation {
+            try database.rollbackClaim(
+                taskID: taskID,
+                expectedRevision: expectedRevision,
+                previousQueueSequence: previousQueueSequence
+            )
         }
     }
 

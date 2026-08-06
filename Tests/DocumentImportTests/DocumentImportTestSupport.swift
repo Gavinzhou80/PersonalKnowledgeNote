@@ -109,6 +109,32 @@ actor SelectiveWorkspaceSnapshotLoader {
     }
 }
 
+actor SelectiveRetainedImportsLoader {
+    private let library: LocalLibrary
+    private let failingCalls: Set<Int>
+    private let successfulSnapshots: [DurableImportSnapshot]?
+    private(set) var callCount = 0
+
+    init(
+        library: LocalLibrary,
+        failingCalls: Set<Int>,
+        successfulSnapshots: [DurableImportSnapshot]? = nil
+    ) {
+        self.library = library
+        self.failingCalls = failingCalls
+        self.successfulSnapshots = successfulSnapshots
+    }
+
+    func load() async throws -> [DurableImportSnapshot] {
+        callCount += 1
+        if failingCalls.contains(callCount) {
+            throw DurableQueueTestError.injectedBootstrapFailure
+        }
+        if let successfulSnapshots { return successfulSnapshots }
+        return try await library.retainedImports()
+    }
+}
+
 enum DurableQueueTestError: Error {
     case timeout
     case injectedBootstrapFailure
@@ -279,8 +305,33 @@ actor SuspendedBootstrapLoader {
         return try await library.retainedImports()
     }
 
+    func waitUntilCalled() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount == 0 {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
     func release() {
         released = true
+    }
+}
+
+actor CountingClaimProbe {
+    private let library: LocalLibrary
+    private(set) var callCount = 0
+
+    init(library: LocalLibrary) {
+        self.library = library
+    }
+
+    func claim() async throws -> DurableQueueClaim? {
+        callCount += 1
+        return try await library.claimNextRunnable()
     }
 }
 
@@ -299,6 +350,53 @@ actor TaskListEmissionProbe {
                 throw DurableQueueTestError.timeout
             }
             try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func verifyEmissionCountRemains(
+        _ expected: Int,
+        for duration: Duration
+    ) async throws {
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard emissions.count == expected else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
+actor TaskSnapshotEmissionProbe {
+    private(set) var emissions: [ImportTaskSnapshot] = []
+
+    func record(_ snapshot: ImportTaskSnapshot) {
+        emissions.append(snapshot)
+    }
+
+    func waitForEmissionCount(_ expected: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while emissions.count < expected {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func verifyEmissionCountRemains(
+        _ expected: Int,
+        for duration: Duration
+    ) async throws {
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard emissions.count == expected else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(5))
         }
     }
 }
@@ -320,6 +418,53 @@ actor TransientClaimProbe {
             throw DurableQueueClaimError.transientDatabaseContention
         }
         return try await library.claimNextRunnable()
+    }
+}
+
+actor PersistentContentionClaimProbe {
+    private let library: LocalLibrary
+    private var contentionEnabled = true
+    private(set) var callCount = 0
+
+    init(library: LocalLibrary) {
+        self.library = library
+    }
+
+    func claim() async throws -> DurableQueueClaim? {
+        callCount += 1
+        if contentionEnabled {
+            throw DurableQueueClaimError.transientDatabaseContention
+        }
+        return try await library.claimNextRunnable()
+    }
+
+    func waitForCallCount(_ expected: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount < expected {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func verifyCallCountRemains(
+        _ expected: Int,
+        for duration: Duration
+    ) async throws {
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard callCount == expected else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func allowClaims() {
+        contentionEnabled = false
     }
 }
 
@@ -423,4 +568,98 @@ actor RootRemovalClaimProbe {
             try await Task.sleep(for: .milliseconds(5))
         }
     }
+}
+
+actor OneShotClaimProbe {
+    private let claimValue: DurableQueueClaim
+    private(set) var callCount = 0
+
+    init(_ claim: DurableQueueClaim) {
+        claimValue = claim
+    }
+
+    func claim() -> DurableQueueClaim? {
+        callCount += 1
+        return callCount == 1 ? claimValue : nil
+    }
+
+    func waitUntilCalled() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount == 0 {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+}
+
+actor ControlledAcceptanceProbe {
+    private let library: LocalLibrary
+    private var callCount = 0
+    private var firstReleased = false
+    private(set) var committedTaskIDs: [ImportTaskID] = []
+
+    init(library: LocalLibrary) {
+        self.library = library
+    }
+
+    func accept(
+        _ source: OriginalSource
+    ) async throws -> DurableImportAcceptance {
+        let callIndex = callCount
+        callCount += 1
+        let acceptance = try await library.acceptWithAuthoritativeSnapshots(
+            source
+        )
+        committedTaskIDs.append(acceptance.workspace.taskID)
+        if callIndex == 0 {
+            let deadline = ContinuousClock.now + .seconds(1)
+            while !firstReleased {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else {
+                    throw DurableQueueTestError.timeout
+                }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+        }
+        return acceptance
+    }
+
+    func waitUntilFirstCommitted() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while committedTaskIDs.isEmpty {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func releaseFirst() {
+        firstReleased = true
+    }
+}
+
+func waitUntilDurableState(
+    _ expected: KnowledgeCore.ImportTaskState,
+    taskID: ImportTaskID,
+    library: LocalLibrary,
+    minimumRevision: UInt64 = 0
+) async throws -> DurableImportSnapshot {
+    let deadline = ContinuousClock.now + .seconds(1)
+    while ContinuousClock.now < deadline {
+        try Task.checkCancellation()
+        if let snapshot = try await library.retainedImports().first(where: {
+            $0.taskID == taskID
+                && $0.state == expected
+                && $0.revision >= minimumRevision
+        }) {
+            return snapshot
+        }
+        try await Task.sleep(for: .milliseconds(2))
+    }
+    throw DurableQueueTestError.timeout
 }

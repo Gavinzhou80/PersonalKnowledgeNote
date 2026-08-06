@@ -30,6 +30,40 @@ func schedulerRunsOneHeavyTaskInDurableFIFOOrder() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func submitWhileRunnerIsBlockedDoesNotLoseSchedulerWake() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let claims = CountingClaimProbe(library: library)
+    let runner = DeterministicRunnerGate()
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer(),
+        importRunner: { try await runner.run($0) },
+        claimNextRunnable: { try await claims.claim() }
+    )
+
+    let first = try await importer.submit(
+        .webpage(URL(string: "https://fixture.invalid/lost-wake-first")!)
+    )
+    try await runner.waitUntilStarted(first.id)
+    #expect(await claims.callCount == 1)
+
+    let second = try await importer.submit(
+        .webpage(URL(string: "https://fixture.invalid/lost-wake-second")!)
+    )
+    #expect(await claims.callCount == 1)
+    #expect(await runner.maximumConcurrentRuns == 1)
+
+    await runner.release(first.id)
+    try await runner.waitUntilStarted(second.id)
+    #expect(await claims.callCount == 2)
+    #expect(await runner.startedIDs == [first.id, second.id])
+    #expect(await runner.maximumConcurrentRuns == 1)
+    await runner.release(second.id)
+}
+
+@Test(.timeLimit(.minutes(1)))
 func claimingHeadRevisesWaitingPositionsButTailSubmitDoesNot() async throws {
     let harness = try await DurableQueueHarness.make()
     defer { removeTemporaryDocumentImportRoot(harness.root) }
@@ -158,6 +192,40 @@ func unclassifiedClaimUnavailableHaltsInsteadOfSpinning() async throws {
     try await claims.waitUntilCalled()
     try await claims.verifyCallCountRemains(1, for: .milliseconds(300))
     #expect(await claims.callCount == 1)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func persistentContentionExhaustsAndLaterSubmitStartsFreshRetryGeneration() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let first = try await library.accept(
+        .webpage(URL(string: "https://fixture.invalid/contention-first")!)
+    )
+    let claims = PersistentContentionClaimProbe(library: library)
+    let runner = DeterministicRunnerGate()
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer(),
+        importRunner: { try await runner.run($0) },
+        claimNextRunnable: { try await claims.claim() }
+    )
+
+    try await importer.start()
+    try await claims.waitForCallCount(5)
+    try await claims.verifyCallCountRemains(5, for: .milliseconds(300))
+    #expect(await runner.startedIDs.isEmpty)
+
+    await claims.allowClaims()
+    let second = try await importer.submit(
+        .webpage(URL(string: "https://fixture.invalid/contention-second")!)
+    )
+    try await runner.waitUntilStarted(first.taskID)
+    #expect(await claims.callCount == 6)
+    #expect(await runner.maximumConcurrentRuns == 1)
+    await runner.release(first.taskID)
+    try await runner.waitUntilStarted(second.id)
+    await runner.release(second.id)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -347,6 +415,79 @@ func observationBeforeBootstrapWaitsForAuthoritativeHydration() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func observerSurvivesFailedBootstrapAndReceivesRetryHydration() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let accepted = try await library.accept(
+        .webpage(URL(string: "https://fixture.invalid/bootstrap-retry")!)
+    )
+    let bootstrap = BootstrapLoadProbe(library: library, failures: 1)
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer(),
+        retainedImportsLoader: { try await bootstrap.load() },
+        importRunner: { _ in },
+        claimNextRunnable: { throw LocalLibraryError.unavailable }
+    )
+    let emissions = TaskListEmissionProbe()
+    let stream = importer.observeTasks(.all)
+    let observation = Task {
+        for await snapshots in stream {
+            await emissions.record(snapshots)
+        }
+    }
+
+    do {
+        try await importer.start()
+        Issue.record("Expected first bootstrap generation to fail")
+    } catch let error as DocumentImportAvailabilityError {
+        #expect(error == .localLibraryUnavailable)
+    }
+    try await emissions.verifyEmissionCountRemains(0, for: .milliseconds(50))
+
+    try await importer.start()
+    try await emissions.waitForEmissionCount(1)
+    let first = try #require(await emissions.emissions.first)
+    #expect(first.map(\.id) == [accepted.taskID])
+    #expect(!first.isEmpty)
+    observation.cancel()
+}
+
+@Test(.timeLimit(.minutes(1)))
+func concurrentStartsShareOneSuspendedBootstrapGeneration() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://fixture.invalid/concurrent-start")!)
+    )
+    let loader = SuspendedBootstrapLoader(library: library)
+    let claims = CountingClaimProbe(library: library)
+    let runner = DeterministicRunnerGate()
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer(),
+        retainedImportsLoader: { try await loader.load() },
+        importRunner: { try await runner.run($0) },
+        claimNextRunnable: { try await claims.claim() }
+    )
+
+    try await loader.waitUntilCalled()
+    async let first: Void = importer.start()
+    async let second: Void = importer.start()
+    async let third: Void = importer.start()
+    await loader.release()
+    _ = try await (first, second, third)
+
+    try await runner.waitUntilStarted(workspace.taskID)
+    #expect(await loader.callCount == 1)
+    #expect(await claims.callCount == 1)
+    #expect(await runner.startedIDs == [workspace.taskID])
+    await runner.release(workspace.taskID)
+}
+
+@Test(.timeLimit(.minutes(1)))
 func recreatedCompletedHistoryPreservesOutcomeIssuesAndSourceSummary() async throws {
     let root = try makeTemporaryDocumentImportRoot()
     defer { removeTemporaryDocumentImportRoot(root) }
@@ -489,4 +630,529 @@ func snapshotRegistryRejectsConflictingSameRevisionAndIgnoresStaleUpdates() thro
     #expect(throws: TaskSnapshotRegistry.RegistryError.self) {
         try registry.apply(conflict, journalSequence: 9)
     }
+}
+
+@Test
+func staleBatchItemCannotInfluenceAcceptedQueuePositions() throws {
+    let first = ImportTaskID()
+    let second = ImportTaskID()
+    let third = ImportTaskID()
+    var registry = TaskSnapshotRegistry()
+    try registry.hydrate([
+        durableSnapshot(first, journal: 1, queue: 1, revision: 2),
+        durableSnapshot(second, journal: 2, queue: 2, revision: 1),
+        durableSnapshot(third, journal: 3, queue: 3, revision: 1),
+    ])
+
+    _ = try registry.apply([
+        durableSnapshot(first, journal: 1, queue: 100, revision: 1),
+        durableSnapshot(
+            second,
+            journal: 2,
+            queue: nil,
+            revision: 2,
+            state: .running
+        ),
+        durableSnapshot(third, journal: 3, queue: 3, revision: 2),
+    ])
+
+    #expect(registry.snapshot(for: first)?.state == .queued(position: 1))
+    #expect(registry.snapshot(for: second)?.state == .running(ImportProgress(
+        activity: .acquiringOriginalSource,
+        completedUnitCount: 0,
+        totalUnitCount: nil
+    )))
+    #expect(registry.snapshot(for: third)?.state == .queued(position: 2))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func conflictingLaterBatchItemRollsBackEarlierUpdateAndEmitsNothing() async throws {
+    let first = ImportTaskID()
+    let second = ImportTaskID()
+    var registry = TaskSnapshotRegistry()
+    try registry.hydrate([
+        durableSnapshot(first, journal: 1, queue: 1, revision: 1),
+        durableSnapshot(second, journal: 2, queue: 2, revision: 1),
+    ])
+    let before = registry.snapshots(matching: .all)
+    let taskProbe = TaskSnapshotEmissionProbe()
+    let listProbe = TaskListEmissionProbe()
+    let taskPair = AsyncStream<ImportTaskSnapshot>.makeStream()
+    let listPair = AsyncStream<[ImportTaskSnapshot]>.makeStream()
+    registry.registerTaskObserver(
+        id: UUID(),
+        taskID: first,
+        continuation: taskPair.continuation
+    )
+    registry.registerListObserver(
+        id: UUID(),
+        query: .all,
+        continuation: listPair.continuation
+    )
+    let taskObservation = Task {
+        for await snapshot in taskPair.stream { await taskProbe.record(snapshot) }
+    }
+    let listObservation = Task {
+        for await snapshots in listPair.stream { await listProbe.record(snapshots) }
+    }
+    try await taskProbe.waitForEmissionCount(1)
+    try await listProbe.waitForEmissionCount(1)
+
+    #expect(throws: TaskSnapshotRegistry.RegistryError.self) {
+        try registry.apply([
+            durableSnapshot(
+                first,
+                journal: 1,
+                queue: nil,
+                revision: 2,
+                state: .running
+            ),
+            durableSnapshot(
+                second,
+                journal: 2,
+                queue: nil,
+                revision: 1,
+                state: .running
+            ),
+        ])
+    }
+
+    #expect(registry.snapshots(matching: .all) == before)
+    try await taskProbe.verifyEmissionCountRemains(1, for: .milliseconds(50))
+    try await listProbe.verifyEmissionCountRemains(1, for: .milliseconds(50))
+    taskObservation.cancel()
+    listObservation.cancel()
+}
+
+@Test
+func unorderedNewSnapshotsDerivePositionsAfterStaleFiltering() throws {
+    let first = ImportTaskID()
+    let second = ImportTaskID()
+    let third = ImportTaskID()
+    let fourth = ImportTaskID()
+    var registry = TaskSnapshotRegistry()
+    try registry.hydrate([
+        durableSnapshot(first, journal: 1, queue: 1, revision: 2),
+    ])
+
+    _ = try registry.apply([
+        durableSnapshot(fourth, journal: 4, queue: 4, revision: 0),
+        durableSnapshot(first, journal: 1, queue: 5, revision: 1),
+        durableSnapshot(third, journal: 3, queue: 3, revision: 0),
+        durableSnapshot(second, journal: 2, queue: 2, revision: 0),
+    ])
+
+    #expect(registry.snapshots(matching: .all).map { snapshot in
+        switch snapshot.state {
+        case .queued(let position): return (snapshot.id, position)
+        default: return (snapshot.id, 0)
+        }
+    }.map { "\($0.0.rawValue.uuidString):\($0.1)" } == [
+        "\(first.rawValue.uuidString):1",
+        "\(second.rawValue.uuidString):2",
+        "\(third.rawValue.uuidString):3",
+        "\(fourth.rawValue.uuidString):4",
+    ])
+}
+
+@Test
+func taskQueriesUseExactStateBucketsAndStableOrdering() throws {
+    let cancelling = ImportTaskID()
+    let running = ImportTaskID()
+    let firstQueued = ImportTaskID()
+    let secondQueued = ImportTaskID()
+    let failed = ImportTaskID()
+    let cancelled = ImportTaskID()
+    let completed = ImportTaskID()
+    var registry = TaskSnapshotRegistry()
+    try registry.hydrate([
+        durableSnapshot(
+            completed,
+            journal: 7,
+            queue: nil,
+            revision: 1,
+            state: .completed,
+            outcome: .published(documentID: SourceDocumentID()),
+            publicationIssues: []
+        ),
+        durableSnapshot(
+            secondQueued,
+            journal: 6,
+            queue: 20,
+            revision: 1
+        ),
+        durableSnapshot(
+            cancelling,
+            journal: 2,
+            queue: nil,
+            revision: 1,
+            state: .cancelling
+        ),
+        durableSnapshot(
+            cancelled,
+            journal: 4,
+            queue: nil,
+            revision: 1,
+            state: .cancelled
+        ),
+        durableSnapshot(
+            firstQueued,
+            journal: 1,
+            queue: 10,
+            revision: 1
+        ),
+        durableSnapshot(
+            running,
+            journal: 5,
+            queue: nil,
+            revision: 1,
+            state: .running
+        ),
+        durableSnapshot(
+            failed,
+            journal: 3,
+            queue: nil,
+            revision: 1,
+            state: .failed
+        ),
+    ])
+
+    let active = [cancelling, running, firstQueued, secondQueued]
+    #expect(registry.snapshots(matching: .active).map(\.id) == active)
+    #expect(registry.snapshots(matching: .unfinished).map(\.id) ==
+        active + [failed, cancelled]
+    )
+    #expect(registry.snapshots(matching: .all).map(\.id) ==
+        active + [failed, cancelled, completed]
+    )
+}
+
+@Test(.timeLimit(.minutes(1)))
+func authoritativeReconciliationRepairsSameRevisionProjectionAtomically() async throws {
+    let first = ImportTaskID()
+    let second = ImportTaskID()
+    var registry = TaskSnapshotRegistry()
+    try registry.hydrate([
+        durableSnapshot(first, journal: 1, queue: 1, revision: 1),
+        durableSnapshot(second, journal: 2, queue: 2, revision: 1),
+    ])
+    let taskProbe = TaskSnapshotEmissionProbe()
+    let listProbe = TaskListEmissionProbe()
+    let taskPair = AsyncStream<ImportTaskSnapshot>.makeStream()
+    let listPair = AsyncStream<[ImportTaskSnapshot]>.makeStream()
+    registry.registerTaskObserver(
+        id: UUID(),
+        taskID: first,
+        continuation: taskPair.continuation
+    )
+    registry.registerListObserver(
+        id: UUID(),
+        query: .all,
+        continuation: listPair.continuation
+    )
+    let taskObservation = Task {
+        for await snapshot in taskPair.stream { await taskProbe.record(snapshot) }
+    }
+    let listObservation = Task {
+        for await snapshots in listPair.stream { await listProbe.record(snapshots) }
+    }
+    try await taskProbe.waitForEmissionCount(1)
+    try await listProbe.waitForEmissionCount(1)
+
+    let result = try registry.reconcileAuthoritative([
+        durableSnapshot(
+            first,
+            journal: 1,
+            queue: nil,
+            revision: 1,
+            state: .running
+        ),
+        durableSnapshot(second, journal: 2, queue: 2, revision: 1),
+    ])
+
+    #expect(result.changedTaskIDs == [first, second])
+    try await taskProbe.waitForEmissionCount(2)
+    try await listProbe.waitForEmissionCount(2)
+    #expect(await taskProbe.emissions.last?.state == .running(ImportProgress(
+        activity: .acquiringOriginalSource,
+        completedUnitCount: 0,
+        totalUnitCount: nil
+    )))
+    let corrected = try #require(await listProbe.emissions.last)
+    #expect(corrected.map(\.id) == [first, second])
+    #expect(corrected.map(\.state) == [
+        .running(ImportProgress(
+            activity: .acquiringOriginalSource,
+            completedUnitCount: 0,
+            totalUnitCount: nil
+        )),
+        .queued(position: 1),
+    ])
+    try await taskProbe.verifyEmissionCountRemains(2, for: .milliseconds(50))
+    try await listProbe.verifyEmissionCountRemains(2, for: .milliseconds(50))
+    taskObservation.cancel()
+    listObservation.cancel()
+}
+
+@Test
+func authoritativeReconciliationPreservesStrictlyNewerProjection() throws {
+    let taskID = ImportTaskID()
+    var registry = TaskSnapshotRegistry()
+    try registry.hydrate([
+        durableSnapshot(
+            taskID,
+            journal: 1,
+            queue: nil,
+            revision: 3,
+            state: .running,
+            attempt: 2
+        ),
+    ])
+
+    let result = try registry.reconcileAuthoritative([
+        durableSnapshot(
+            taskID,
+            journal: 1,
+            queue: 1,
+            revision: 99,
+            attempt: 1
+        ),
+    ])
+
+    #expect(result.changedTaskIDs.isEmpty)
+    #expect(registry.snapshot(for: taskID)?.attempt == 2)
+    #expect(registry.snapshot(for: taskID)?.revision == 3)
+    #expect(registry.snapshot(for: taskID)?.state == .running(ImportProgress(
+        activity: .acquiringOriginalSource,
+        completedUnitCount: 0,
+        totalUnitCount: nil
+    )))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func staleClaimProjectionNeverLaunchesRunner() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://fixture.invalid/stale-claim")!)
+    )
+    let accepted = try await workspace.snapshot()
+    let staleClaim = DurableQueueClaim(
+        claimed: durableSnapshot(
+            workspace.taskID,
+            journal: accepted.journalSequence,
+            queue: nil,
+            revision: accepted.revision,
+            state: .running
+        ),
+        queueUpdates: [],
+        previousQueueSequence: try #require(accepted.queueSequence)
+    )
+    let claims = OneShotClaimProbe(staleClaim)
+    let runner = DeterministicRunnerGate()
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer(),
+        importRunner: { try await runner.run($0) },
+        claimNextRunnable: { await claims.claim() }
+    )
+
+    try await importer.start()
+    try await claims.waitUntilCalled()
+    try await Task.sleep(for: .milliseconds(25))
+    #expect(await runner.startedIDs.isEmpty)
+    #expect(try await workspace.snapshot().state == .queued)
+}
+
+enum WorkspaceLookupFailureCase: CaseIterable, Sendable {
+    case nilResult
+    case thrownError
+}
+
+@Test(.timeLimit(.minutes(1)), arguments: WorkspaceLookupFailureCase.allCases)
+func workspaceLookupFailureRollsBackClaimBeforeRunnerLaunch(
+    failureCase: WorkspaceLookupFailureCase
+) async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let first = try await library.accept(
+        .webpage(URL(string: "https://fixture.invalid/workspace-1")!)
+    )
+    let second = try await library.accept(
+        .webpage(URL(string: "https://fixture.invalid/workspace-2")!)
+    )
+    let runner = DeterministicRunnerGate()
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer(),
+        importRunner: { try await runner.run($0) },
+        importWorkspaceLoader: { _ in
+            switch failureCase {
+            case .nilResult:
+                return nil
+            case .thrownError:
+                throw DurableQueueTestError.injectedBootstrapFailure
+            }
+        }
+    )
+
+    try await importer.start()
+    let rolledBack = try await waitUntilDurableState(
+        .queued,
+        taskID: first.taskID,
+        library: library,
+        minimumRevision: 2
+    )
+    #expect(rolledBack.queueSequence == 1)
+    #expect(rolledBack.revision == 2)
+    #expect(await runner.startedIDs.isEmpty)
+    let retained = try await library.retainedImports()
+    #expect(retained.map(\.taskID) == [first.taskID, second.taskID])
+    #expect(retained.map(\.revision) == [2, 2])
+}
+
+@Test(.timeLimit(.minutes(1)))
+func concurrentSubmitReturnInversionStillPublishesCompleteDurableFIFO() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let acceptances = ControlledAcceptanceProbe(library: library)
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer(),
+        importRunner: { _ in },
+        claimNextRunnable: { throw LocalLibraryError.unavailable },
+        acceptanceLoader: { try await acceptances.accept($0) }
+    )
+    var lists = importer.observeTasks(.all).makeAsyncIterator()
+    #expect(try #require(await lists.next()).isEmpty)
+
+    async let firstHandle = importer.submit(
+        .webpage(URL(string: "https://fixture.invalid/inverted-first")!)
+    )
+    try await acceptances.waitUntilFirstCommitted()
+    let secondHandle = try await importer.submit(
+        .webpage(URL(string: "https://fixture.invalid/inverted-second")!)
+    )
+    let committed = await acceptances.committedTaskIDs
+    #expect(committed.count == 2)
+    let authoritative = try #require(await lists.next())
+    #expect(authoritative.map(\.id) == committed)
+    #expect(authoritative.map(\.state) == [
+        .queued(position: 1),
+        .queued(position: 2),
+    ])
+    #expect(secondHandle.id == committed[1])
+    #expect(try await latestSnapshot(secondHandle).state == .queued(position: 2))
+
+    await acceptances.releaseFirst()
+    let first = try await firstHandle
+    #expect(first.id == committed[0])
+    #expect(try await latestSnapshot(first).state == .queued(position: 1))
+    #expect(try await library.retainedImports().map(\.taskID) == committed)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func postAcceptConflictUsesTransactionalBatchWithoutReload() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://fixture.invalid/transactional-batch")!)
+    )
+    let accepted = try #require(try await library.retainedImports().first)
+    let conflicting = durableSnapshot(
+        workspace.taskID,
+        journal: accepted.journalSequence,
+        queue: nil,
+        revision: accepted.revision,
+        state: .running
+    )
+    let retained = SelectiveRetainedImportsLoader(
+        library: library,
+        failingCalls: [2],
+        successfulSnapshots: [conflicting]
+    )
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: ThrowingWebAcquirer(),
+        retainedImportsLoader: { try await retained.load() },
+        importRunner: { _ in },
+        claimNextRunnable: { throw LocalLibraryError.unavailable },
+        acceptanceLoader: { _ in
+            return DurableImportAcceptance(
+                workspace: workspace,
+                snapshots: [accepted]
+            )
+        }
+    )
+    try await importer.start()
+    let taskProbe = TaskSnapshotEmissionProbe()
+    let listProbe = TaskListEmissionProbe()
+    let taskObservation = Task {
+        for await snapshot in importer.updates(for: workspace.taskID) {
+            await taskProbe.record(snapshot)
+        }
+    }
+    let listObservation = Task {
+        for await snapshots in importer.observeTasks(.all) {
+            await listProbe.record(snapshots)
+        }
+    }
+    try await taskProbe.waitForEmissionCount(1)
+    try await listProbe.waitForEmissionCount(1)
+    #expect(await taskProbe.emissions.first?.state == .running(ImportProgress(
+        activity: .acquiringOriginalSource,
+        completedUnitCount: 0,
+        totalUnitCount: nil
+    )))
+
+    let handle = try await importer.submit(
+        .webpage(URL(string: "https://fixture.invalid/transactional-batch")!)
+    )
+    #expect(handle.id == workspace.taskID)
+    #expect(try await latestSnapshot(handle).state == .queued(position: 1))
+    try await taskProbe.waitForEmissionCount(2)
+    try await listProbe.waitForEmissionCount(2)
+    #expect(await taskProbe.emissions.last?.state == .queued(position: 1))
+    #expect(await listProbe.emissions.last?.map(\.state) == [
+        .queued(position: 1),
+    ])
+    try await taskProbe.verifyEmissionCountRemains(2, for: .milliseconds(50))
+    try await listProbe.verifyEmissionCountRemains(2, for: .milliseconds(50))
+    #expect(await retained.callCount == 1)
+    #expect(try await library.retainedImports().count == 1)
+    taskObservation.cancel()
+    listObservation.cancel()
+}
+
+private func durableSnapshot(
+    _ taskID: ImportTaskID,
+    journal: UInt64,
+    queue: UInt64?,
+    revision: UInt64,
+    state: KnowledgeCore.ImportTaskState = .queued,
+    attempt: UInt = 1,
+    outcome: PublicationOutcome? = nil,
+    publicationIssues: [KnowledgeCore.ImportIssue]? = nil
+) -> DurableImportSnapshot {
+    DurableImportSnapshot(
+        taskID: taskID,
+        journalSequence: journal,
+        originalSource: .webpage(
+            URL(string: "https://fixture.invalid/\(journal)")!
+        ),
+        queueSequence: queue,
+        attempt: attempt,
+        revision: revision,
+        state: state,
+        failure: nil,
+        checkpoint: nil,
+        checkpointArtifact: nil,
+        stagedArtifact: nil,
+        outcome: outcome,
+        publicationIssues: publicationIssues
+    )
 }

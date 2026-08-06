@@ -213,18 +213,34 @@ package struct DurableQueueMutation: Sendable {
 package struct DurableQueueClaim: Sendable {
     package let claimed: DurableImportSnapshot
     package let queueUpdates: [DurableImportSnapshot]
+    package let previousQueueSequence: UInt64
 
     package init(
         claimed: DurableImportSnapshot,
-        queueUpdates: [DurableImportSnapshot]
+        queueUpdates: [DurableImportSnapshot],
+        previousQueueSequence: UInt64
     ) {
         self.claimed = claimed
         self.queueUpdates = queueUpdates
+        self.previousQueueSequence = previousQueueSequence
     }
 }
 
 package enum DurableQueueClaimError: Error, Equatable, Sendable {
     case transientDatabaseContention
+}
+
+package struct DurableImportAcceptance: Sendable {
+    package let workspace: ImportWorkspace
+    package let snapshots: [DurableImportSnapshot]
+
+    package init(
+        workspace: ImportWorkspace,
+        snapshots: [DurableImportSnapshot]
+    ) {
+        self.workspace = workspace
+        self.snapshots = snapshots
+    }
 }
 
 public struct CheckpointUpdate: Sendable {

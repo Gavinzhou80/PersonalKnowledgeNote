@@ -200,8 +200,21 @@ final class LibraryDatabase: Sendable {
         source: OriginalSource,
         placement: StagedArtifactPlacement? = nil
     ) throws {
+        _ = try insertAcceptedTaskReturningRetained(
+            id: id,
+            source: source,
+            placement: placement
+        )
+    }
+
+    func insertAcceptedTaskReturningRetained(
+        id: ImportTaskID,
+        source: OriginalSource,
+        placement: StagedArtifactPlacement? = nil,
+        afterInsert: () throws -> Void = {}
+    ) throws -> [DurableImportSnapshot] {
         let sourceColumns = try SourceColumns.encode(source)
-        try queue.write { db in
+        return try queue.write { db in
             let sequence = try allocateQueueSequence(in: db)
             try ImportTaskRecord(
                 taskID: id.rawValue.uuidString,
@@ -227,6 +240,8 @@ final class LibraryDatabase: Sendable {
                     placement: placement
                 ).insert(db)
             }
+            try afterInsert()
+            return try retainedImports(in: db)
         }
     }
 
@@ -657,7 +672,10 @@ final class LibraryDatabase: Sendable {
                 }
                 .sorted(by: queueRecordOrdering)
             guard var claimed = queued.first,
-                  let claimedSequence = claimed.queueSequence
+                  let claimedSequence = claimed.queueSequence,
+                  let previousQueueSequence = UInt64(
+                    exactly: claimedSequence
+                  )
             else {
                 return nil
             }
@@ -694,6 +712,84 @@ final class LibraryDatabase: Sendable {
             }
             return DurableQueueClaim(
                 claimed: claimedSnapshot,
+                queueUpdates: bundles.dropFirst().map(\.snapshot),
+                previousQueueSequence: previousQueueSequence
+            )
+        }
+    }
+
+    func rollbackClaim(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        previousQueueSequence: UInt64
+    ) throws -> DurableQueueMutation {
+        try queue.write { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            try validateJournalSequences(tasks)
+            try validatePublicationAssociationRoots(in: db)
+            var associations = try PublicationAssociationBatch(
+                taskIDs: tasks.map(\.taskID),
+                in: db
+            )
+            _ = try publicationStateBundles(
+                for: tasks,
+                in: db,
+                associations: &associations
+            )
+            guard var claimed = tasks.first(where: {
+                $0.taskID == taskID.rawValue.uuidString
+            }), let currentRevision = UInt64(exactly: claimed.revision),
+                  let restoredSequence = Int64(
+                    exactly: previousQueueSequence
+                  ), restoredSequence > 0
+            else {
+                throw LocalLibraryError.unavailable
+            }
+            guard currentRevision == expectedRevision else {
+                throw LocalLibraryError.staleRevision(
+                    current: currentRevision
+                )
+            }
+            guard claimed.state == ImportTaskState.running.rawValue,
+                  claimed.queueSequence == nil,
+                  !tasks.contains(where: {
+                    $0.taskID != claimed.taskID
+                        && $0.queueSequence == restoredSequence
+                  }),
+                  claimed.revision < Int64.max
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+
+            var shifted = tasks
+                .filter {
+                    $0.state == ImportTaskState.queued.rawValue
+                        && ($0.queueSequence ?? Int64.min)
+                            > restoredSequence
+                }
+                .sorted(by: queueRecordOrdering)
+            for index in shifted.indices {
+                guard shifted[index].revision < Int64.max else {
+                    throw corruptLibraryError()
+                }
+                shifted[index].revision += 1
+                try shifted[index].update(db)
+            }
+            claimed.state = ImportTaskState.queued.rawValue
+            claimed.queueSequence = restoredSequence
+            claimed.revision += 1
+            try claimed.update(db)
+
+            let bundles = try publicationStateBundles(
+                for: [claimed] + shifted,
+                in: db,
+                associations: &associations
+            )
+            guard let primary = bundles.first?.snapshot else {
+                throw corruptLibraryError()
+            }
+            return DurableQueueMutation(
+                primary: primary,
                 queueUpdates: bundles.dropFirst().map(\.snapshot)
             )
         }

@@ -135,6 +135,87 @@ func claimRevisesClaimedAndShiftedQueuedTasksOnce() async throws {
 }
 
 @Test
+func rollbackClaimRestoresExactFIFOAndRevisesEveryVisiblePosition() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let library = try await LocalLibrary.open(at: root)
+    let first = try await library.accept(
+        .webpage(URL(string: "https://example.test/rollback-1")!)
+    )
+    let second = try await library.accept(
+        .webpage(URL(string: "https://example.test/rollback-2")!)
+    )
+    let third = try await library.accept(
+        .webpage(URL(string: "https://example.test/rollback-3")!)
+    )
+    let claim = try #require(try await library.claimNextRunnable())
+
+    let rollback = try await library.rollbackClaim(
+        taskID: claim.claimed.taskID,
+        expectedRevision: claim.claimed.revision,
+        previousQueueSequence: claim.previousQueueSequence
+    )
+
+    #expect(rollback.primary.taskID == first.taskID)
+    #expect(rollback.primary.state == .queued)
+    #expect(rollback.primary.queueSequence == 1)
+    #expect(rollback.primary.revision == 2)
+    #expect(rollback.queueUpdates.map(\.taskID) == [second.taskID, third.taskID])
+    #expect(rollback.queueUpdates.map(\.revision) == [2, 2])
+    #expect(try await library.retainedImports().map(\.taskID) == [
+        first.taskID,
+        second.taskID,
+        third.taskID,
+    ])
+}
+
+@Test
+func rollbackClaimRejectsStaleRevisionWithoutChangingRunningClaim() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let library = try await LocalLibrary.open(at: root)
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/stale-rollback")!)
+    )
+    let claim = try #require(try await library.claimNextRunnable())
+
+    do {
+        _ = try await library.rollbackClaim(
+            taskID: workspace.taskID,
+            expectedRevision: claim.claimed.revision + 1,
+            previousQueueSequence: claim.previousQueueSequence
+        )
+        Issue.record("Expected stale rollback rejection")
+    } catch let error as LocalLibraryError {
+        #expect(error == .staleRevision(current: claim.claimed.revision))
+    }
+    #expect(try await workspace.snapshot().state == .running)
+}
+
+@Test
+func acceptedAuthoritativeBatchFailureRollsBackInsertedTask() throws {
+    enum Injected: Error { case failure }
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let database = try LibraryDatabase(
+        url: root.appending(path: "library.sqlite")
+    )
+
+    do {
+        _ = try database.insertAcceptedTaskReturningRetained(
+            id: ImportTaskID(),
+            source: .webpage(
+                URL(string: "https://example.test/acceptance-rollback")!
+            ),
+            afterInsert: { throw Injected.failure }
+        )
+        Issue.record("Expected acceptance projection failure")
+    } catch is Injected {
+        #expect(try LocalLibraryTestDriver.taskCount(at: root) == 0)
+    }
+}
+
+@Test
 func tailAcceptanceDoesNotReviseExistingQueuedTasks() async throws {
     let root = try makeTemporaryLibraryRoot()
     defer { removeTemporaryLibraryRoot(root) }

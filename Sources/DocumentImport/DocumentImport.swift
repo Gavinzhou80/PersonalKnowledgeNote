@@ -29,6 +29,10 @@ public actor DocumentImport {
     )?
     private let claimNextRunnable: @Sendable () async throws
         -> DurableQueueClaim?
+    private let importWorkspaceLoader: @Sendable (ImportTaskID) async throws
+        -> ImportWorkspace?
+    private let acceptanceLoader: @Sendable (OriginalSource) async throws
+        -> DurableImportAcceptance
     private var bootstrapState: BootstrapState
     private var registry = TaskSnapshotRegistry()
     private var scheduler = ImportScheduler()
@@ -57,7 +61,11 @@ public actor DocumentImport {
             -> [DurableImportSnapshot])? = nil,
         importRunner: (@Sendable (ImportWorkspace) async throws -> Void)? = nil,
         claimNextRunnable: (@Sendable () async throws
-            -> DurableQueueClaim?)? = nil
+            -> DurableQueueClaim?)? = nil,
+        importWorkspaceLoader: (@Sendable (ImportTaskID) async throws
+            -> ImportWorkspace?)? = nil,
+        acceptanceLoader: (@Sendable (OriginalSource) async throws
+            -> DurableImportAcceptance)? = nil
     ) {
         let resolvedRetainedImportsLoader = retainedImportsLoader ?? {
             try await library.retainedImports()
@@ -71,6 +79,12 @@ public actor DocumentImport {
         self.importRunner = importRunner
         self.claimNextRunnable = claimNextRunnable ?? {
             try await library.claimNextRunnable()
+        }
+        self.importWorkspaceLoader = importWorkspaceLoader ?? { taskID in
+            try await library.importWorkspace(id: taskID)
+        }
+        self.acceptanceLoader = acceptanceLoader ?? { source in
+            try await library.acceptWithAuthoritativeSnapshots(source)
         }
         let generation = UUID()
         bootstrapState = .running(
@@ -216,26 +230,30 @@ public actor DocumentImport {
             throw ImportSubmissionError.unsupportedOriginalSource
         }
 
-        let workspace: ImportWorkspace
+        let acceptance: DurableImportAcceptance
         do {
-            workspace = try await library.accept(source)
+            acceptance = try await acceptanceLoader(source)
         } catch {
             throw Self.submissionError(for: error)
         }
-
-        let durable: DurableImportSnapshot?
+        let taskID = acceptance.workspace.taskID
         do {
-            durable = try await workspaceSnapshotLoader(workspace)
+            _ = try registry.applyBatch(acceptance.snapshots)
         } catch {
-            durable = nil
+            do {
+                _ = try registry.reconcileAuthoritative(
+                    acceptance.snapshots
+                )
+            } catch {
+                preconditionFailure(
+                    "A transactional acceptance batch must reconcile"
+                )
+            }
         }
-
-        let taskID = workspace.taskID
-        if let durable {
-            _ = try? registry.apply([durable])
-        } else if let retained = try? await library.retainedImports() {
-            _ = try? registry.apply(retained)
-        }
+        precondition(
+            registry.snapshot(for: taskID) != nil,
+            "A durably accepted task must exist before handle return"
+        )
         requestSchedulerWake()
 
         return ImportTaskHandle(id: taskID, owner: self)
@@ -249,13 +267,17 @@ public actor DocumentImport {
 
     private func runSchedulerLoop() async {
         var availabilityRetryDelayMilliseconds: Int64 = 10
+        var contentionAttemptCount = 0
         while !Task.isCancelled {
             guard registry.hasQueuedWork else { break }
             let claim: DurableQueueClaim?
             do {
                 claim = try await claimNextRunnable()
                 availabilityRetryDelayMilliseconds = 10
+                contentionAttemptCount = 0
             } catch DurableQueueClaimError.transientDatabaseContention {
+                contentionAttemptCount += 1
+                guard contentionAttemptCount < 5 else { break }
                 do {
                     try await Task.sleep(
                         for: .milliseconds(
@@ -274,11 +296,34 @@ public actor DocumentImport {
                 break
             }
             guard let claim else { break }
-            _ = try? registry.apply(claim.queueUpdates + [claim.claimed])
-            guard let workspace = try? await library.importWorkspace(
-                id: claim.claimed.taskID
-            ) else {
-                continue
+            let projection: TaskSnapshotRegistry.BatchApplyResult
+            do {
+                projection = try registry.applyBatch(
+                    claim.queueUpdates + [claim.claimed]
+                )
+                guard projection.changedTaskIDs.contains(
+                    claim.claimed.taskID
+                ) else {
+                    _ = await rollbackClaim(claim)
+                    break
+                }
+            } catch {
+                _ = await rollbackClaim(claim)
+                break
+            }
+
+            let workspace: ImportWorkspace
+            do {
+                guard let loaded = try await importWorkspaceLoader(
+                    claim.claimed.taskID
+                ) else {
+                    _ = await rollbackClaim(claim)
+                    break
+                }
+                workspace = loaded
+            } catch {
+                _ = await rollbackClaim(claim)
+                break
             }
 
             if let importRunner {
@@ -304,6 +349,24 @@ public actor DocumentImport {
             }
         }
         schedulerLoopDidStop()
+    }
+
+    private func rollbackClaim(_ claim: DurableQueueClaim) async -> Bool {
+        do {
+            let rollback = try await library.rollbackClaim(
+                taskID: claim.claimed.taskID,
+                expectedRevision: claim.claimed.revision,
+                previousQueueSequence: claim.previousQueueSequence
+            )
+            let projection = try registry.applyBatch(
+                rollback.queueUpdates + [rollback.primary]
+            )
+            return projection.changedTaskIDs.contains(
+                rollback.primary.taskID
+            )
+        } catch {
+            return false
+        }
     }
 
     private func schedulerLoopDidStop() {
