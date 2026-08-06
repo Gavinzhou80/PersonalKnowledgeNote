@@ -2,6 +2,7 @@ import Foundation
 import KnowledgeCore
 import Testing
 import DocumentImport
+import typealias DocumentImport.ImportIssue
 
 private func requireHashableSendable<T: Hashable & Sendable>(_: T.Type) {}
 
@@ -61,4 +62,20 @@ func terminalSuccessPreservesPublicationOutcome() {
     default:
         Issue.record("Expected published success terminal state")
     }
+}
+
+@Test
+func deprecatedImportIssueNamesRemainSourceCompatible() {
+    let oldIssue: ImportIssue = ImportIssue(
+        code: .optionalResourceUnavailable
+    )
+    let newIssue = KnowledgeCore.ImportIssue(
+        code: .optionalWebImageUnavailable
+    )
+
+    #expect(oldIssue == newIssue)
+    #expect(
+        KnowledgeCore.ImportIssue.Code.optionalResourceUnavailable
+            == .optionalWebImageUnavailable
+    )
 }

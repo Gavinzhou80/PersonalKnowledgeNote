@@ -185,6 +185,19 @@ public struct SourceBlock: Hashable, Codable, Sendable {
             guard !overflow, rangeEnd <= textLength else {
                 throw ValidationError.invalidMarkupRange
             }
+            let utf16 = canonicalText.utf16
+            let startUTF16Index = utf16.index(
+                utf16.startIndex,
+                offsetBy: markup.range.utf16Offset
+            )
+            let endUTF16Index = utf16.index(
+                utf16.startIndex,
+                offsetBy: rangeEnd
+            )
+            guard String.Index(startUTF16Index, within: canonicalText) != nil,
+                  String.Index(endUTF16Index, within: canonicalText) != nil else {
+                throw ValidationError.invalidMarkupRange
+            }
             switch markup.kind {
             case .link(let url):
                 guard isSafeInlineURL(url) else {
@@ -389,6 +402,7 @@ public struct SourceDocumentContent:
         case structureCoverageMismatch
         case evidenceCoverageMismatch
         case relationEndpointMissing
+        case invalidRelationSemantics
         case duplicateRelations
         case issueBlockMissing
     }
@@ -435,6 +449,25 @@ public struct SourceDocumentContent:
                 && blockIDSet.contains(relation.targetBlockID)
         }) else {
             throw ValidationError.relationEndpointMissing
+        }
+        let blocksByID = Dictionary(uniqueKeysWithValues: blocks.map { ($0.id, $0) })
+        guard structure.relations.allSatisfy({ relation in
+            guard relation.sourceBlockID != relation.targetBlockID,
+                  let source = blocksByID[relation.sourceBlockID],
+                  let target = blocksByID[relation.targetBlockID]
+            else {
+                return false
+            }
+
+            switch relation.kind {
+            case .captionForMedia:
+                return source.category == .text
+                    && source.role == .caption
+                    && target.category == .media
+                    && target.role == .image
+            }
+        }) else {
+            throw ValidationError.invalidRelationSemantics
         }
         guard issues.allSatisfy({ issue in
             issue.relatedBlockID.map(blockIDSet.contains) ?? true

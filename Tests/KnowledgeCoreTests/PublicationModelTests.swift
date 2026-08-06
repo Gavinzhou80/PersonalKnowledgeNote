@@ -184,6 +184,109 @@ func webSourceDocumentSemanticsRoundTrip() throws {
 }
 
 @Test
+func sourceBlockRoleUsesStableTaggedJSON() throws {
+    let fixtures: [(SourceBlockRole, [String: Any])] = [
+        (.heading(level: 2), ["type": "heading", "level": 2]),
+        (.paragraph, ["type": "paragraph"]),
+        (.listItem, ["type": "listItem"]),
+        (.quotation, ["type": "quotation"]),
+        (.codeBlock(language: "swift"), [
+            "type": "codeBlock",
+            "language": "swift",
+        ]),
+        (.codeBlock(language: nil), ["type": "codeBlock"]),
+        (.image, ["type": "image"]),
+        (.caption, ["type": "caption"]),
+    ]
+
+    for (role, expectedJSON) in fixtures {
+        let data = try JSONEncoder().encode(role)
+        let actualJSON = try #require(
+            JSONSerialization.jsonObject(with: data) as? NSDictionary
+        )
+        #expect(actualJSON == expectedJSON as NSDictionary)
+        #expect(try JSONDecoder().decode(SourceBlockRole.self, from: data) == role)
+    }
+
+    #expect(throws: DecodingError.self) {
+        try JSONDecoder().decode(
+            SourceBlockRole.self,
+            from: Data(#"{"type":"futureRole"}"#.utf8)
+        )
+    }
+}
+
+@Test
+func inlineMarkupKindUsesStableTaggedJSON() throws {
+    let linkURL = URL(string: "https://example.com/article")!
+    let citationURL = URL(string: "https://example.com/source")!
+    let fixtures: [(InlineMarkupKind, [String: Any])] = [
+        (.emphasis, ["type": "emphasis"]),
+        (.strong, ["type": "strong"]),
+        (.link(linkURL), [
+            "type": "link",
+            "url": "https://example.com/article",
+        ]),
+        (.citation(citationURL), [
+            "type": "citation",
+            "url": "https://example.com/source",
+        ]),
+        (.citation(nil), ["type": "citation"]),
+        (.inlineCode, ["type": "inlineCode"]),
+    ]
+
+    for (kind, expectedJSON) in fixtures {
+        let data = try JSONEncoder().encode(kind)
+        let actualJSON = try #require(
+            JSONSerialization.jsonObject(with: data) as? NSDictionary
+        )
+        #expect(actualJSON == expectedJSON as NSDictionary)
+        #expect(try JSONDecoder().decode(InlineMarkupKind.self, from: data) == kind)
+    }
+
+    #expect(throws: DecodingError.self) {
+        try JSONDecoder().decode(
+            InlineMarkupKind.self,
+            from: Data(#"{"type":"futureMarkup"}"#.utf8)
+        )
+    }
+}
+
+@Test
+func persistedSemanticEnumsDecodeLegacySynthesizedJSON() throws {
+    let roleFixtures: [(String, SourceBlockRole)] = [
+        (#"{"heading":{"level":2}}"#, .heading(level: 2)),
+        (#"{"paragraph":{}}"#, .paragraph),
+        (#"{"codeBlock":{"language":"swift"}}"#, .codeBlock(language: "swift")),
+    ]
+    for (json, expected) in roleFixtures {
+        #expect(try JSONDecoder().decode(
+            SourceBlockRole.self,
+            from: Data(json.utf8)
+        ) == expected)
+    }
+
+    let markupFixtures: [(String, InlineMarkupKind)] = [
+        (#"{"emphasis":{}}"#, .emphasis),
+        (
+            #"{"link":{"_0":"https://example.com/article"}}"#,
+            .link(URL(string: "https://example.com/article")!)
+        ),
+        (
+            #"{"citation":{"_0":"https://example.com/source"}}"#,
+            .citation(URL(string: "https://example.com/source")!)
+        ),
+        (#"{"citation":{}}"#, .citation(nil)),
+    ]
+    for (json, expected) in markupFixtures {
+        #expect(try JSONDecoder().decode(
+            InlineMarkupKind.self,
+            from: Data(json.utf8)
+        ) == expected)
+    }
+}
+
+@Test
 func utf16MarkupRangeEndingAtTextBoundaryIsValid() throws {
     let block = SourceBlock(
         id: SourceBlockID(),
@@ -202,6 +305,45 @@ func utf16MarkupRangeEndingAtTextBoundaryIsValid() throws {
     )
 
     #expect(decoded == block)
+}
+
+@Test
+func utf16MarkupRangesMustAlignWithStringIndices() throws {
+    let invalidRanges = [
+        SourceTextRange(utf16Offset: 2, utf16Length: 1),
+        SourceTextRange(utf16Offset: 1, utf16Length: 1),
+    ]
+
+    for range in invalidRanges {
+        let data = try JSONEncoder().encode(
+            UncheckedSemanticSourceBlock(
+                id: SourceBlockID(),
+                canonicalText: "A😀B",
+                category: .text,
+                role: .paragraph,
+                inlineMarkup: [InlineMarkup(range: range, kind: .emphasis)],
+                media: nil
+            )
+        )
+
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(SourceBlock.self, from: data)
+        }
+    }
+
+    let valid = SourceBlock(
+        id: SourceBlockID(),
+        canonicalText: "A😀B",
+        inlineMarkup: [InlineMarkup(
+            range: SourceTextRange(utf16Offset: 1, utf16Length: 2),
+            kind: .emphasis
+        )]
+    )
+
+    #expect(try JSONDecoder().decode(
+        SourceBlock.self,
+        from: JSONEncoder().encode(valid)
+    ) == valid)
 }
 
 @Test
@@ -400,6 +542,30 @@ func decodingRejectsInvalidMediaReferences() throws {
             pixelWidth: 0,
             pixelHeight: -1
         ),
+        UncheckedSourceMediaReference(
+            kind: .image,
+            artifactRelativePath: "assets/image.png",
+            mimeType: "text/plain",
+            altText: nil,
+            pixelWidth: nil,
+            pixelHeight: nil
+        ),
+        UncheckedSourceMediaReference(
+            kind: .image,
+            artifactRelativePath: "assets/image.png",
+            mimeType: "image/png",
+            altText: nil,
+            pixelWidth: 640,
+            pixelHeight: nil
+        ),
+        UncheckedSourceMediaReference(
+            kind: .image,
+            artifactRelativePath: "assets/image.png",
+            mimeType: "image/png",
+            altText: nil,
+            pixelWidth: nil,
+            pixelHeight: 480
+        ),
     ]
 
     for reference in invalidReferences {
@@ -410,6 +576,19 @@ func decodingRejectsInvalidMediaReferences() throws {
             )
         }
     }
+
+    let normalizedMIME = SourceMediaReference(
+        kind: .image,
+        artifactRelativePath: "assets/image.png",
+        mimeType: " IMAGE/PNG \n",
+        altText: nil,
+        pixelWidth: 640,
+        pixelHeight: 480
+    )
+    #expect(try JSONDecoder().decode(
+        SourceMediaReference.self,
+        from: JSONEncoder().encode(normalizedMIME)
+    ) == normalizedMIME)
 }
 
 @Test
@@ -558,6 +737,97 @@ func decodingRejectsInvalidRelationsAndIssueReferences() throws {
     #expect(throws: DecodingError.self) {
         try JSONDecoder().decode(SourceDocumentContent.self, from: issueData)
     }
+}
+
+@Test
+func captionForMediaRequiresDistinctCaptionAndImageBlocks() throws {
+    let caption = SourceBlock(
+        id: SourceBlockID(),
+        canonicalText: "Caption",
+        role: .caption
+    )
+    let secondCaption = SourceBlock(
+        id: SourceBlockID(),
+        canonicalText: "Another caption",
+        role: .caption
+    )
+    let paragraph = SourceBlock(
+        id: SourceBlockID(),
+        canonicalText: "Paragraph"
+    )
+    let image = SourceBlock(
+        id: SourceBlockID(),
+        canonicalText: "Image",
+        category: .media,
+        role: .image,
+        media: SourceMediaReference(
+            kind: .image,
+            artifactRelativePath: "assets/image.png",
+            mimeType: "image/png",
+            altText: nil,
+            pixelWidth: nil,
+            pixelHeight: nil
+        )
+    )
+    let blocks = [caption, secondCaption, paragraph, image]
+    let evidence = Dictionary(uniqueKeysWithValues: blocks.map {
+        ($0.id, SourceEvidence.web(locator: "#\($0.id.rawValue.uuidString)"))
+    })
+    let invalidEndpoints = [
+        (caption.id, caption.id),
+        (caption.id, secondCaption.id),
+        (paragraph.id, image.id),
+        (caption.id, paragraph.id),
+    ]
+
+    for (sourceID, targetID) in invalidEndpoints {
+        let data = try JSONEncoder().encode(
+            UncheckedSourceDocumentContent(
+                documentID: SourceDocumentID(),
+                importedMetadata: ImportedDocumentMetadata(
+                    title: "Fixture",
+                    author: nil
+                ),
+                blocks: blocks,
+                structure: SourceStructure(
+                    orderedBlockIDs: blocks.map(\.id),
+                    relations: [SourceRelation(
+                        sourceBlockID: sourceID,
+                        targetBlockID: targetID,
+                        kind: .captionForMedia
+                    )]
+                ),
+                evidence: evidence
+            )
+        )
+
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(SourceDocumentContent.self, from: data)
+        }
+    }
+
+    let valid = SourceDocumentContent(
+        documentID: SourceDocumentID(),
+        importedMetadata: ImportedDocumentMetadata(
+            title: "Fixture",
+            author: nil
+        ),
+        blocks: blocks,
+        structure: SourceStructure(
+            orderedBlockIDs: blocks.map(\.id),
+            relations: [SourceRelation(
+                sourceBlockID: caption.id,
+                targetBlockID: image.id,
+                kind: .captionForMedia
+            )]
+        ),
+        evidence: evidence
+    )
+
+    #expect(try JSONDecoder().decode(
+        SourceDocumentContent.self,
+        from: JSONEncoder().encode(valid)
+    ) == valid)
 }
 
 @Test

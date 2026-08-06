@@ -1,6 +1,9 @@
 import Foundation
 import KnowledgeCore
 
+@available(*, deprecated, renamed: "KnowledgeCore.ImportIssue")
+public typealias ImportIssue = KnowledgeCore.ImportIssue
+
 public enum ImportTaskQuery: Hashable, Sendable {
     case unfinished
     case active
@@ -66,7 +69,7 @@ public enum ImportActivity: String, Hashable, Sendable {
 public enum ImportSuccess: Hashable, Sendable {
     case published(
         documentID: SourceDocumentID,
-        issues: [ImportIssue]
+        issues: [KnowledgeCore.ImportIssue]
     )
     case alreadyImported(
         documentID: SourceDocumentID,
