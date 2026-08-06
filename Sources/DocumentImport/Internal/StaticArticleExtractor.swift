@@ -28,6 +28,11 @@ struct StaticArticleExtractor: Sendable {
         guard let root = fragment.body()?.children().first() else {
             throw StaticWebBuildError.noReadableBlocks
         }
+        try captureOriginalEvidence(
+            originalRoot: originalRoot,
+            clonedRoot: root,
+            idCounts: idCounts
+        )
         try clean(root)
         let rootSelector = selectorForRoot(root, idCounts: idCounts)
         var images: [WebImageCandidate] = []
@@ -78,8 +83,13 @@ struct StaticArticleExtractor: Sendable {
     }
 
     private func score(_ element: Element) throws -> Int {
-        let semantic = try element.select("h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,figure,img,figcaption").size()
+        let semantic = try element
+            .select("h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,figure,img,figcaption")
+            .array()
+            .filter { isReadableForScoring($0, root: element) }
+            .count
         let standaloneCode = try element.select("code").array().filter { code in
+            guard isReadableForScoring(code, root: element) else { return false }
             var parent = code.parent()
             while let current = parent, current !== element {
                 if ["p", "pre"].contains(current.tagName().lowercased()) { return false }
@@ -105,6 +115,29 @@ struct StaticArticleExtractor: Sendable {
                 }
             }
         }
+    }
+
+    private func isReadableForScoring(_ element: Element, root: Element) -> Bool {
+        var current: Element? = element
+        while let node = current, node !== root {
+            if shouldRemoveSubtree(node) { return false }
+            current = node.parent()
+        }
+        return true
+    }
+
+    private func shouldRemoveSubtree(_ element: Element) -> Bool {
+        let tag = element.tagName().lowercased()
+        if ["script", "style", "noscript", "template", "form", "nav", "iframe"].contains(tag) {
+            return true
+        }
+        if element.hasAttr("hidden") { return true }
+        if ((try? element.attr("aria-hidden")) ?? "").lowercased() == "true" { return true }
+        let role = ((try? element.attr("role")) ?? "").lowercased()
+        if ["navigation", "banner", "complementary", "contentinfo", "form", "search"].contains(role) {
+            return true
+        }
+        return isNoise(element) || isTrackingPixel(element)
     }
 
     private func isNoise(_ element: Element) -> Bool {
@@ -242,6 +275,9 @@ struct StaticArticleExtractor: Sendable {
     }
 
     private func evidence(_ element: Element, root: Element, idCounts: [String: Int]) -> String {
+        if let original = try? element.attr(Self.originalEvidenceAttribute), !original.isEmpty {
+            return original
+        }
         let id = element.id()
         if !id.isEmpty, idCounts[id] == 1 { return "#\(cssEscaped(id))" }
         if let selector = stableAttributeSelector(element, includeTag: false) { return selector }
@@ -362,6 +398,29 @@ struct StaticArticleExtractor: Sendable {
     }
 
     private func cssEscaped(_ value: String) -> String { value.replacingOccurrences(of: "\"", with: "\\\"") }
+
+    private func captureOriginalEvidence(
+        originalRoot: Element,
+        clonedRoot: Element,
+        idCounts: [String: Int]
+    ) throws {
+        let originals = try originalRoot.getAllElements().array()
+        let clones = try clonedRoot.getAllElements().array()
+        guard originals.count == clones.count,
+              zip(originals, clones).allSatisfy({
+                  $0.tagName().lowercased() == $1.tagName().lowercased()
+              }) else {
+            throw StaticWebBuildError.unreadableHTML
+        }
+        for (original, clone) in zip(originals, clones) {
+            try clone.attr(
+                Self.originalEvidenceAttribute,
+                evidence(original, root: originalRoot, idCounts: idCounts)
+            )
+        }
+    }
+
+    private static let originalEvidenceAttribute = "data-document-import-original-evidence"
 }
 
 private struct StructuredMetadata {

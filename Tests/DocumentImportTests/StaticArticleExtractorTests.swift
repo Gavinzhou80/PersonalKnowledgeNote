@@ -265,3 +265,39 @@ func figureCaptionsTargetNestedImagesRegardlessOfDOMOrder() throws {
         URL(string: "https://fixture.invalid/compound/second.png")!,
     ])
 }
+
+@Test
+func candidateScoringIgnoresContentThatCleaningWouldRemove() throws {
+    let html = Data("""
+    <html><body>
+      <article id="noise-heavy">
+        <nav><h1>Noise heading</h1><p>Noise one.</p><p>Noise two.</p></nav>
+        <form><p>Noise three.</p><p>Noise four.</p></form>
+        <section class="recommendation"><p>Noise five.</p></section>
+      </article>
+      <article id="real-story"><h1>Real heading</h1><p>Real body.</p></article>
+    </body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/candidates")!
+    )
+    #expect(result.rootSelector == "#real-story")
+    #expect(result.blocks.map(\.canonicalText) == ["Real heading", "Real body."])
+}
+
+@Test
+func evidenceKeepsOriginalNthOfTypeAfterNoiseSiblingRemoval() throws {
+    let html = Data("""
+    <html><body><article id="original-positions">
+      <p class="advertisement">Removed advertisement.</p>
+      <p>Retained paragraph.</p>
+    </article></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/evidence-position")!
+    )
+    #expect(result.blocks.map(\.canonicalText) == ["Retained paragraph."])
+    #expect(result.blocks[0].evidenceLocator == "#original-positions > p:nth-of-type(2)")
+}
