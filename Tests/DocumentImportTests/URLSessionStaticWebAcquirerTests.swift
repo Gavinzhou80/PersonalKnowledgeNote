@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import DocumentImport
 
@@ -126,7 +127,7 @@ struct URLSessionStaticWebAcquirerTests {
             .init(
                 headers: ["Content-Type": "text/html"],
                 body: body,
-                framing: .chunked(declaredContentLength: nil)
+                framing: .chunked
             )
         }
         defer { server.stop() }
@@ -214,6 +215,32 @@ struct URLSessionStaticWebAcquirerTests {
             await Task.yield()
         }
 
+        #expect(weakServer == nil)
+    }
+
+    @Test
+    func queuedConnectionDeliveredAfterStopIsCancelledAndNotRetained() async throws {
+        var server: LocalHTTPFixtureServer? = try await .start { _ in
+            .init(headers: ["Content-Type": "text/html"])
+        }
+        weak let weakServer = server
+        let queuedConnection = NWConnection(
+            host: "127.0.0.1",
+            port: .http,
+            using: .tcp
+        )
+
+        server?.stop()
+        let wasStarted = server?.acceptQueuedConnectionForTesting(
+            queuedConnection
+        )
+
+        #expect(wasStarted == false)
+        #expect(server?.retainedConnectionCountForTesting == 0)
+        server = nil
+        for _ in 0..<20 where weakServer != nil {
+            await Task.yield()
+        }
         #expect(weakServer == nil)
     }
 }

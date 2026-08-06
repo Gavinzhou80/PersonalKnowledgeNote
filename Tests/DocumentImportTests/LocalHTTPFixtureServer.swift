@@ -6,7 +6,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         enum Framing: Sendable {
             case contentLength
             case omitContentLength
-            case chunked(declaredContentLength: Int?)
+            case chunked
         }
 
         let status: Int
@@ -117,15 +117,33 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         }
     }
 
-    private func accept(_ connection: NWConnection) {
-        lock.withLock { connections.append(connection) }
+    @discardableResult
+    private func accept(_ connection: NWConnection) -> Bool {
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self, let connection else { return }
             if case .failed = state { self.remove(connection) }
             if case .cancelled = state { self.remove(connection) }
         }
-        connection.start(queue: queue)
+        let shouldReceive = lock.withLock {
+            guard !stopped else { return false }
+            connections.append(connection)
+            connection.start(queue: queue)
+            return true
+        }
+        guard shouldReceive else {
+            connection.cancel()
+            return false
+        }
         receiveRequest(on: connection, accumulated: Data())
+        return true
+    }
+
+    func acceptQueuedConnectionForTesting(_ connection: NWConnection) -> Bool {
+        accept(connection)
+    }
+
+    var retainedConnectionCountForTesting: Int {
+        lock.withLock { connections.count }
     }
 
     private func receiveRequest(on connection: NWConnection, accumulated: Data) {
@@ -164,13 +182,9 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             case .omitContentLength:
                 headers.removeValue(forKey: "Content-Length")
                 body = response.body
-            case .chunked(let declaredContentLength):
+            case .chunked:
                 headers["Transfer-Encoding"] = "chunked"
-                if let declaredContentLength {
-                    headers["Content-Length"] = String(declaredContentLength)
-                } else {
-                    headers.removeValue(forKey: "Content-Length")
-                }
+                headers.removeValue(forKey: "Content-Length")
                 var encoded = Data(
                     String(response.body.count, radix: 16).utf8
                 )
