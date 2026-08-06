@@ -3,21 +3,30 @@ import Network
 
 final class LocalHTTPFixtureServer: @unchecked Sendable {
     struct Response: Sendable {
+        enum Framing: Sendable {
+            case contentLength
+            case omitContentLength
+            case chunked(declaredContentLength: Int?)
+        }
+
         let status: Int
         let headers: [String: String]
         let body: Data
         let delay: Duration
+        let framing: Framing
 
         init(
             status: Int = 200,
             headers: [String: String] = [:],
             body: Data = Data(),
-            delay: Duration = .zero
+            delay: Duration = .zero,
+            framing: Framing = .contentLength
         ) {
             self.status = status
             self.headers = headers
             self.body = body
             self.delay = delay
+            self.framing = framing
         }
     }
 
@@ -60,12 +69,17 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
                     server.baseURL = URL(
                         string: "http://127.0.0.1:\(port.rawValue)"
                     )!
+                    listener.stateUpdateHandler = nil
                     continuation.resume(returning: server)
                 case .failed(let error):
                     guard state.markResumed() else { return }
+                    listener.stateUpdateHandler = nil
+                    listener.newConnectionHandler = nil
                     continuation.resume(throwing: error)
                 case .cancelled:
                     guard state.markResumed() else { return }
+                    listener.stateUpdateHandler = nil
+                    listener.newConnectionHandler = nil
                     continuation.resume(throwing: CancellationError())
                 default:
                     break
@@ -88,6 +102,8 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             return result
         }
         active.forEach { $0.cancel() }
+        listener.stateUpdateHandler = nil
+        listener.newConnectionHandler = nil
         listener.cancel()
     }
 
@@ -140,7 +156,29 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             }
             guard let self, let connection else { return }
             var headers = response.headers
-            headers["Content-Length"] = String(response.body.count)
+            let body: Data
+            switch response.framing {
+            case .contentLength:
+                headers["Content-Length"] = String(response.body.count)
+                body = response.body
+            case .omitContentLength:
+                headers.removeValue(forKey: "Content-Length")
+                body = response.body
+            case .chunked(let declaredContentLength):
+                headers["Transfer-Encoding"] = "chunked"
+                if let declaredContentLength {
+                    headers["Content-Length"] = String(declaredContentLength)
+                } else {
+                    headers.removeValue(forKey: "Content-Length")
+                }
+                var encoded = Data(
+                    String(response.body.count, radix: 16).utf8
+                )
+                encoded.append(Data("\r\n".utf8))
+                encoded.append(response.body)
+                encoded.append(Data("\r\n0\r\n\r\n".utf8))
+                body = encoded
+            }
             headers["Connection"] = "close"
             let reason = Self.reasonPhrase(for: response.status)
             var wire = Data("HTTP/1.1 \(response.status) \(reason)\r\n".utf8)
@@ -148,7 +186,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
                 wire.append(Data("\(name): \(value)\r\n".utf8))
             }
             wire.append(Data("\r\n".utf8))
-            wire.append(response.body)
+            wire.append(body)
             connection.send(content: wire, completion: .contentProcessed { _ in
                 connection.cancel()
                 self.remove(connection)

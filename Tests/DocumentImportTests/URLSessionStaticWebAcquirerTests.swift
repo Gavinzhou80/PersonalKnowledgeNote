@@ -70,11 +70,12 @@ struct URLSessionStaticWebAcquirerTests {
     }
 
     @Test
-    func cancelsAnOversizedResponse() async throws {
+    func cancelsAnOversizedUnknownLengthResponseWhileStreaming() async throws {
         let server = try await LocalHTTPFixtureServer.start { _ in
             .init(
                 headers: ["Content-Type": "text/html"],
-                body: Data(repeating: 0x61, count: 8_192)
+                body: Data(repeating: 0x61, count: 8_192),
+                framing: .omitContentLength
             )
         }
         defer { server.stop() }
@@ -83,6 +84,53 @@ struct URLSessionStaticWebAcquirerTests {
         await #expect(throws: WebAcquisitionError.responseTooLarge) {
             try await acquirer.acquire(server.url("large"))
         }
+    }
+
+    @Test
+    func responseLimitCheckIsOverflowSafeForOneHugeCallback() {
+        #expect(
+            responseWouldExceedLimit(
+                receivedCount: 0,
+                incomingCount: Int.max,
+                maximumResponseBytes: 1_024
+            )
+        )
+    }
+
+    @Test
+    func rejectsChunkedResponseDespiteDeceptiveShortContentLength() async throws {
+        let server = try await LocalHTTPFixtureServer.start { _ in
+            .init(
+                headers: ["Content-Type": "text/html"],
+                body: Data(repeating: 0x62, count: 8_192),
+                framing: .chunked(declaredContentLength: 16)
+            )
+        }
+        defer { server.stop() }
+
+        await #expect(throws: WebAcquisitionError.responseTooLarge) {
+            try await URLSessionStaticWebAcquirer(maximumResponseBytes: 1_024)
+                .acquire(server.url("deceptive"))
+        }
+    }
+
+    @Test
+    func acceptsAStreamingResponseAtTheExactMaximum() async throws {
+        let body = Data(repeating: 0x63, count: 1_024)
+        let server = try await LocalHTTPFixtureServer.start { _ in
+            .init(
+                headers: ["Content-Type": "text/html"],
+                body: body,
+                framing: .chunked(declaredContentLength: nil)
+            )
+        }
+        defer { server.stop() }
+
+        let page = try await URLSessionStaticWebAcquirer(
+            maximumResponseBytes: body.count
+        ).acquire(server.url("exact"))
+
+        #expect(page.responseBytes == body)
     }
 
     @Test
@@ -112,5 +160,55 @@ struct URLSessionStaticWebAcquirerTests {
                 URL(fileURLWithPath: "/tmp/article.html")
             )
         }
+    }
+
+    @Test
+    func taskCancellationThrowsCancellationError() async throws {
+        let server = try await LocalHTTPFixtureServer.start { _ in
+            .init(
+                headers: ["Content-Type": "text/html"],
+                body: Data("<html></html>".utf8),
+                delay: .seconds(2)
+            )
+        }
+        defer { server.stop() }
+
+        let task = Task {
+            try await URLSessionStaticWebAcquirer().acquire(server.url("delayed"))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+    }
+
+    @Test
+    func redirectLoopIsAnInvalidHTTPResponse() async throws {
+        let server = try await LocalHTTPFixtureServer.start { _ in
+            .init(status: 302, headers: ["Location": "/loop"])
+        }
+        defer { server.stop() }
+
+        await #expect(throws: WebAcquisitionError.invalidHTTPResponse) {
+            try await URLSessionStaticWebAcquirer().acquire(server.url("loop"))
+        }
+    }
+
+    @Test
+    func stoppedServerReleasesListenerHandlersAndDeallocates() async throws {
+        var server: LocalHTTPFixtureServer? = try await .start { _ in
+            .init(headers: ["Content-Type": "text/html"])
+        }
+        weak let weakServer = server
+
+        server?.stop()
+        server = nil
+        for _ in 0..<20 where weakServer != nil {
+            await Task.yield()
+        }
+
+        #expect(weakServer == nil)
     }
 }

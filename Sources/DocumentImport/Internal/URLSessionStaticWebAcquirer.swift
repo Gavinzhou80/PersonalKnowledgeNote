@@ -69,6 +69,7 @@ private final class BoundedWebResponseReceiver: NSObject,
     private var response: HTTPURLResponse?
     private var bytes = Data()
     private var terminalError: WebAcquisitionError?
+    private var taskWasCancelled = false
     private weak var session: URLSession?
 
     init(maximumResponseBytes: Int) {
@@ -81,12 +82,22 @@ private final class BoundedWebResponseReceiver: NSObject,
     ) async throws -> AcquiredWebPage {
         self.session = session
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                lock.withLock { self.continuation = continuation }
-                session.dataTask(with: request).resume()
+            let page = try await withCheckedThrowingContinuation { continuation in
+                let shouldStart = lock.withLock {
+                    guard !taskWasCancelled else { return false }
+                    self.continuation = continuation
+                    return true
+                }
+                if shouldStart {
+                    session.dataTask(with: request).resume()
+                } else {
+                    continuation.resume(throwing: CancellationError())
+                }
             }
+            try Task.checkCancellation()
+            return page
         } onCancel: {
-            session.invalidateAndCancel()
+            self.cancelFromTask(session: session)
         }
     }
 
@@ -139,7 +150,11 @@ private final class BoundedWebResponseReceiver: NSObject,
     ) {
         let shouldCancel = lock.withLock {
             guard terminalError == nil else { return true }
-            guard bytes.count <= maximumResponseBytes - data.count else {
+            guard !responseWouldExceedLimit(
+                receivedCount: bytes.count,
+                incomingCount: data.count,
+                maximumResponseBytes: maximumResponseBytes
+            ) else {
                 terminalError = .responseTooLarge
                 return true
             }
@@ -189,14 +204,28 @@ private final class BoundedWebResponseReceiver: NSObject,
     }
 
     private func finish(with result: Result<AcquiredWebPage, Error>) {
-        let continuation = lock.withLock {
-            let result = self.continuation
+        let completion = lock.withLock {
+            let continuation = self.continuation
             self.continuation = nil
-            return result
+            let finalResult: Result<AcquiredWebPage, Error> = taskWasCancelled
+                ? .failure(CancellationError())
+                : result
+            return (continuation, finalResult)
         }
-        guard let continuation else { return }
-        continuation.resume(with: result)
+        guard let continuation = completion.0 else { return }
+        continuation.resume(with: completion.1)
         session?.finishTasksAndInvalidate()
+    }
+
+    private func cancelFromTask(session: URLSession) {
+        let continuation = lock.withLock {
+            taskWasCancelled = true
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+        continuation?.resume(throwing: CancellationError())
+        session.invalidateAndCancel()
     }
 
     private static func map(_ error: Error) -> WebAcquisitionError {
@@ -209,6 +238,7 @@ private final class BoundedWebResponseReceiver: NSObject,
         case .badURL,
              .unsupportedURL,
              .redirectToNonExistentLocation,
+             .httpTooManyRedirects,
              .badServerResponse,
              .zeroByteResource,
              .cannotDecodeRawData,
@@ -226,4 +256,19 @@ private final class BoundedWebResponseReceiver: NSObject,
             return .networkUnavailable
         }
     }
+}
+
+func responseWouldExceedLimit(
+    receivedCount: Int,
+    incomingCount: Int,
+    maximumResponseBytes: Int
+) -> Bool {
+    guard receivedCount >= 0,
+          incomingCount >= 0,
+          maximumResponseBytes >= 0,
+          receivedCount <= maximumResponseBytes
+    else {
+        return true
+    }
+    return incomingCount > maximumResponseBytes - receivedCount
 }
