@@ -385,11 +385,95 @@ struct RealStaticWebImportIntegrationTests {
         await #expect(throws: (any Error).self) {
             try await request.value
         }
-        await server.waitUntilNoRetainedConnectionsForTesting()
-        await server.waitUntilNoResponseTasksForTesting()
+        try await server.waitUntilNoRetainedConnectionsForTesting(timeout: .seconds(1))
+        try await server.waitUntilNoResponseTasksForTesting(timeout: .seconds(1))
         #expect(server.retainedConnectionCountForTesting == 0)
         #expect(server.retainedResponseTaskCountForTesting == 0)
         #expect(gate.pendingWaiterCount == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func peerCloseBeforeResponseRegistrationCannotStartOrphanedTask() async throws {
+        let gate = AsyncTestGate()
+        defer { gate.release() }
+        let server = try await LocalHTTPFixtureServer.start { _ in
+            .init(
+                headers: ["Content-Type": "text/html"],
+                body: Data("<html></html>".utf8),
+                beforeSend: { try await gate.waitForRelease(timeout: .seconds(30)) }
+            )
+        }
+        defer { server.stop() }
+        server.setBeforeResponseTaskRegistrationForTesting {
+            server.removeOwnedConnectionsForTesting()
+        }
+
+        let request = Task { try await URLSession.shared.data(from: server.url("peer-close")) }
+        defer { request.cancel() }
+
+        await #expect(throws: (any Error).self) {
+            try await taskValue(request, timeout: .seconds(1))
+        }
+        try await server.waitUntilNoRetainedConnectionsForTesting(timeout: .seconds(1))
+        try await server.waitUntilNoResponseTasksForTesting(timeout: .seconds(1))
+        #expect(server.retainedConnectionCountForTesting == 0)
+        #expect(server.retainedResponseTaskCountForTesting == 0)
+        #expect(gate.pendingWaiterCount == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func serverDrainWaitersSupportCancellationWithoutStaleState() async throws {
+        let gate = AsyncTestGate()
+        defer { gate.release() }
+        let server = try await LocalHTTPFixtureServer.start { _ in
+            .init(
+                headers: ["Content-Type": "text/html"],
+                beforeSend: { try await gate.waitForRelease(timeout: .seconds(30)) }
+            )
+        }
+        defer { server.stop() }
+        let request = Task { try await URLSession.shared.data(from: server.url("waiters")) }
+        defer { request.cancel() }
+        try await gate.waitUntilBlocked(timeout: .seconds(1))
+        let connectionWaiter = Task {
+            try await server.waitUntilNoRetainedConnectionsForTesting(timeout: .seconds(30))
+        }
+        let responseWaiter = Task {
+            try await server.waitUntilNoResponseTasksForTesting(timeout: .seconds(30))
+        }
+
+        await #expect(throws: (any Error).self) {
+            try await server.waitUntilNoResponseTasksForTesting(
+                timeout: .milliseconds(10)
+            )
+        }
+
+        connectionWaiter.cancel()
+        responseWaiter.cancel()
+
+        await #expect(throws: CancellationError.self) { try await connectionWaiter.value }
+        await #expect(throws: CancellationError.self) { try await responseWaiter.value }
+        #expect(server.pendingDrainWaiterCountForTesting == 0)
+        server.stop()
+        await #expect(throws: (any Error).self) {
+            try await taskValue(request, timeout: .seconds(1))
+        }
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func asyncGateReleaseCancellationRacesLeaveNoStaleRegistration() async throws {
+        for _ in 0..<100 {
+            let gate = AsyncTestGate()
+            let waiter = Task { try await gate.waitForRelease(timeout: .seconds(1)) }
+            try await gate.waitUntilBlocked(timeout: .seconds(1))
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { gate.release() }
+                group.addTask { waiter.cancel() }
+            }
+            _ = try? await waiter.value
+            #expect(gate.pendingWaiterCount == 0)
+            #expect(gate.preCancelledWaiterCount == 0)
+        }
     }
 }
 
@@ -425,10 +509,18 @@ private final class AsyncTestGate: @unchecked Sendable {
     private var released = false
     private var blockedWaiters: [UUID: Waiter] = [:]
     private var releaseWaiters: [UUID: Waiter] = [:]
+    private var waiterRegistrations: Set<UUID> = []
     private var preCancelledWaiters: Set<UUID> = []
 
     var pendingWaiterCount: Int {
-        lock.withLock { blockedWaiters.count + releaseWaiters.count }
+        lock.withLock {
+            blockedWaiters.count + releaseWaiters.count
+                + waiterRegistrations.count + preCancelledWaiters.count
+        }
+    }
+
+    var preCancelledWaiterCount: Int {
+        lock.withLock { preCancelledWaiters.count }
     }
 
     func waitForRelease(timeout: Duration = .seconds(5)) async throws {
@@ -464,10 +556,12 @@ private final class AsyncTestGate: @unchecked Sendable {
 
     private func wait(for kind: WaitKind, timeout: Duration) async throws {
         let id = UUID()
+        _ = lock.withLock { waiterRegistrations.insert(id) }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let waiter = Waiter(continuation: continuation, timeoutTask: nil)
                 let immediate: Result<Void, Error>? = lock.withLock {
+                    waiterRegistrations.remove(id)
                     if preCancelledWaiters.remove(id) != nil {
                         return .failure(CancellationError())
                     }
@@ -522,7 +616,9 @@ private final class AsyncTestGate: @unchecked Sendable {
             if let waiter = releaseWaiters.removeValue(forKey: id) {
                 return waiter
             }
-            if case .failure(let error) = result, error is CancellationError {
+            if waiterRegistrations.contains(id),
+               case .failure(let error) = result,
+               error is CancellationError {
                 preCancelledWaiters.insert(id)
             }
             return nil
@@ -626,4 +722,28 @@ private func assertLocalPackageReference(
     #expect(!decoded.hasPrefix("/"))
     #expect(!decoded.split(separator: "/").contains(".."))
     #expect(FileManager.default.fileExists(atPath: packageURL.appending(path: decoded).path))
+}
+
+private struct TestTimeout: Error {}
+
+private func taskValue<Value: Sendable>(
+    _ task: Task<Value, Error>,
+    timeout: Duration
+) async throws -> Value {
+    do {
+        return try await withThrowingTaskGroup(of: Value.self) { group in
+            group.addTask { try await task.value }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                task.cancel()
+                throw TestTimeout()
+            }
+            let value = try await #require(group.next())
+            group.cancelAll()
+            return value
+        }
+    } catch {
+        task.cancel()
+        throw error
+    }
 }

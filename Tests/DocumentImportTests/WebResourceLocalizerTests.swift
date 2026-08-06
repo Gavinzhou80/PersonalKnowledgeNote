@@ -294,7 +294,7 @@ func cancellationIsNotPersistedAsAnOptionalImageFailure() async throws {
     await #expect(throws: CancellationError.self) {
         try await task.value
     }
-    await server.waitUntilNoRetainedConnectionsForTesting()
+    try await server.waitUntilNoRetainedConnectionsForTesting()
     #expect(probe.totalCount == 4)
     #expect(server.retainedConnectionCountForTesting == 0)
 }

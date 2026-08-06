@@ -43,10 +43,13 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
     private let handler: Handler
     private let lock = NSLock()
     private var connections: [NWConnection] = []
-    private var emptyConnectionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var emptyConnectionWaiters: [UUID: DrainWaiter] = [:]
     private var responseTasks: [UUID: ResponseTaskHandle] = [:]
-    private var responseTaskConnections: [UUID: ObjectIdentifier] = [:]
-    private var emptyResponseTaskWaiters: [CheckedContinuation<Void, Never>] = []
+    private var responseTaskConnections: [UUID: NWConnection] = [:]
+    private var emptyResponseTaskWaiters: [UUID: DrainWaiter] = [:]
+    private var drainWaiterRegistrations: Set<UUID> = []
+    private var preCancelledDrainWaiters: Set<UUID> = []
+    private var beforeResponseTaskRegistrationForTesting: (@Sendable () -> Void)?
     private var stopped = false
     private(set) var baseURL = URL(string: "http://127.0.0.1:0")!
 
@@ -111,17 +114,19 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         let stoppedState: (
             [NWConnection],
             [ResponseTaskHandle],
-            [CheckedContinuation<Void, Never>],
-            [CheckedContinuation<Void, Never>]
+            [DrainWaiter],
+            [DrainWaiter]
         ) = lock.withLock {
             guard !stopped else { return ([], [], [], []) }
             stopped = true
             let connectionsToCancel = connections
             connections.removeAll()
             let tasksToCancel = Array(responseTasks.values)
-            let connectionWaiters = emptyConnectionWaiters
+            let connectionWaiters = Array(emptyConnectionWaiters.values)
             emptyConnectionWaiters.removeAll()
-            let taskWaiters = responseTasks.isEmpty ? emptyResponseTaskWaiters : []
+            let taskWaiters = responseTasks.isEmpty
+                ? Array(emptyResponseTaskWaiters.values)
+                : []
             if responseTasks.isEmpty { emptyResponseTaskWaiters.removeAll() }
             return (
                 connectionsToCancel,
@@ -132,8 +137,8 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         }
         stoppedState.0.forEach { $0.cancel() }
         stoppedState.1.forEach { $0.cancel() }
-        stoppedState.2.forEach { $0.resume() }
-        stoppedState.3.forEach { $0.resume() }
+        resumeDrainWaiters(stoppedState.2)
+        resumeDrainWaiters(stoppedState.3)
         listener.stateUpdateHandler = nil
         listener.newConnectionHandler = nil
         listener.cancel()
@@ -182,25 +187,36 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         lock.withLock { responseTasks.count }
     }
 
-    func waitUntilNoRetainedConnectionsForTesting() async {
-        await withCheckedContinuation { continuation in
-            let resumeNow = lock.withLock {
-                if connections.isEmpty { return true }
-                emptyConnectionWaiters.append(continuation)
-                return false
-            }
-            if resumeNow { continuation.resume() }
+    var pendingDrainWaiterCountForTesting: Int {
+        lock.withLock {
+            emptyConnectionWaiters.count + emptyResponseTaskWaiters.count
+                + drainWaiterRegistrations.count + preCancelledDrainWaiters.count
         }
     }
 
-    func waitUntilNoResponseTasksForTesting() async {
-        await withCheckedContinuation { continuation in
-            let resumeNow = lock.withLock {
-                if responseTasks.isEmpty { return true }
-                emptyResponseTaskWaiters.append(continuation)
-                return false
-            }
-            if resumeNow { continuation.resume() }
+    func waitUntilNoRetainedConnectionsForTesting(
+        timeout: Duration = .seconds(5)
+    ) async throws {
+        try await waitUntilDrained(.connections, timeout: timeout)
+    }
+
+    func waitUntilNoResponseTasksForTesting(
+        timeout: Duration = .seconds(5)
+    ) async throws {
+        try await waitUntilDrained(.responseTasks, timeout: timeout)
+    }
+
+    func setBeforeResponseTaskRegistrationForTesting(
+        _ hook: @escaping @Sendable () -> Void
+    ) {
+        lock.withLock { beforeResponseTaskRegistrationForTesting = hook }
+    }
+
+    func removeOwnedConnectionsForTesting() {
+        let owned = lock.withLock { connections }
+        for connection in owned {
+            connection.cancel()
+            remove(connection)
         }
     }
 
@@ -226,13 +242,16 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             .split(separator: " ").dropFirst().first.map(String.init) ?? "/"
         let response = handler(path)
         monitorPeerClosure(on: connection)
+        lock.withLock { beforeResponseTaskRegistrationForTesting }?()
 
         let taskID = UUID()
         let handle = ResponseTaskHandle()
         let shouldStart = lock.withLock {
-            guard !stopped else { return false }
+            guard !stopped,
+                  connections.contains(where: { $0 === connection })
+            else { return false }
             responseTasks[taskID] = handle
-            responseTaskConnections[taskID] = ObjectIdentifier(connection)
+            responseTaskConnections[taskID] = connection
             return true
         }
         guard shouldStart else {
@@ -306,16 +325,15 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
     private func remove(_ connection: NWConnection) {
         let state: (
             [ResponseTaskHandle],
-            [CheckedContinuation<Void, Never>]
+            [DrainWaiter]
         ) = lock.withLock {
             connections.removeAll { $0 === connection }
-            let connectionID = ObjectIdentifier(connection)
             let tasks = responseTaskConnections.compactMap { taskID, owner in
-                owner == connectionID ? responseTasks[taskID] : nil
+                owner === connection ? responseTasks[taskID] : nil
             }
-            let waiters: [CheckedContinuation<Void, Never>]
+            let waiters: [DrainWaiter]
             if connections.isEmpty {
-                waiters = emptyConnectionWaiters
+                waiters = Array(emptyConnectionWaiters.values)
                 emptyConnectionWaiters.removeAll()
             } else {
                 waiters = []
@@ -323,19 +341,111 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             return (tasks, waiters)
         }
         state.0.forEach { $0.cancel() }
-        state.1.forEach { $0.resume() }
+        resumeDrainWaiters(state.1)
     }
 
     private func finishResponseTask(id: UUID) {
-        let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
+        let waiters: [DrainWaiter] = lock.withLock {
             responseTasks.removeValue(forKey: id)
             responseTaskConnections.removeValue(forKey: id)
             guard responseTasks.isEmpty else { return [] }
-            let result = emptyResponseTaskWaiters
+            let result = Array(emptyResponseTaskWaiters.values)
             emptyResponseTaskWaiters.removeAll()
             return result
         }
-        waiters.forEach { $0.resume() }
+        resumeDrainWaiters(waiters)
+    }
+
+    private func waitUntilDrained(
+        _ kind: DrainWaitKind,
+        timeout: Duration
+    ) async throws {
+        try Task.checkCancellation()
+        let id = UUID()
+        _ = lock.withLock { drainWaiterRegistrations.insert(id) }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let waiter = DrainWaiter(
+                    continuation: continuation,
+                    timeoutTask: nil
+                )
+                let immediate: Result<Void, Error>? = lock.withLock {
+                    drainWaiterRegistrations.remove(id)
+                    if preCancelledDrainWaiters.remove(id) != nil {
+                        return .failure(CancellationError())
+                    }
+                    let drained = switch kind {
+                    case .connections: connections.isEmpty
+                    case .responseTasks: responseTasks.isEmpty
+                    }
+                    if drained { return .success(()) }
+                    switch kind {
+                    case .connections: emptyConnectionWaiters[id] = waiter
+                    case .responseTasks: emptyResponseTaskWaiters[id] = waiter
+                    }
+                    return nil
+                }
+                if let immediate {
+                    continuation.resume(with: immediate)
+                    return
+                }
+                let timeoutTask = Task { [weak self] in
+                    do { try await Task.sleep(for: timeout) }
+                    catch { return }
+                    self?.resolveDrainWaiter(
+                        id: id,
+                        with: .failure(DrainWaitError.timeout)
+                    )
+                }
+                let cancelTimeout = lock.withLock {
+                    if emptyConnectionWaiters[id] != nil {
+                        emptyConnectionWaiters[id]?.timeoutTask = timeoutTask
+                        return false
+                    }
+                    if emptyResponseTaskWaiters[id] != nil {
+                        emptyResponseTaskWaiters[id]?.timeoutTask = timeoutTask
+                        return false
+                    }
+                    return true
+                }
+                if cancelTimeout { timeoutTask.cancel() }
+            }
+        } onCancel: { [weak self] in
+            self?.resolveDrainWaiter(
+                id: id,
+                with: .failure(CancellationError())
+            )
+        }
+    }
+
+    private func resolveDrainWaiter(
+        id: UUID,
+        with result: Result<Void, Error>
+    ) {
+        let waiter: DrainWaiter? = lock.withLock {
+            if let waiter = emptyConnectionWaiters.removeValue(forKey: id) {
+                return waiter
+            }
+            if let waiter = emptyResponseTaskWaiters.removeValue(forKey: id) {
+                return waiter
+            }
+            if drainWaiterRegistrations.contains(id),
+               case .failure(let error) = result,
+               error is CancellationError {
+                preCancelledDrainWaiters.insert(id)
+            }
+            return nil
+        }
+        guard let waiter else { return }
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume(with: result)
+    }
+
+    private func resumeDrainWaiters(_ waiters: [DrainWaiter]) {
+        for waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            waiter.continuation.resume()
+        }
     }
 
     private static func reasonPhrase(for status: Int) -> String {
@@ -346,6 +456,20 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         default: "Response"
         }
     }
+}
+
+private enum DrainWaitKind {
+    case connections
+    case responseTasks
+}
+
+private enum DrainWaitError: Error {
+    case timeout
+}
+
+private struct DrainWaiter {
+    let continuation: CheckedContinuation<Void, Error>
+    var timeoutTask: Task<Void, Never>?
 }
 
 private final class ResponseTaskHandle: @unchecked Sendable {
