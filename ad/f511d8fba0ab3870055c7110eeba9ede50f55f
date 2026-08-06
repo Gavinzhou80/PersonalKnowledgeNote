@@ -1,0 +1,39 @@
+Sources/DocumentImport/Internal/WebArtifactRenderer.swift
+  s_413052984bbc8e::t_aae05b2d7a60fc 9
+Tests/KnowledgeCoreTests/PublicationModelTests.swift
+  s_413052984bbc8e::t_ce77b3ce1ed756 639-666,668
+  s_413052984bbc8e::t_6fb6c707f11193 636-638
+Tests/DocumentImportTests/StaticWebDocumentBuilderTests.swift
+  s_413052984bbc8e::t_ce77b3ce1ed756 50-99,201-243
+Sources/DocumentImport/Internal/StableWebIdentity.swift
+  s_413052984bbc8e::t_aae05b2d7a60fc 36
+Sources/KnowledgeCore/SourceDocument.swift
+  s_413052984bbc8e::t_aae05b2d7a60fc 163-166,168,171
+Sources/DocumentImport/Internal/WebResourceLocalizer.swift
+  s_413052984bbc8e::t_aae05b2d7a60fc 7,9-14,21,62,82,84
+Sources/DocumentImport/Internal/StaticWebDocumentBuilder.swift
+  s_413052984bbc8e::t_7090a60700bb18 118-122
+  s_413052984bbc8e::t_aae05b2d7a60fc 60-65,80-96,98-100,123,133
+  s_413052984bbc8e::t_84ff3ce92becff 12-21,34,39-40,45,53,66
+Tests/DocumentImportTests/WebResourceLocalizerTests.swift
+  s_413052984bbc8e::t_0f657481c46190 31,39-41,115-116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "adf511d8fba0ab3870055c7110eeba9ede50f55f",
+  "prompts": {},
+  "logical_commit_id": "adf511d8fba0ab3870055c7110eeba9ede50f55f",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 208,
+      "total_deletions": 78
+    }
+  }
+}
