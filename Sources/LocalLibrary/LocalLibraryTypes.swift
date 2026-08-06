@@ -38,6 +38,69 @@ public struct PublicationCandidate: Sendable {
     }
 }
 
+package struct CheckpointArtifactDescriptor: Hashable, Codable, Sendable {
+    package let byteCount: Int64
+    package let contentHash: String
+
+    package init(byteCount: Int64, contentHash: String) {
+        self.byteCount = byteCount
+        self.contentHash = contentHash
+    }
+
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let byteCount = try container.decode(Int64.self, forKey: .byteCount)
+        let contentHash = try container.decode(String.self, forKey: .contentHash)
+        guard byteCount > 0, !contentHash.isEmpty else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Invalid checkpoint artifact descriptor"
+            ))
+        }
+        self.byteCount = byteCount
+        self.contentHash = contentHash
+    }
+}
+
+package struct ManagedCheckpointArtifact: Hashable, Sendable {
+    package let rawValue: UUID
+    package let descriptor: CheckpointArtifactDescriptor
+
+    package init(
+        rawValue: UUID,
+        descriptor: CheckpointArtifactDescriptor
+    ) {
+        self.rawValue = rawValue
+        self.descriptor = descriptor
+    }
+}
+
+package struct VerifiedCheckpointPackage: Sendable {
+    package let descriptor: CheckpointArtifactDescriptor
+    package let files: [String: Data]
+
+    package init(
+        descriptor: CheckpointArtifactDescriptor,
+        files: [String: Data]
+    ) {
+        self.descriptor = descriptor
+        self.files = files
+    }
+}
+
+package struct CheckpointArtifactReplacement: Sendable {
+    package let artifact: ManagedCheckpointArtifact
+    package let snapshot: DurableImportSnapshot
+
+    package init(
+        artifact: ManagedCheckpointArtifact,
+        snapshot: DurableImportSnapshot
+    ) {
+        self.artifact = artifact
+        self.snapshot = snapshot
+    }
+}
+
 public struct DurableImportSnapshot: Sendable {
     public let taskID: ImportTaskID
     package let journalSequence: UInt64
@@ -47,6 +110,7 @@ public struct DurableImportSnapshot: Sendable {
     public let state: ImportTaskState
     public let failure: ImportTaskFailureEnvelope?
     public let checkpoint: CheckpointEnvelope?
+    package let checkpointArtifact: ManagedCheckpointArtifact?
     public let stagedArtifact: StagedArtifact?
 
     package init(
@@ -58,6 +122,7 @@ public struct DurableImportSnapshot: Sendable {
         state: ImportTaskState,
         failure: ImportTaskFailureEnvelope?,
         checkpoint: CheckpointEnvelope?,
+        checkpointArtifact: ManagedCheckpointArtifact?,
         stagedArtifact: StagedArtifact?
     ) {
         self.taskID = taskID
@@ -68,6 +133,7 @@ public struct DurableImportSnapshot: Sendable {
         self.state = state
         self.failure = failure
         self.checkpoint = checkpoint
+        self.checkpointArtifact = checkpointArtifact
         self.stagedArtifact = stagedArtifact
     }
 }

@@ -5,10 +5,12 @@ enum ManagedArtifactPath: Hashable, Sendable {
     enum Scope: String, Hashable, Sendable {
         case staging = "Staging"
         case artifacts = "Artifacts"
+        case checkpoints = "Checkpoints"
     }
 
     case staging(taskID: ImportTaskID, artifactID: UUID)
     case artifacts(documentID: SourceDocumentID)
+    case checkpoint(taskID: ImportTaskID, artifactID: UUID)
 
     var relativePath: String {
         switch self {
@@ -16,6 +18,8 @@ enum ManagedArtifactPath: Hashable, Sendable {
             "Staging/\(taskID.rawValue.uuidString)/\(artifactID.uuidString)"
         case .artifacts(let documentID):
             "Artifacts/\(documentID.rawValue.uuidString)"
+        case .checkpoint(let taskID, let artifactID):
+            "Checkpoints/\(taskID.rawValue.uuidString)/\(artifactID.uuidString)"
         }
     }
 
@@ -25,6 +29,8 @@ enum ManagedArtifactPath: Hashable, Sendable {
             .staging
         case .artifacts:
             .artifacts
+        case .checkpoint:
+            .checkpoints
         }
     }
 
@@ -34,6 +40,8 @@ enum ManagedArtifactPath: Hashable, Sendable {
             [taskID.rawValue.uuidString, artifactID.uuidString]
         case .artifacts(let documentID):
             [documentID.rawValue.uuidString]
+        case .checkpoint(let taskID, let artifactID):
+            [taskID.rawValue.uuidString, artifactID.uuidString]
         }
     }
 
@@ -60,6 +68,16 @@ enum ManagedArtifactPath: Hashable, Sendable {
             }
             path = .artifacts(
                 documentID: SourceDocumentID(documentID)
+            )
+        case Scope.checkpoints.rawValue where components.count == 3:
+            guard let taskID = UUID(uuidString: components[1]),
+                  let artifactID = UUID(uuidString: components[2])
+            else {
+                throw managedArtifactPathCorruption()
+            }
+            path = .checkpoint(
+                taskID: ImportTaskID(taskID),
+                artifactID: artifactID
             )
         default:
             throw managedArtifactPathCorruption()

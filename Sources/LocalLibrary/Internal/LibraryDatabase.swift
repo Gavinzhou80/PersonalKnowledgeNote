@@ -22,9 +22,20 @@ struct RecoveredPublicationIntent: Sendable {
     let candidate: PublicationCandidate
 }
 
+struct CheckpointArtifactMutation: Sendable {
+    let replacement: CheckpointArtifactReplacement
+    let oldCleanup: CheckpointArtifactCleanup?
+}
+
+struct CheckpointArtifactRemoval: Sendable {
+    let snapshot: DurableImportSnapshot
+    let cleanup: CheckpointArtifactCleanup
+}
+
 private struct PublicationStateBundle {
     let task: ImportTaskRecord
     let stagedArtifact: StagedArtifactRecord?
+    let checkpointArtifact: CheckpointArtifactRecord?
     let snapshot: DurableImportSnapshot
     let outcome: PublicationOutcome?
 }
@@ -32,6 +43,7 @@ private struct PublicationStateBundle {
 private struct PreparedPublicationTask {
     let task: ImportTaskRecord
     let stagedArtifact: StagedArtifactRecord?
+    let checkpointArtifact: CheckpointArtifactRecord?
     let intent: PublicationIntentRecord?
     let snapshot: DurableImportSnapshot
     let outcome: PublicationOutcome?
@@ -62,6 +74,7 @@ private struct DecodedPublicationProvenanceCollection {
 
 private struct PublicationAssociationBatch {
     let stagedArtifactsByTaskID: [String: StagedArtifactRecord]
+    let checkpointArtifactsByTaskID: [String: CheckpointArtifactRecord]
     let intentsByTaskID: [String: PublicationIntentRecord]
     var documentsByID: [String: SourceDocumentRecord] = [:]
     var provenanceByDocumentID: [String: [SourceProvenanceRecord]] = [:]
@@ -73,6 +86,12 @@ private struct PublicationAssociationBatch {
     init(taskIDs: [String], in db: Database) throws {
         stagedArtifactsByTaskID = try uniqueRecords(
             try StagedArtifactRecord
+                .filter(taskIDs.contains(Column("task_id")))
+                .fetchAll(db),
+            keyedBy: \.taskID
+        )
+        checkpointArtifactsByTaskID = try uniqueRecords(
+            try CheckpointArtifactRecord
                 .filter(taskIDs.contains(Column("task_id")))
                 .fetchAll(db),
             keyedBy: \.taskID
@@ -223,6 +242,15 @@ final class LibraryDatabase: Sendable {
             ) else {
                 throw LocalLibraryError.unavailable
             }
+            let stagedArtifact = try stagedArtifact(for: task, in: db)
+            let managedCheckpointArtifact = try checkpointArtifact(
+                for: task,
+                in: db
+            )
+            _ = try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: managedCheckpointArtifact
+            )
             guard let currentRevision = UInt64(exactly: task.revision) else {
                 throw corruptLibraryError()
             }
@@ -267,6 +295,15 @@ final class LibraryDatabase: Sendable {
             ) else {
                 throw LocalLibraryError.unavailable
             }
+            let stagedArtifact = try stagedArtifact(for: task, in: db)
+            let managedCheckpointArtifact = try checkpointArtifact(
+                for: task,
+                in: db
+            )
+            _ = try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: managedCheckpointArtifact
+            )
             guard let currentRevision = UInt64(exactly: task.revision) else {
                 throw corruptLibraryError()
             }
@@ -281,6 +318,9 @@ final class LibraryDatabase: Sendable {
                 throw corruptLibraryError()
             }
             guard state == .queued || state == .running else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard managedCheckpointArtifact == nil else {
                 throw LocalLibraryError.invalidTaskState
             }
             guard update.envelope.payload.count <= 1_048_576 else {
@@ -313,8 +353,174 @@ final class LibraryDatabase: Sendable {
             task.revision += 1
             try task.update(db)
 
+            return try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: nil
+            )
+        }
+    }
+
+    func replaceCheckpointArtifact(
+        taskID: ImportTaskID,
+        placement: CheckpointArtifactPlacement,
+        update: CheckpointUpdate
+    ) throws -> CheckpointArtifactMutation {
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
             let stagedArtifact = try stagedArtifact(for: task, in: db)
-            return try task.snapshot(stagedArtifact: stagedArtifact)
+            let existing = try checkpointArtifact(for: task, in: db)
+            _ = try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: existing
+            )
+            guard placement.taskID == taskID,
+                  placement.path == .checkpoint(
+                    taskID: taskID,
+                    artifactID: placement.artifact.rawValue
+                  ),
+                  task.taskID == taskID.rawValue.uuidString,
+                  let currentRevision = UInt64(exactly: task.revision)
+            else {
+                throw corruptLibraryError()
+            }
+            guard currentRevision == update.expectedRevision else {
+                throw LocalLibraryError.staleRevision(
+                    current: currentRevision
+                )
+            }
+            guard let state = ImportTaskState(rawValue: task.state),
+                  state == .queued || state == .running
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard update.envelope.payload.count <= 1_048_576,
+                  let checkpointOrdinal = Int64(exactly: update.ordinal)
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            if let storedOrdinal = task.checkpointOrdinal {
+                guard let currentOrdinal = UInt64(exactly: storedOrdinal)
+                else {
+                    throw corruptLibraryError()
+                }
+                guard update.ordinal > currentOrdinal else {
+                    throw LocalLibraryError.checkpointRegression
+                }
+            }
+            guard task.revision < Int64.max else {
+                throw corruptLibraryError()
+            }
+
+            let oldCleanup = try existing.map {
+                CheckpointArtifactCleanup(
+                    placement: try checkpointPlacement($0)
+                )
+            }
+            if let existing {
+                guard try existing.delete(db) else {
+                    throw corruptLibraryError()
+                }
+            }
+            let record = try checkpointArtifactRecord(
+                taskID: taskID,
+                placement: placement
+            )
+            try record.insert(db)
+            task.checkpointOrdinal = checkpointOrdinal
+            task.checkpointCodecVersion = Int64(
+                update.envelope.codecVersion
+            )
+            task.checkpointPayload = update.envelope.payload
+            try removeFromActiveQueueIfNeeded(task: &task, in: db)
+            task.state = ImportTaskState.running.rawValue
+            task.revision += 1
+            try task.update(db)
+            let snapshot = try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: record
+            )
+            guard snapshot.checkpointArtifact == placement.artifact,
+                  snapshot.checkpoint == update.envelope
+            else {
+                throw corruptLibraryError()
+            }
+            return CheckpointArtifactMutation(
+                replacement: CheckpointArtifactReplacement(
+                    artifact: placement.artifact,
+                    snapshot: snapshot
+                ),
+                oldCleanup: oldCleanup
+            )
+        }
+    }
+
+    func removeCheckpointArtifact(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> CheckpointArtifactRemoval {
+        try queue.write { db in
+            guard var task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            let stagedArtifact = try stagedArtifact(for: task, in: db)
+            let existing = try checkpointArtifact(for: task, in: db)
+            _ = try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: existing
+            )
+            guard let currentRevision = UInt64(exactly: task.revision) else {
+                throw corruptLibraryError()
+            }
+            guard currentRevision == expectedRevision else {
+                throw LocalLibraryError.staleRevision(
+                    current: currentRevision
+                )
+            }
+            guard let state = ImportTaskState(rawValue: task.state),
+                  state == .queued || state == .running
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard let existing else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard task.revision < Int64.max else {
+                throw corruptLibraryError()
+            }
+            let cleanup = CheckpointArtifactCleanup(
+                placement: try checkpointPlacement(existing)
+            )
+            guard try existing.delete(db) else {
+                throw corruptLibraryError()
+            }
+            task.checkpointOrdinal = nil
+            task.checkpointCodecVersion = nil
+            task.checkpointPayload = nil
+            try removeFromActiveQueueIfNeeded(task: &task, in: db)
+            task.state = ImportTaskState.running.rawValue
+            task.revision += 1
+            try task.update(db)
+            let snapshot = try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: nil
+            )
+            guard snapshot.checkpoint == nil,
+                  snapshot.checkpointArtifact == nil
+            else {
+                throw corruptLibraryError()
+            }
+            return CheckpointArtifactRemoval(
+                snapshot: snapshot,
+                cleanup: cleanup
+            )
         }
     }
 
@@ -330,7 +536,13 @@ final class LibraryDatabase: Sendable {
                 throw LocalLibraryError.unavailable
             }
             let stagedArtifact = try stagedArtifact(for: task, in: db)
-            _ = try task.snapshot(stagedArtifact: stagedArtifact)
+            _ = try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: try checkpointArtifact(
+                    for: task,
+                    in: db
+                )
+            )
             guard let state = ImportTaskState(rawValue: task.state),
                   let currentRevision = UInt64(exactly: task.revision)
             else {
@@ -637,6 +849,23 @@ final class LibraryDatabase: Sendable {
         }
     }
 
+    func ownedCheckpointPaths() throws -> Set<ManagedArtifactPath> {
+        try queue.read { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            let bundles = try publicationStateBundles(for: tasks, in: db)
+            let paths = try bundles.compactMap { bundle in
+                try bundle.checkpointArtifact.map {
+                    try checkpointPlacement($0).path
+                }
+            }
+            let owned = Set(paths)
+            guard owned.count == paths.count else {
+                throw corruptLibraryError()
+            }
+            return owned
+        }
+    }
+
     func ownedStagedArtifactPlacement(
         taskID: ImportTaskID,
         artifact: StagedArtifact
@@ -673,6 +902,38 @@ final class LibraryDatabase: Sendable {
         }
     }
 
+    func ownedCheckpointArtifactPlacement(
+        taskID: ImportTaskID,
+        artifact: ManagedCheckpointArtifact
+    ) throws -> CheckpointArtifactPlacement {
+        try queue.read { db in
+            guard let task = try ImportTaskRecord.fetchOne(
+                db,
+                key: taskID.rawValue.uuidString
+            ) else {
+                throw LocalLibraryError.unavailable
+            }
+            let staged = try stagedArtifact(for: task, in: db)
+            let record = try checkpointArtifact(for: task, in: db)
+            _ = try task.snapshot(
+                stagedArtifact: staged,
+                checkpointArtifact: record
+            )
+            guard let record,
+                  record.artifactID == artifact.rawValue.uuidString
+            else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            let placement = try checkpointPlacement(record)
+            guard placement.taskID == taskID,
+                  placement.artifact == artifact
+            else {
+                throw LocalLibraryError.artifactOwnershipViolation
+            }
+            return placement
+        }
+    }
+
     func storedOutcome(taskID: ImportTaskID) throws -> PublicationOutcome? {
         try queue.read { db in
             let task = try ImportTaskRecord.fetchOne(
@@ -706,6 +967,10 @@ final class LibraryDatabase: Sendable {
             return try publicationPlacement(
                 task: task,
                 stagedRecord: stagedRecord,
+                checkpointRecord: try checkpointArtifact(
+                    for: task,
+                    in: db
+                ),
                 taskID: taskID,
                 candidate: candidate,
                 expectedRevision: expectedRevision
@@ -729,6 +994,10 @@ final class LibraryDatabase: Sendable {
             let placement = try publicationPlacement(
                 task: task,
                 stagedRecord: stagedRecord,
+                checkpointRecord: try checkpointArtifact(
+                    for: task,
+                    in: db
+                ),
                 taskID: taskID,
                 candidate: candidate,
                 expectedRevision: expectedRevision
@@ -818,6 +1087,10 @@ final class LibraryDatabase: Sendable {
             let placement = try publicationPlacement(
                 task: task,
                 stagedRecord: stagedRecord,
+                checkpointRecord: try checkpointArtifact(
+                    for: task,
+                    in: db
+                ),
                 taskID: taskID,
                 candidate: candidate,
                 expectedRevision: expectedRevision
@@ -971,7 +1244,13 @@ final class LibraryDatabase: Sendable {
             else {
                 throw corruptLibraryError()
             }
-            _ = try task.snapshot(stagedArtifact: stagedRecord)
+            _ = try task.snapshot(
+                stagedArtifact: stagedRecord,
+                checkpointArtifact: try checkpointArtifact(
+                    for: task,
+                    in: db
+                )
+            )
             guard task.state == ImportTaskState.publicationPending.rawValue,
                   task.stagedArtifactID == stagedRecord.artifactID,
                   task.stagedArtifactID
@@ -1071,14 +1350,27 @@ final class LibraryDatabase: Sendable {
             .fetchOne(db)
     }
 
+    private func checkpointArtifact(
+        for task: ImportTaskRecord,
+        in db: Database
+    ) throws -> CheckpointArtifactRecord? {
+        try CheckpointArtifactRecord
+            .filter(Column("task_id") == task.taskID)
+            .fetchOne(db)
+    }
+
     private func publicationPlacement(
         task: ImportTaskRecord,
         stagedRecord: StagedArtifactRecord?,
+        checkpointRecord: CheckpointArtifactRecord?,
         taskID: ImportTaskID,
         candidate: PublicationCandidate,
         expectedRevision: UInt64
     ) throws -> StagedArtifactPlacement {
-        _ = try task.snapshot(stagedArtifact: stagedRecord)
+        _ = try task.snapshot(
+            stagedArtifact: stagedRecord,
+            checkpointArtifact: checkpointRecord
+        )
         guard let persistedTaskID = UUID(uuidString: task.taskID),
               ImportTaskID(persistedTaskID) == taskID,
               let currentRevision = UInt64(exactly: task.revision)
@@ -1164,6 +1456,19 @@ final class LibraryDatabase: Sendable {
         guard orphanedHiddenDocumentCount == 0 else {
             throw corruptLibraryError()
         }
+        let orphanedCheckpointArtifactCount = try Int.fetchOne(
+            db,
+            sql: """
+                SELECT COUNT(*)
+                FROM checkpoint_artifacts AS artifact
+                LEFT JOIN import_tasks AS task
+                    ON task.task_id = artifact.task_id
+                WHERE task.task_id IS NULL
+                """
+        )
+        guard orphanedCheckpointArtifactCount == 0 else {
+            throw corruptLibraryError()
+        }
     }
 
     private func publicationStateBundles(
@@ -1177,8 +1482,13 @@ final class LibraryDatabase: Sendable {
         for task in tasks {
             let stagedArtifact = associations
                 .stagedArtifactsByTaskID[task.taskID]
+            let checkpointArtifact = associations
+                .checkpointArtifactsByTaskID[task.taskID]
             let intent = associations.intentsByTaskID[task.taskID]
-            let snapshot = try task.snapshot(stagedArtifact: stagedArtifact)
+            let snapshot = try task.snapshot(
+                stagedArtifact: stagedArtifact,
+                checkpointArtifact: checkpointArtifact
+            )
             let outcome = try task.storedOutcome()
             guard let state = ImportTaskState(rawValue: task.state) else {
                 throw corruptLibraryError()
@@ -1200,6 +1510,7 @@ final class LibraryDatabase: Sendable {
                 PreparedPublicationTask(
                     task: task,
                     stagedArtifact: stagedArtifact,
+                    checkpointArtifact: checkpointArtifact,
                     intent: intent,
                     snapshot: snapshot,
                     outcome: outcome,
@@ -1241,6 +1552,7 @@ final class LibraryDatabase: Sendable {
                 PublicationStateBundle(
                     task: item.task,
                     stagedArtifact: item.stagedArtifact,
+                    checkpointArtifact: item.checkpointArtifact,
                     snapshot: item.snapshot,
                     outcome: item.outcome
                 )
@@ -1505,6 +1817,47 @@ final class LibraryDatabase: Sendable {
                 placement.artifact.descriptor
             ),
             relativePath: placement.relativePath
+        )
+    }
+
+    private func checkpointArtifactRecord(
+        taskID: ImportTaskID,
+        placement: CheckpointArtifactPlacement
+    ) throws -> CheckpointArtifactRecord {
+        guard placement.taskID == taskID else {
+            throw corruptLibraryError()
+        }
+        return CheckpointArtifactRecord(
+            artifactID: placement.artifact.rawValue.uuidString,
+            taskID: taskID.rawValue.uuidString,
+            descriptorJSON: try DomainJSON.encode(
+                placement.artifact.descriptor
+            ),
+            relativePath: placement.relativePath
+        )
+    }
+
+    private func checkpointPlacement(
+        _ record: CheckpointArtifactRecord
+    ) throws -> CheckpointArtifactPlacement {
+        guard let taskUUID = UUID(uuidString: record.taskID),
+              taskUUID.uuidString == record.taskID,
+              let artifactUUID = UUID(uuidString: record.artifactID),
+              artifactUUID.uuidString == record.artifactID
+        else {
+            throw corruptLibraryError()
+        }
+        let descriptor = try DomainJSON.decode(
+            CheckpointArtifactDescriptor.self,
+            from: record.descriptorJSON
+        )
+        return try CheckpointArtifactPlacement(
+            taskID: ImportTaskID(taskUUID),
+            artifact: ManagedCheckpointArtifact(
+                rawValue: artifactUUID,
+                descriptor: descriptor
+            ),
+            relativePath: record.relativePath
         )
     }
 

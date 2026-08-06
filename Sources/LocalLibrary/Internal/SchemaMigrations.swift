@@ -142,6 +142,18 @@ enum SchemaMigrations {
             )
         }
 
+        migrator.registerMigration("v3_import_checkpoint_artifacts") { db in
+            try db.create(table: "checkpoint_artifacts") { table in
+                table.column("artifact_id", .text).primaryKey()
+                table.column("task_id", .text)
+                    .notNull()
+                    .unique()
+                    .references("import_tasks", onDelete: .cascade)
+                table.column("descriptor_json", .blob).notNull()
+                table.column("relative_path", .text).notNull()
+            }
+        }
+
         try migrator.migrate(database)
     }
 }

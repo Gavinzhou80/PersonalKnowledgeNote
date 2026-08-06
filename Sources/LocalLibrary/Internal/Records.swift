@@ -66,6 +66,26 @@ struct StagedArtifactRecord:
     }
 }
 
+struct CheckpointArtifactRecord:
+    Codable,
+    FetchableRecord,
+    PersistableRecord
+{
+    static let databaseTableName = "checkpoint_artifacts"
+
+    var artifactID: String
+    var taskID: String
+    var descriptorJSON: Data
+    var relativePath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case artifactID = "artifact_id"
+        case taskID = "task_id"
+        case descriptorJSON = "descriptor_json"
+        case relativePath = "relative_path"
+    }
+}
+
 struct SourceDocumentRecord:
     Codable,
     FetchableRecord,
@@ -247,7 +267,8 @@ extension ImportTaskState {
 
 extension ImportTaskRecord {
     func snapshot(
-        stagedArtifact: StagedArtifactRecord?
+        stagedArtifact: StagedArtifactRecord?,
+        checkpointArtifact: CheckpointArtifactRecord? = nil
     ) throws -> DurableImportSnapshot {
         guard let rawTaskID = UUID(uuidString: taskID),
               let rawJournalSequence = journalSequence,
@@ -270,6 +291,10 @@ extension ImportTaskRecord {
         )
         let failure = try decodeFailure(for: decodedState)
         let checkpoint = try decodeCheckpoint()
+        let managedCheckpointArtifact = try decodeCheckpointArtifact(
+            checkpointArtifact,
+            hasCheckpoint: checkpoint != nil
+        )
         let artifact = try decodeStagedArtifact(stagedArtifact)
         try validateOutcome(for: decodedState)
 
@@ -282,6 +307,7 @@ extension ImportTaskRecord {
             state: decodedState,
             failure: failure,
             checkpoint: checkpoint,
+            checkpointArtifact: managedCheckpointArtifact,
             stagedArtifact: artifact
         )
     }
@@ -371,6 +397,40 @@ extension ImportTaskRecord {
         default:
             throw corruptLibrary()
         }
+    }
+
+    private func decodeCheckpointArtifact(
+        _ record: CheckpointArtifactRecord?,
+        hasCheckpoint: Bool
+    ) throws -> ManagedCheckpointArtifact? {
+        guard let record else {
+            return nil
+        }
+        guard hasCheckpoint,
+              record.taskID == taskID,
+              let rawTaskID = UUID(uuidString: taskID),
+              rawTaskID.uuidString == taskID,
+              let rawArtifactID = UUID(uuidString: record.artifactID),
+              rawArtifactID.uuidString == record.artifactID,
+              try ManagedArtifactPath.parse(record.relativePath)
+                == .checkpoint(
+                    taskID: ImportTaskID(rawTaskID),
+                    artifactID: rawArtifactID
+                )
+        else {
+            throw corruptLibrary()
+        }
+        let descriptor = try DomainJSON.decode(
+            CheckpointArtifactDescriptor.self,
+            from: record.descriptorJSON
+        )
+        guard descriptor.byteCount > 0, !descriptor.contentHash.isEmpty else {
+            throw corruptLibrary()
+        }
+        return ManagedCheckpointArtifact(
+            rawValue: rawArtifactID,
+            descriptor: descriptor
+        )
     }
 
     private func validateOutcome(for state: ImportTaskState) throws {
