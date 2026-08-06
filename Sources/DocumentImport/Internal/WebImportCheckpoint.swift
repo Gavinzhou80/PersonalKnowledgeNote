@@ -1,3 +1,4 @@
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -7,6 +8,40 @@ import LocalLibrary
 enum WebImportCheckpointError: Error, Equatable, Sendable {
     case invalidPackage
     case cannotWrite
+}
+
+enum WebImportCheckpointWriteFaultPoint: Equatable, Sendable {
+    case afterCreatingPackageDirectory
+    case afterWritingPayload
+    case afterWritingMetadata
+    case afterVerifyingDescriptor
+}
+
+struct WebImportCheckpointWriteFaultInjector: Sendable {
+    static let none = Self { _, _ in }
+
+    private let body:
+        @Sendable (
+            WebImportCheckpointWriteFaultPoint,
+            URL
+        ) throws -> Void
+
+    init(
+        _ body:
+            @escaping @Sendable (
+                WebImportCheckpointWriteFaultPoint,
+                URL
+            ) throws -> Void
+    ) {
+        self.body = body
+    }
+
+    func hit(
+        _ point: WebImportCheckpointWriteFaultPoint,
+        packageURL: URL
+    ) throws {
+        try body(point, packageURL)
+    }
 }
 
 struct EncodedWebCheckpointPackage: Sendable {
@@ -223,6 +258,13 @@ enum WebImportCheckpointCodec {
     static func writeAcquired(
         _ page: AcquiredWebPage
     ) throws -> EncodedWebCheckpointPackage {
+        try writeAcquired(page, faultInjector: .none)
+    }
+
+    static func writeAcquired(
+        _ page: AcquiredWebPage,
+        faultInjector: WebImportCheckpointWriteFaultInjector
+    ) throws -> EncodedWebCheckpointPackage {
         do {
             try validate(page)
             guard page.bytes.count <= maximumPayloadByteCount else {
@@ -240,7 +282,8 @@ enum WebImportCheckpointCodec {
             return try writePackage(
                 payload: page.bytes,
                 payloadFilename: acquiredPayloadFilename,
-                metadata: metadata
+                metadata: metadata,
+                faultInjector: faultInjector
             )
         } catch let error as WebImportCheckpointError {
             throw error
@@ -266,7 +309,8 @@ enum WebImportCheckpointCodec {
             return try writePackage(
                 payload: payload,
                 payloadFilename: preparedPayloadFilename,
-                metadata: metadata
+                metadata: metadata,
+                faultInjector: .none
             )
         } catch let error as WebImportCheckpointError {
             throw error
@@ -344,7 +388,7 @@ enum WebImportCheckpointCodec {
                 byteCount: preparedMetadata.payloadByteCount,
                 sha256: preparedMetadata.payloadSHA256
             )
-            try validatePreparedTopLevelKeys(payload)
+            try PreparedWebPublicationWireValidator.validate(payload)
             let prepared = try jsonDecoder().decode(
                 PreparedWebPublication.self,
                 from: payload
@@ -381,7 +425,8 @@ enum WebImportCheckpointCodec {
     private static func writePackage(
         payload: Data,
         payloadFilename: String,
-        metadata: WebImportCheckpointMetadata
+        metadata: WebImportCheckpointMetadata,
+        faultInjector: WebImportCheckpointWriteFaultInjector
     ) throws -> EncodedWebCheckpointPackage {
         let packageURL = FileManager.default.temporaryDirectory.appending(
             path: "WebImportCheckpoint-\(UUID().uuidString)"
@@ -391,6 +436,10 @@ enum WebImportCheckpointCodec {
                 at: packageURL,
                 withIntermediateDirectories: false
             )
+            try faultInjector.hit(
+                .afterCreatingPackageDirectory,
+                packageURL: packageURL
+            )
             let metadataData = try jsonEncoder().encode(metadata)
             guard metadataData.count <= maximumMetadataByteCount else {
                 throw WebImportCheckpointError.invalidPackage
@@ -398,12 +447,24 @@ enum WebImportCheckpointCodec {
             let payloadURL = packageURL.appending(path: payloadFilename)
             let metadataURL = packageURL.appending(path: metadataFilename)
             try payload.write(to: payloadURL, options: [.atomic])
+            try faultInjector.hit(
+                .afterWritingPayload,
+                packageURL: packageURL
+            )
             try metadataData.write(to: metadataURL, options: [.atomic])
+            try faultInjector.hit(
+                .afterWritingMetadata,
+                packageURL: packageURL
+            )
             try synchronizeFile(payloadURL)
             try synchronizeFile(metadataURL)
             try synchronizeDirectory(packageURL)
             let verified = try LocalLibrary.loadUnmanagedCheckpointPackage(
                 at: packageURL
+            )
+            try faultInjector.hit(
+                .afterVerifyingDescriptor,
+                packageURL: packageURL
             )
             return EncodedWebCheckpointPackage(
                 url: packageURL,
@@ -487,20 +548,6 @@ enum WebImportCheckpointCodec {
         }
     }
 
-    private static func validatePreparedTopLevelKeys(_ data: Data) throws {
-        try StrictJSONValidator.validate(data)
-        guard
-            let object = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-            Set(object.keys) == [
-                "documentID", "fingerprint", "document", "originalSource",
-                "stagedArtifactID", "stagedDescriptor", "issues",
-            ]
-        else {
-            throw WebImportCheckpointError.invalidPackage
-        }
-    }
-
     private static func jsonEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -542,6 +589,294 @@ enum WebImportCheckpointCodec {
         defer { _ = close(descriptor) }
         guard fsync(descriptor) == 0 else {
             throw WebImportCheckpointError.cannotWrite
+        }
+    }
+}
+
+private enum PreparedWebPublicationWireValidator {
+    static func validate(_ data: Data) throws {
+        try StrictJSONValidator.validate(data)
+        let root = try object(
+            JSONSerialization.jsonObject(with: data),
+            required: [
+                "documentID", "fingerprint", "document", "originalSource",
+                "stagedArtifactID", "stagedDescriptor", "issues",
+            ]
+        )
+        try identifier(root["documentID"])
+        try fingerprint(root["fingerprint"])
+        try document(root["document"])
+        try originalSource(root["originalSource"])
+        try string(root["stagedArtifactID"])
+        try descriptor(root["stagedDescriptor"])
+        try issues(root["issues"])
+    }
+
+    private static func identifier(_ value: Any?) throws {
+        let value = try object(value, required: ["rawValue"])
+        try string(value["rawValue"])
+    }
+
+    private static func fingerprint(_ value: Any?) throws {
+        let value = try object(value, required: ["rawValue"])
+        try string(value["rawValue"])
+    }
+
+    private static func document(_ value: Any?) throws {
+        let value = try object(
+            value,
+            required: [
+                "documentID", "importedMetadata", "blocks", "structure",
+                "evidence", "issues",
+            ]
+        )
+        try identifier(value["documentID"])
+        try importedMetadata(value["importedMetadata"])
+        for block in try array(value["blocks"]) {
+            try sourceBlock(block)
+        }
+        try structure(value["structure"])
+        try evidence(value["evidence"])
+        try issues(value["issues"])
+    }
+
+    private static func importedMetadata(_ value: Any?) throws {
+        let value = try object(
+            value,
+            required: ["title"],
+            optional: ["author", "publishedAt"]
+        )
+        try string(value["title"])
+        if let author = value["author"] {
+            try string(author)
+        }
+        if let publishedAt = value["publishedAt"] {
+            try number(publishedAt)
+        }
+    }
+
+    private static func sourceBlock(_ value: Any) throws {
+        let value = try object(
+            value,
+            required: [
+                "id", "canonicalText", "category", "role", "inlineMarkup",
+            ],
+            optional: ["media"]
+        )
+        try identifier(value["id"])
+        try string(value["canonicalText"])
+        try string(value["category"])
+        try blockRole(value["role"])
+        for markup in try array(value["inlineMarkup"]) {
+            try inlineMarkup(markup)
+        }
+        if let media = value["media"] {
+            try mediaReference(media)
+        }
+    }
+
+    private static func blockRole(_ value: Any?) throws {
+        let base = try object(
+            value,
+            required: ["type"],
+            optional: ["level", "language"]
+        )
+        let type = try stringValue(base["type"])
+        switch type {
+        case "heading":
+            try exactKeys(base, required: ["type", "level"])
+            try integer(base["level"])
+        case "codeBlock":
+            try exactKeys(
+                base,
+                required: ["type"],
+                optional: ["language"]
+            )
+            if let language = base["language"] {
+                try string(language)
+            }
+        case "paragraph", "listItem", "quotation", "image", "caption":
+            try exactKeys(base, required: ["type"])
+        default:
+            throw WebImportCheckpointError.invalidPackage
+        }
+    }
+
+    private static func inlineMarkup(_ value: Any) throws {
+        let value = try object(value, required: ["range", "kind"])
+        let range = try object(
+            value["range"],
+            required: ["utf16Offset", "utf16Length"]
+        )
+        try integer(range["utf16Offset"])
+        try integer(range["utf16Length"])
+        try inlineMarkupKind(value["kind"])
+    }
+
+    private static func inlineMarkupKind(_ value: Any?) throws {
+        let base = try object(
+            value,
+            required: ["type"],
+            optional: ["url"]
+        )
+        let type = try stringValue(base["type"])
+        switch type {
+        case "link":
+            try exactKeys(base, required: ["type", "url"])
+            try string(base["url"])
+        case "citation":
+            try exactKeys(base, required: ["type"], optional: ["url"])
+            if let url = base["url"] {
+                try string(url)
+            }
+        case "emphasis", "strong", "inlineCode":
+            try exactKeys(base, required: ["type"])
+        default:
+            throw WebImportCheckpointError.invalidPackage
+        }
+    }
+
+    private static func mediaReference(_ value: Any) throws {
+        let value = try object(
+            value,
+            required: ["kind", "artifactRelativePath", "mimeType"],
+            optional: ["altText", "pixelWidth", "pixelHeight"]
+        )
+        try string(value["kind"])
+        try string(value["artifactRelativePath"])
+        try string(value["mimeType"])
+        if let altText = value["altText"] {
+            try string(altText)
+        }
+        if let width = value["pixelWidth"] {
+            try integer(width)
+        }
+        if let height = value["pixelHeight"] {
+            try integer(height)
+        }
+    }
+
+    private static func structure(_ value: Any?) throws {
+        let value = try object(
+            value,
+            required: ["orderedBlockIDs", "relations"]
+        )
+        for identifierValue in try array(value["orderedBlockIDs"]) {
+            try identifier(identifierValue)
+        }
+        for relationValue in try array(value["relations"]) {
+            let relation = try object(
+                relationValue,
+                required: ["sourceBlockID", "targetBlockID", "kind"]
+            )
+            try identifier(relation["sourceBlockID"])
+            try identifier(relation["targetBlockID"])
+            try string(relation["kind"])
+        }
+    }
+
+    private static func evidence(_ value: Any?) throws {
+        let values = try array(value)
+        guard values.count.isMultiple(of: 2) else {
+            throw WebImportCheckpointError.invalidPackage
+        }
+        var index = 0
+        while index < values.count {
+            try identifier(values[index])
+            let wrapper = try object(values[index + 1], required: ["web"])
+            let web = try object(wrapper["web"], required: ["locator"])
+            try string(web["locator"])
+            index += 2
+        }
+    }
+
+    private static func issues(_ value: Any?) throws {
+        for issueValue in try array(value) {
+            let issue = try object(
+                issueValue,
+                required: ["code"],
+                optional: ["relatedBlockID"]
+            )
+            try string(issue["code"])
+            if let relatedBlockID = issue["relatedBlockID"] {
+                try identifier(relatedBlockID)
+            }
+        }
+    }
+
+    private static func originalSource(_ value: Any?) throws {
+        let wrapper = try object(value, required: ["webpage"])
+        let webpage = try object(wrapper["webpage"], required: ["_0"])
+        try string(webpage["_0"])
+    }
+
+    private static func descriptor(_ value: Any?) throws {
+        let value = try object(
+            value,
+            required: ["kind", "byteCount", "contentHash"]
+        )
+        try string(value["kind"])
+        try integer(value["byteCount"])
+        try string(value["contentHash"])
+    }
+
+    private static func object(
+        _ value: Any?,
+        required: Set<String>,
+        optional: Set<String> = []
+    ) throws -> [String: Any] {
+        guard let value = value as? [String: Any] else {
+            throw WebImportCheckpointError.invalidPackage
+        }
+        try exactKeys(value, required: required, optional: optional)
+        return value
+    }
+
+    private static func exactKeys(
+        _ object: [String: Any],
+        required: Set<String>,
+        optional: Set<String> = []
+    ) throws {
+        let keys = Set(object.keys)
+        guard required.isSubset(of: keys),
+            keys.isSubset(of: required.union(optional))
+        else {
+            throw WebImportCheckpointError.invalidPackage
+        }
+    }
+
+    private static func array(_ value: Any?) throws -> [Any] {
+        guard let value = value as? [Any] else {
+            throw WebImportCheckpointError.invalidPackage
+        }
+        return value
+    }
+
+    private static func string(_ value: Any?) throws {
+        _ = try stringValue(value)
+    }
+
+    private static func stringValue(_ value: Any?) throws -> String {
+        guard let value = value as? String else {
+            throw WebImportCheckpointError.invalidPackage
+        }
+        return value
+    }
+
+    private static func integer(_ value: Any?) throws {
+        guard let value = value as? NSNumber,
+            CFGetTypeID(value) != CFBooleanGetTypeID(),
+            value.doubleValue.rounded(.towardZero) == value.doubleValue
+        else {
+            throw WebImportCheckpointError.invalidPackage
+        }
+    }
+
+    private static func number(_ value: Any?) throws {
+        guard let value = value as? NSNumber,
+            CFGetTypeID(value) != CFBooleanGetTypeID()
+        else {
+            throw WebImportCheckpointError.invalidPackage
         }
     }
 }

@@ -74,6 +74,30 @@ struct URLSessionStaticWebAcquirerTests {
         #expect(page.textEncodingName == expectedCharset)
     }
 
+    @Test(arguments: [
+        ("UTF-8", "utf-8"),
+        ("Shift_JIS", "shift_jis"),
+        ("X.Custom+Future", "x.custom+future"),
+        ("X!#$%&'*+-.^_`|~", "x!#$%&'*+-.^_`|~"),
+    ])
+    func charsetTokenNormalizationAcceptsOnlyNormalizedHTTPTokenCharacters(
+        input: String,
+        expected: String
+    ) {
+        #expect(normalizedWebCharsetName(input) == expected)
+    }
+
+    @Test(arguments: [
+        "", " utf-8", "utf-8 ", "utf 8", "utf\t8", "utf\n8",
+        "utf\u{0}8", "utf\u{1f}8", "utf\u{7f}8", "\"utf-8\"",
+        "utf/8", "utf;8", "utf=8", "utf(8)", "utf,8", "é",
+    ])
+    func charsetTokenNormalizationRejectsWhitespaceControlsAndSeparators(
+        input: String
+    ) {
+        #expect(normalizedWebCharsetName(input) == nil)
+    }
+
     @Test
     func mapsForbiddenResponseToAccessDenied() async throws {
         let server = try await LocalHTTPFixtureServer.start { _ in

@@ -36,6 +36,15 @@ struct WebImportCheckpointTests {
     }
 
     @Test
+    func preparedWireSchemaAcceptsAllCurrentWebDocumentValueShapes() throws {
+        let prepared = makeRichPreparedWebPublication()
+        let package = try WebImportCheckpointCodec.writePrepared(prepared)
+        defer { try? FileManager.default.removeItem(at: package.url) }
+
+        #expect(try WebImportCheckpointCodec.readPrepared(at: package.url) == prepared)
+    }
+
+    @Test
     func checkpointPackagesUseExactRootLayoutsAndDeterministicMetadata() throws {
         let page = AcquiredWebPage(
             sourceURL: URL(string: "https://example.test/start")!,
@@ -310,6 +319,43 @@ struct WebImportCheckpointTests {
     }
 
     @Test(arguments: [
+        " utf-8", "utf-8 ", "utf 8", "utf\t8", "utf\n8", "utf\u{0}8",
+        "utf\u{1f}8", "utf\u{7f}8", "\"utf-8\"", "utf/8", "utf;8",
+        "utf=8", "utf(8)", "utf,8", "é",
+    ])
+    func acquiredReaderRejectsInvalidPersistedCharsetTokens(
+        charset: String
+    ) throws {
+        let package = try WebImportCheckpointCodec.writeAcquired(makeAcquiredPage())
+        defer { try? FileManager.default.removeItem(at: package.url) }
+        try mutateMetadata(at: package.url) { metadata in
+            metadata["textEncodingName"] = charset
+        }
+
+        #expect(throws: WebImportCheckpointError.self) {
+            try WebImportCheckpointCodec.readAcquired(at: package.url)
+        }
+    }
+
+    @Test(arguments: ["Shift_JIS", "X-Custom.Future+1"])
+    func acquiredCheckpointPersistsNormalizedValidCharsetTokens(
+        charset: String
+    ) throws {
+        let page = AcquiredWebPage(
+            sourceURL: URL(string: "https://example.test/source")!,
+            finalURL: URL(string: "https://example.test/final")!,
+            mimeType: "text/html",
+            textEncodingName: charset,
+            bytes: Data("<html></html>".utf8)
+        )
+        let package = try WebImportCheckpointCodec.writeAcquired(page)
+        defer { try? FileManager.default.removeItem(at: package.url) }
+
+        #expect(try WebImportCheckpointCodec.readAcquired(at: package.url) == page)
+        #expect(page.textEncodingName == charset.lowercased())
+    }
+
+    @Test(arguments: [
         AcquiredWebPage(
             sourceURL: URL(fileURLWithPath: "/tmp/source"),
             finalURL: URL(string: "https://example.test/final")!,
@@ -346,6 +392,34 @@ struct WebImportCheckpointTests {
             try WebImportCheckpointCodec.writeAcquired(oversized)
         }
         #expect(try checkpointTemporaryPackageNames() == before)
+    }
+
+    @Test(arguments: [
+        WebImportCheckpointWriteFaultPoint.afterCreatingPackageDirectory,
+        .afterWritingPayload,
+        .afterWritingMetadata,
+        .afterVerifyingDescriptor,
+    ])
+    func writerFailuresRemoveTheEntireTemporaryPackage(
+        point: WebImportCheckpointWriteFaultPoint
+    ) throws {
+        let recordedURL = RecordedCheckpointPackageURL()
+        let injector = WebImportCheckpointWriteFaultInjector {
+            observedPoint, packageURL in
+            recordedURL.record(packageURL)
+            if observedPoint == point {
+                throw InjectedWebCheckpointWriteFailure.failed
+            }
+        }
+
+        #expect(throws: WebImportCheckpointError.self) {
+            try WebImportCheckpointCodec.writeAcquired(
+                makeAcquiredPage(),
+                faultInjector: injector
+            )
+        }
+        let packageURL = try #require(recordedURL.value)
+        #expect(!FileManager.default.fileExists(atPath: packageURL.path))
     }
 
     @Test
@@ -408,6 +482,61 @@ struct WebImportCheckpointTests {
         }
     }
 
+    enum NestedPreparedUnknownField: Equatable, Sendable {
+        case document
+        case importedMetadata
+        case block
+        case blockIdentifier
+        case structure
+        case orderedBlockIdentifier
+        case evidenceIdentifier
+        case evidenceWrapper
+        case evidencePayload
+        case fingerprint
+        case descriptor
+        case originalSourceWrapper
+        case originalSourcePayload
+        case documentIssue
+        case documentIssueReference
+        case publicationIssue
+        case publicationIssueReference
+    }
+
+    @Test(arguments: [
+        NestedPreparedUnknownField.document,
+        .importedMetadata,
+        .block,
+        .blockIdentifier,
+        .structure,
+        .orderedBlockIdentifier,
+        .evidenceIdentifier,
+        .evidenceWrapper,
+        .evidencePayload,
+        .fingerprint,
+        .descriptor,
+        .originalSourceWrapper,
+        .originalSourcePayload,
+        .documentIssue,
+        .documentIssueReference,
+        .publicationIssue,
+        .publicationIssueReference,
+    ])
+    func preparedReaderRejectsUnknownFieldsAtEveryNestedWireLevel(
+        location: NestedPreparedUnknownField
+    ) throws {
+        let package = try WebImportCheckpointCodec.writePrepared(
+            makePreparedWebPublication()
+        )
+        defer { try? FileManager.default.removeItem(at: package.url) }
+        try replaceCandidate(in: package.url) { candidate in
+            try injectUnknownPreparedField(at: location, into: &candidate)
+        }
+
+        #expect(throws: WebImportCheckpointError.self) {
+            try WebImportCheckpointCodec.readPrepared(at: package.url)
+        }
+    }
+
     @Test
     func preparedReaderRejectsCorruptAndOversizedCandidatePayloads() throws {
         do {
@@ -448,6 +577,135 @@ struct WebImportCheckpointTests {
         }
     }
 
+}
+
+private enum InjectedWebCheckpointWriteFailure: Error {
+    case failed
+}
+
+private final class RecordedCheckpointPackageURL: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: URL?
+
+    var value: URL? {
+        lock.withLock { stored }
+    }
+
+    func record(_ url: URL) {
+        lock.withLock { stored = url }
+    }
+}
+
+private func injectUnknownPreparedField(
+    at location: WebImportCheckpointTests.NestedPreparedUnknownField,
+    into candidate: inout [String: Any]
+) throws {
+    switch location {
+    case .fingerprint, .descriptor, .originalSourceWrapper,
+        .originalSourcePayload, .publicationIssue,
+        .publicationIssueReference:
+        switch location {
+        case .fingerprint:
+            var value = try #require(candidate["fingerprint"] as? [String: Any])
+            value["unknown"] = true
+            candidate["fingerprint"] = value
+        case .descriptor:
+            var value = try #require(candidate["stagedDescriptor"] as? [String: Any])
+            value["unknown"] = true
+            candidate["stagedDescriptor"] = value
+        case .originalSourceWrapper, .originalSourcePayload:
+            var source = try #require(candidate["originalSource"] as? [String: Any])
+            if location == .originalSourceWrapper {
+                source["unknown"] = true
+            } else {
+                var webpage = try #require(source["webpage"] as? [String: Any])
+                webpage["unknown"] = true
+                source["webpage"] = webpage
+            }
+            candidate["originalSource"] = source
+        case .publicationIssue, .publicationIssueReference:
+            var issues = try #require(candidate["issues"] as? [[String: Any]])
+            if location == .publicationIssue {
+                issues[0]["unknown"] = true
+            } else {
+                var reference = try #require(
+                    issues[0]["relatedBlockID"] as? [String: Any]
+                )
+                reference["unknown"] = true
+                issues[0]["relatedBlockID"] = reference
+            }
+            candidate["issues"] = issues
+        default:
+            break
+        }
+    default:
+        var document = try #require(candidate["document"] as? [String: Any])
+        switch location {
+        case .document:
+            document["unknown"] = true
+        case .importedMetadata:
+            var metadata = try #require(
+                document["importedMetadata"] as? [String: Any]
+            )
+            metadata["unknown"] = true
+            document["importedMetadata"] = metadata
+        case .block, .blockIdentifier:
+            var blocks = try #require(document["blocks"] as? [[String: Any]])
+            if location == .block {
+                blocks[0]["unknown"] = true
+            } else {
+                var identifier = try #require(blocks[0]["id"] as? [String: Any])
+                identifier["unknown"] = true
+                blocks[0]["id"] = identifier
+            }
+            document["blocks"] = blocks
+        case .structure, .orderedBlockIdentifier:
+            var structure = try #require(document["structure"] as? [String: Any])
+            if location == .structure {
+                structure["unknown"] = true
+            } else {
+                var identifiers = try #require(
+                    structure["orderedBlockIDs"] as? [[String: Any]]
+                )
+                identifiers[0]["unknown"] = true
+                structure["orderedBlockIDs"] = identifiers
+            }
+            document["structure"] = structure
+        case .evidenceIdentifier, .evidenceWrapper, .evidencePayload:
+            var evidence = try #require(document["evidence"] as? [Any])
+            if location == .evidenceIdentifier {
+                var identifier = try #require(evidence[0] as? [String: Any])
+                identifier["unknown"] = true
+                evidence[0] = identifier
+            } else {
+                var wrapper = try #require(evidence[1] as? [String: Any])
+                if location == .evidenceWrapper {
+                    wrapper["unknown"] = true
+                } else {
+                    var web = try #require(wrapper["web"] as? [String: Any])
+                    web["unknown"] = true
+                    wrapper["web"] = web
+                }
+                evidence[1] = wrapper
+            }
+            document["evidence"] = evidence
+        case .documentIssue, .documentIssueReference:
+            var issues = try #require(document["issues"] as? [[String: Any]])
+            if location == .documentIssue {
+                issues[0]["unknown"] = true
+            } else {
+                var reference = try #require(
+                    issues[0]["relatedBlockID"] as? [String: Any]
+                )
+                reference["unknown"] = true
+                issues[0]["relatedBlockID"] = reference
+            }
+            document["issues"] = issues
+        default:
+            break
+        }
+        candidate["document"] = document
+    }
 }
 
 private func makeAcquiredPage() -> AcquiredWebPage {
@@ -504,6 +762,110 @@ private func makePreparedWebPublication() -> PreparedWebPublication {
             kind: .webPackage,
             byteCount: 42,
             contentHash: String(repeating: "a", count: 64)
+        ),
+        issues: [issue]
+    )
+}
+
+private func makeRichPreparedWebPublication() -> PreparedWebPublication {
+    let documentID = SourceDocumentID(
+        UUID(uuidString: "aaaaaaaa-1111-1111-1111-111111111111")!
+    )
+    let headingID = SourceBlockID(
+        UUID(uuidString: "aaaaaaaa-2222-2222-2222-222222222222")!
+    )
+    let paragraphID = SourceBlockID(
+        UUID(uuidString: "aaaaaaaa-3333-3333-3333-333333333333")!
+    )
+    let imageID = SourceBlockID(
+        UUID(uuidString: "aaaaaaaa-4444-4444-4444-444444444444")!
+    )
+    let captionID = SourceBlockID(
+        UUID(uuidString: "aaaaaaaa-5555-5555-5555-555555555555")!
+    )
+    let issue = KnowledgeCore.ImportIssue(
+        code: .optionalWebImageUnavailable,
+        relatedBlockID: imageID
+    )
+    let content = SourceDocumentContent(
+        documentID: documentID,
+        importedMetadata: ImportedDocumentMetadata(
+            title: "Rich prepared fixture",
+            author: nil,
+            publishedAt: nil
+        ),
+        blocks: [
+            SourceBlock(
+                id: headingID,
+                canonicalText: "Heading",
+                role: .heading(level: 2)
+            ),
+            SourceBlock(
+                id: paragraphID,
+                canonicalText: "Link text",
+                inlineMarkup: [
+                    InlineMarkup(
+                        range: SourceTextRange(utf16Offset: 0, utf16Length: 4),
+                        kind: .link(URL(string: "https://example.test/link")!)
+                    ),
+                    InlineMarkup(
+                        range: SourceTextRange(utf16Offset: 5, utf16Length: 4),
+                        kind: .citation(nil)
+                    ),
+                ]
+            ),
+            SourceBlock(
+                id: imageID,
+                canonicalText: "Alt",
+                category: .media,
+                role: .image,
+                media: SourceMediaReference(
+                    kind: .image,
+                    artifactRelativePath: "assets/image.png",
+                    mimeType: "image/png",
+                    altText: "Alt",
+                    pixelWidth: 10,
+                    pixelHeight: 20
+                )
+            ),
+            SourceBlock(
+                id: captionID,
+                canonicalText: "Caption",
+                role: .caption
+            ),
+        ],
+        structure: SourceStructure(
+            orderedBlockIDs: [headingID, paragraphID, imageID, captionID],
+            relations: [
+                SourceRelation(
+                    sourceBlockID: captionID,
+                    targetBlockID: imageID,
+                    kind: .captionForMedia
+                )
+            ]
+        ),
+        evidence: [
+            headingID: .web(locator: "#heading"),
+            paragraphID: .web(locator: "#paragraph"),
+            imageID: .web(locator: "#image"),
+            captionID: .web(locator: "#caption"),
+        ],
+        issues: [issue]
+    )
+    return PreparedWebPublication(
+        documentID: documentID,
+        fingerprint: ContentFingerprint(String(repeating: "b", count: 64)),
+        document: content,
+        originalSource: .webpage(
+            URL(string: "https://example.test/rich")!
+        ),
+        stagedArtifactID: UUID(
+            uuidString: "aaaaaaaa-6666-6666-6666-666666666666"
+        )!,
+        stagedDescriptor: SourceArtifactDescriptor(
+            kind: .webPackage,
+            byteCount: 1_024,
+            contentHash: String(repeating: "c", count: 64)
         ),
         issues: [issue]
     )

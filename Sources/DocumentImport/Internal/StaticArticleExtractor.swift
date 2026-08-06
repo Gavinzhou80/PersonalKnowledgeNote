@@ -129,15 +129,18 @@ struct StaticArticleExtractor: Sendable {
         if let decoded = String(data: data, encoding: .utf8) {
             return decoded
         }
-        guard let metaCharset = html5MetaCharset(in: data),
-              let encoding = stringEncoding(for: metaCharset)
-        else {
-            return nil
+        for charset in html5MetaCharsets(in: data) {
+            guard let encoding = stringEncoding(for: charset),
+                  let decoded = String(data: data, encoding: encoding)
+            else {
+                continue
+            }
+            return decoded
         }
-        return String(data: data, encoding: encoding)
+        return nil
     }
 
-    private func html5MetaCharset(in data: Data) -> String? {
+    private func html5MetaCharsets(in data: Data) -> [String] {
         let prefix = data.prefix(1_024)
         let ascii = String(prefix.map { byte in
             byte < 0x80 ? Character(UnicodeScalar(byte)) : " "
@@ -145,28 +148,72 @@ struct StaticArticleExtractor: Sendable {
         guard let metaExpression = try? NSRegularExpression(
             pattern: #"<meta\b[^>]*>"#,
             options: [.caseInsensitive]
-        ), let charsetExpression = try? NSRegularExpression(
-            pattern: #"charset\s*=\s*[\"']?\s*([a-z0-9._:-]+)"#,
-            options: [.caseInsensitive]
         ) else {
-            return nil
+            return []
         }
         let fullRange = NSRange(ascii.startIndex..., in: ascii)
+        var charsets: [String] = []
         for match in metaExpression.matches(
             in: ascii,
             range: fullRange
         ) {
             let tag = (ascii as NSString).substring(with: match.range)
-            let tagRange = NSRange(location: 0, length: (tag as NSString).length)
-            guard let charsetMatch = charsetExpression.firstMatch(
-                in: tag,
-                range: tagRange
-            ), charsetMatch.numberOfRanges == 2 else {
+            let attributes = metaAttributes(in: tag)
+            if let charset = attributes["charset"] {
+                charsets.append(charset)
                 continue
             }
-            return normalizedWebCharsetName(
-                (tag as NSString).substring(with: charsetMatch.range(at: 1))
+            guard attributes["http-equiv"]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() == "content-type",
+                  let content = attributes["content"],
+                  let charset = pragmaCharset(in: content)
+            else {
+                continue
+            }
+            charsets.append(charset)
+        }
+        return charsets
+    }
+
+    private func metaAttributes(in tag: String) -> [String: String] {
+        guard let expression = try? NSRegularExpression(
+            pattern: #"([a-z_:][a-z0-9_.:-]*)\s*(?:=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+)))?"#,
+            options: [.caseInsensitive]
+        ) else {
+            return [:]
+        }
+        let source = tag as NSString
+        let range = NSRange(location: 0, length: source.length)
+        var attributes: [String: String] = [:]
+        for match in expression.matches(in: tag, range: range) {
+            guard match.numberOfRanges == 5 else { continue }
+            let name = source.substring(with: match.range(at: 1)).lowercased()
+            guard name != "meta", attributes[name] == nil else { continue }
+            let valueRange = (2...4)
+                .map { match.range(at: $0) }
+                .first { $0.location != NSNotFound }
+            attributes[name] = valueRange.map(source.substring(with:)) ?? ""
+        }
+        return attributes
+    }
+
+    private func pragmaCharset(in content: String) -> String? {
+        for parameter in content.split(separator: ";", omittingEmptySubsequences: false) {
+            let parts = parameter.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
             )
+            guard parts.count == 2,
+                  parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() == "charset"
+            else {
+                continue
+            }
+            return parts[1]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
         }
         return nil
     }
