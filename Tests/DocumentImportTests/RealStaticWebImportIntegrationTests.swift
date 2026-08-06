@@ -378,12 +378,13 @@ struct RealStaticWebImportIntegrationTests {
         }
         defer { server.stop() }
         let request = Task { try await URLSession.shared.data(from: server.url("gated")) }
+        defer { request.cancel() }
         try await gate.waitUntilBlocked(timeout: .seconds(1))
 
         server.stop()
 
         await #expect(throws: (any Error).self) {
-            try await request.value
+            try await taskValue(request, timeout: .seconds(1))
         }
         try await server.waitUntilNoRetainedConnectionsForTesting(timeout: .seconds(1))
         try await server.waitUntilNoResponseTasksForTesting(timeout: .seconds(1))
@@ -474,6 +475,29 @@ struct RealStaticWebImportIntegrationTests {
             #expect(gate.pendingWaiterCount == 0)
             #expect(gate.preCancelledWaiterCount == 0)
         }
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func responseRegistrationHookIsOneShotAndDoesNotRetainStoppedServer() async throws {
+        weak var weakServer: LocalHTTPFixtureServer?
+        do {
+            let server = try await LocalHTTPFixtureServer.start { _ in
+                .init(headers: ["Content-Type": "text/html"])
+            }
+            weakServer = server
+            server.setBeforeResponseTaskRegistrationForTesting {
+                server.removeOwnedConnectionsForTesting()
+            }
+            #expect(server.hasResponseTaskRegistrationHookForTesting)
+
+            server.stop()
+
+            #expect(!server.hasResponseTaskRegistrationHookForTesting)
+        }
+        for _ in 0..<20 where weakServer != nil {
+            await Task.yield()
+        }
+        #expect(weakServer == nil)
     }
 }
 

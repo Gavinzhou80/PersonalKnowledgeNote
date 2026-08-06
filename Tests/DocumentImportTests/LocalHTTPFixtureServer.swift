@@ -117,6 +117,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             [DrainWaiter],
             [DrainWaiter]
         ) = lock.withLock {
+            beforeResponseTaskRegistrationForTesting = nil
             guard !stopped else { return ([], [], [], []) }
             stopped = true
             let connectionsToCancel = connections
@@ -194,6 +195,10 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         }
     }
 
+    var hasResponseTaskRegistrationHookForTesting: Bool {
+        lock.withLock { beforeResponseTaskRegistrationForTesting != nil }
+    }
+
     func waitUntilNoRetainedConnectionsForTesting(
         timeout: Duration = .seconds(5)
     ) async throws {
@@ -242,7 +247,12 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             .split(separator: " ").dropFirst().first.map(String.init) ?? "/"
         let response = handler(path)
         monitorPeerClosure(on: connection)
-        lock.withLock { beforeResponseTaskRegistrationForTesting }?()
+        let registrationHook = lock.withLock {
+            let hook = beforeResponseTaskRegistrationForTesting
+            beforeResponseTaskRegistrationForTesting = nil
+            return hook
+        }
+        registrationHook?()
 
         let taskID = UUID()
         let handle = ResponseTaskHandle()
