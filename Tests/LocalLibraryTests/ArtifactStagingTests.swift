@@ -85,7 +85,7 @@ func webPackageIsCopiedIntoTaskOwnedStaging() async throws {
 }
 
 @Test
-func documentImportUsesLocalLibraryDescriptorAuthority() async throws {
+func describedWebPackageMatchesStagedDescriptorAuthority() async throws {
     let temporaryRoot = try makeTemporaryLibraryRoot()
     defer { removeTemporaryLibraryRoot(temporaryRoot) }
     let libraryRoot = temporaryRoot.appending(path: "Library")

@@ -1,5 +1,6 @@
 import Foundation
 import KnowledgeCore
+import LocalLibrary
 import TestFixtures
 import Testing
 @testable import DocumentImport
@@ -61,6 +62,10 @@ func staticFixtureBuildsDeterministicManagedWebContent() throws {
     )
     #expect(first.descriptor == second.descriptor)
     #expect(first.document.artifact == first.descriptor)
+    let authoritativeDescriptor = try LocalLibrary.describeWebPackage(
+        at: first.packageURL
+    )
+    #expect(first.descriptor == authoritativeDescriptor)
 
     let alternatePage = AcquiredWebPage(
         sourceURL: try #require(

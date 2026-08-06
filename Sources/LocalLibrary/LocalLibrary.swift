@@ -28,7 +28,7 @@ public actor LocalLibrary {
         )
     }
 
-    public static func describeWebPackage(
+    package static func describeWebPackage(
         at packageURL: URL
     ) throws -> SourceArtifactDescriptor {
         try withLocalLibraryErrorTranslation {
