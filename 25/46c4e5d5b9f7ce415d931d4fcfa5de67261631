@@ -1,0 +1,31 @@
+Tests/DocumentImportTests/StaticArticleExtractorTests.swift
+  s_413052984bbc8e::t_2b45a476670d49 3,355-371,373,375-425
+  s_413052984bbc8e::t_12afb19fa69f8d 372,374
+Sources/DocumentImport/Internal/StaticArticleExtractor.swift
+  s_413052984bbc8e::t_25d33f6ea31414 212-226,302-306,311-316,426-428
+  s_413052984bbc8e::t_3d152b69fd707c 332,334,356,358,371,458-461,463-478,485-492,494-501
+  s_413052984bbc8e::t_e67e9587d0feb1 366-369,462,482
+  s_413052984bbc8e::t_d171b903d92a29 333,357,479-481
+  s_413052984bbc8e::t_7ff2d0fb281c14 493,541-542,550,556-560,602-607
+  s_413052984bbc8e::t_bc40d4668eace9 545-549
+  s_413052984bbc8e::t_12afb19fa69f8d 16-19,30,44,89-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "2546c4e5d5b9f7ce415d931d4fcfa5de67261631",
+  "prompts": {},
+  "logical_commit_id": "2546c4e5d5b9f7ce415d931d4fcfa5de67261631",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 231,
+      "total_deletions": 50
+    }
+  }
+}
