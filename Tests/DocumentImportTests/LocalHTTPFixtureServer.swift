@@ -94,7 +94,11 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
     }
 
     func url(_ path: String) -> URL {
-        baseURL.appending(path: path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+        let relative = path.trimmingCharacters(
+            in: CharacterSet(charactersIn: "/")
+        )
+        return URL(string: relative, relativeTo: baseURL)?.absoluteURL
+            ?? baseURL.appending(path: relative)
     }
 
     func stop() {
