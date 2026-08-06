@@ -18,6 +18,7 @@ struct RealStaticWebImportIntegrationTests {
         let fixture = try Data(contentsOf: FixtureCatalog.richArticleURL)
         let hero = try Data(contentsOf: FixtureCatalog.richArticleHeroURL)
         let publicationGate = AsyncTestGate()
+        defer { publicationGate.release() }
         let server = try await LocalHTTPFixtureServer.start { path in
             switch path {
             case "/articles/rich/index.html?utm_source=integration":
@@ -30,7 +31,7 @@ struct RealStaticWebImportIntegrationTests {
                 return .init(
                     headers: ["Content-Type": "image/svg+xml"],
                     body: hero,
-                    beforeSend: { await publicationGate.waitForRelease() }
+                    beforeSend: { try await publicationGate.waitForRelease() }
                 )
             default:
                 return .init(status: 404, headers: ["Content-Type": "text/plain"])
@@ -51,11 +52,11 @@ struct RealStaticWebImportIntegrationTests {
             snapshots.append(snapshot)
             if case .running(let progress) = snapshot.state,
                progress.activity == .constructingSourceDocument {
-                await publicationGate.waitUntilBlocked()
+                try await publicationGate.waitUntilBlocked()
                 checkedAtomicVisibility = true
                 #expect(try visibleSourceDocumentCount(at: libraryRoot) == 0)
                 #expect(try sourceDocumentCount(at: libraryRoot) == 0)
-                await publicationGate.release()
+                publicationGate.release()
             }
         }
         #expect(checkedAtomicVisibility)
@@ -140,15 +141,21 @@ struct RealStaticWebImportIntegrationTests {
             pixelWidth: nil,
             pixelHeight: nil
         )
-        let expectedIDs = zip(zip(expectedCategories, expectedRoles), expectedTexts)
-            .enumerated().map { index, value in
-                StableWebIdentity.blockID(
-                    category: value.0.0,
-                    role: value.0.1,
-                    ordinal: index + 1,
-                    text: value.1
-                )
-            }
+        let expectedIDs = try [
+            "E4CAE0EA-15BA-6F25-3DA2-8DF15F913ABC",
+            "FE20F980-BDF3-7553-784F-BFDF0D90858E",
+            "464CFC61-AF6D-7EB3-56FB-DE47F8831F80",
+            "AE2AA5D8-F8A4-433D-781F-04F2CCA63DE1",
+            "F6352B69-45B1-8161-AA8F-15012BF6EC25",
+            "205A35B8-0F25-CC05-1E4C-18C3CD54D5EF",
+            "34C0D67A-6DCA-CB7D-6D8F-743E0119E7F5",
+            "56DC1F3A-C998-E344-043E-6DB0EDA7181B",
+            "85373D78-BF08-DBED-06BA-1463936A5298",
+            "3876EA4C-FB18-81FB-4DE9-A5A3B9D60C09",
+            "29BEC8C6-A4D6-D9B3-9622-19C338A4C974",
+        ].map { value in
+            SourceBlockID(try #require(UUID(uuidString: value)))
+        }
         let expectedBlocks = expectedTexts.indices.map { index in
             SourceBlock(
                 id: expectedIDs[index],
@@ -313,6 +320,77 @@ struct RealStaticWebImportIntegrationTests {
         #expect(try visibleSourceDocumentCount(at: libraryRoot) == 1)
         #expect(try Data(contentsOf: firstPackage.appending(path: "index.html")) == firstIndex)
     }
+
+    @Test(.timeLimit(.minutes(1)))
+    func asyncGateCancellationResumesBlockedWaiterExactlyOnce() async throws {
+        let gate = AsyncTestGate()
+        defer { gate.release() }
+        let waiter = Task {
+            try await gate.waitForRelease(timeout: .seconds(30))
+        }
+        try await gate.waitUntilBlocked(timeout: .seconds(1))
+
+        waiter.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await waiter.value
+        }
+        #expect(gate.pendingWaiterCount == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func asyncGateReleaseBeforeWaitReturnsImmediately() async throws {
+        let gate = AsyncTestGate()
+        gate.release()
+
+        try await gate.waitForRelease(timeout: .seconds(1))
+
+        #expect(gate.pendingWaiterCount == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func asyncGateBlockedObserverSupportsCancellationAndTimeout() async throws {
+        let gate = AsyncTestGate()
+        defer { gate.release() }
+        let cancelled = Task {
+            try await gate.waitUntilBlocked(timeout: .seconds(30))
+        }
+        cancelled.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await cancelled.value
+        }
+        await #expect(throws: AsyncTestGate.WaitError.timeout) {
+            try await gate.waitUntilBlocked(timeout: .milliseconds(10))
+        }
+        #expect(gate.pendingWaiterCount == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func stoppingServerCancelsGatedResponseAndDrainsTrackedWork() async throws {
+        let gate = AsyncTestGate()
+        defer { gate.release() }
+        let server = try await LocalHTTPFixtureServer.start { _ in
+            .init(
+                headers: ["Content-Type": "text/html"],
+                body: Data("<html></html>".utf8),
+                beforeSend: { try await gate.waitForRelease(timeout: .seconds(30)) }
+            )
+        }
+        defer { server.stop() }
+        let request = Task { try await URLSession.shared.data(from: server.url("gated")) }
+        try await gate.waitUntilBlocked(timeout: .seconds(1))
+
+        server.stop()
+
+        await #expect(throws: (any Error).self) {
+            try await request.value
+        }
+        await server.waitUntilNoRetainedConnectionsForTesting()
+        await server.waitUntilNoResponseTasksForTesting()
+        #expect(server.retainedConnectionCountForTesting == 0)
+        #expect(server.retainedResponseTaskCountForTesting == 0)
+        #expect(gate.pendingWaiterCount == 0)
+    }
 }
 
 private extension ImportTaskSnapshot {
@@ -327,31 +405,138 @@ private func publishedDocumentID(_ terminal: ImportTerminalState) -> SourceDocum
     return documentID
 }
 
-private actor AsyncTestGate {
-    private var blocked = false
-    private var released = false
-    private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
-    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
-
-    func waitForRelease() async {
-        blocked = true
-        let waiters = blockedWaiters
-        blockedWaiters.removeAll()
-        waiters.forEach { $0.resume() }
-        guard !released else { return }
-        await withCheckedContinuation { releaseWaiters.append($0) }
+private final class AsyncTestGate: @unchecked Sendable {
+    private struct Waiter {
+        let continuation: CheckedContinuation<Void, Error>
+        var timeoutTask: Task<Void, Never>?
     }
 
-    func waitUntilBlocked() async {
-        guard !blocked else { return }
-        await withCheckedContinuation { blockedWaiters.append($0) }
+    private enum WaitKind {
+        case blocked
+        case released
+    }
+
+    enum WaitError: Error, Equatable {
+        case timeout
+    }
+
+    private let lock = NSLock()
+    private var blocked = false
+    private var released = false
+    private var blockedWaiters: [UUID: Waiter] = [:]
+    private var releaseWaiters: [UUID: Waiter] = [:]
+    private var preCancelledWaiters: Set<UUID> = []
+
+    var pendingWaiterCount: Int {
+        lock.withLock { blockedWaiters.count + releaseWaiters.count }
+    }
+
+    func waitForRelease(timeout: Duration = .seconds(5)) async throws {
+        try Task.checkCancellation()
+        let blockedToResume: [Waiter] = lock.withLock {
+            blocked = true
+            let waiters = Array(blockedWaiters.values)
+            blockedWaiters.removeAll()
+            return waiters
+        }
+        resume(blockedToResume, with: .success(()))
+        if lock.withLock({ released }) { return }
+        try await wait(for: .released, timeout: timeout)
+    }
+
+    func waitUntilBlocked(timeout: Duration = .seconds(5)) async throws {
+        try Task.checkCancellation()
+        if lock.withLock({ blocked || released }) { return }
+        try await wait(for: .blocked, timeout: timeout)
     }
 
     func release() {
-        released = true
-        let waiters = releaseWaiters
-        releaseWaiters.removeAll()
-        waiters.forEach { $0.resume() }
+        let waiters: [Waiter] = lock.withLock {
+            guard !released else { return [] }
+            released = true
+            let result = Array(blockedWaiters.values) + Array(releaseWaiters.values)
+            blockedWaiters.removeAll()
+            releaseWaiters.removeAll()
+            return result
+        }
+        resume(waiters, with: .success(()))
+    }
+
+    private func wait(for kind: WaitKind, timeout: Duration) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let waiter = Waiter(continuation: continuation, timeoutTask: nil)
+                let immediate: Result<Void, Error>? = lock.withLock {
+                    if preCancelledWaiters.remove(id) != nil {
+                        return .failure(CancellationError())
+                    }
+                    switch kind {
+                    case .blocked where blocked || released:
+                        return .success(())
+                    case .released where released:
+                        return .success(())
+                    default:
+                        switch kind {
+                        case .blocked: blockedWaiters[id] = waiter
+                        case .released: releaseWaiters[id] = waiter
+                        }
+                        return nil
+                    }
+                }
+                if let immediate {
+                    continuation.resume(with: immediate)
+                    return
+                }
+                let timeoutTask = Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: timeout)
+                    } catch {
+                        return
+                    }
+                    self?.resolve(id: id, with: .failure(WaitError.timeout))
+                }
+                let cancelTimeout = lock.withLock {
+                    if blockedWaiters[id] != nil {
+                        blockedWaiters[id]?.timeoutTask = timeoutTask
+                        return false
+                    }
+                    if releaseWaiters[id] != nil {
+                        releaseWaiters[id]?.timeoutTask = timeoutTask
+                        return false
+                    }
+                    return true
+                }
+                if cancelTimeout { timeoutTask.cancel() }
+            }
+        } onCancel: { [weak self] in
+            self?.resolve(id: id, with: .failure(CancellationError()))
+        }
+    }
+
+    private func resolve(id: UUID, with result: Result<Void, Error>) {
+        let waiter: Waiter? = lock.withLock {
+            if let waiter = blockedWaiters.removeValue(forKey: id) {
+                return waiter
+            }
+            if let waiter = releaseWaiters.removeValue(forKey: id) {
+                return waiter
+            }
+            if case .failure(let error) = result, error is CancellationError {
+                preCancelledWaiters.insert(id)
+            }
+            return nil
+        }
+        guard let waiter else { return }
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume(with: result)
+    }
+
+    private func resume(_ waiters: [Waiter], with result: Result<Void, Error>) {
+        for waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            waiter.continuation.resume(with: result)
+        }
     }
 }
 
