@@ -108,3 +108,106 @@ func prefersTheRichestArticleAndUsesStableSemanticEvidence() throws {
         .citation(URL(string: "https://example.com/source?id=7")!),
     ])
 }
+
+@Test
+func metadataUsesMetaBeforeJSONLDAndFallsBackThroughStructuredSources() throws {
+    let sourceURL = URL(string: "https://fixture.invalid/metadata")!
+    let preferred = Data("""
+    <html><head>
+      <meta property="og:title" content="Meta title"><meta name="author" content="Meta author">
+      <meta property="article:published_time" content="2025-01-02T03:04:05Z">
+      <script type="application/ld+json">{"headline":"JSON title","author":{"name":"JSON author"},"datePublished":"2024-01-01T00:00:00Z"}</script>
+    </head><body><article><h1>Body title</h1></article></body></html>
+    """.utf8)
+    let meta = try StaticArticleExtractor().extract(html: preferred, sourceURL: sourceURL).metadata
+    #expect(meta.title == "Meta title")
+    #expect(meta.author == "Meta author")
+    #expect(meta.publishedAt == ISO8601DateFormatter().date(from: "2025-01-02T03:04:05Z"))
+
+    let json = Data("""
+    <html><head><script type="application/ld+json">{"@graph":[{"@type":"WebSite","name":"Ignored"},{"@type":"Article","headline":"Graph title","author":[{"name":"Graph author"}],"datePublished":"2024-02-03T04:05:06Z"}]}</script></head>
+    <body><article><p>Body text.</p></article></body></html>
+    """.utf8)
+    let structured = try StaticArticleExtractor().extract(html: json, sourceURL: sourceURL).metadata
+    #expect(structured.title == "Graph title")
+    #expect(structured.author == "Graph author")
+    #expect(structured.publishedAt == ISO8601DateFormatter().date(from: "2024-02-03T04:05:06Z"))
+
+    let time = Data("<html><body><article><h1>Timed title</h1><time datetime='2023-05-06T07:08:09Z'>May 6</time></article></body></html>".utf8)
+    let timed = try StaticArticleExtractor().extract(html: time, sourceURL: sourceURL).metadata
+    #expect(timed.publishedAt == ISO8601DateFormatter().date(from: "2023-05-06T07:08:09Z"))
+}
+
+@Test
+func bodyFallbackSelectsOnlyTheBestFocusedContainer() throws {
+    let html = Data("""
+    <html><body>
+      <header role="banner"><h1>Site chrome</h1></header><nav><p>Navigation noise.</p></nav>
+      <aside><p>Aside noise.</p></aside>
+      <div role="search"><h1>Search chrome</h1><p>Search noise one.</p><p>Search noise two.</p></div>
+      <div id="focused"><h1>Focused title</h1><p>Focused body.</p><template><p>Template noise.</p></template></div>
+      <section><p>Smaller candidate.</p></section><footer role="contentinfo"><p>Footer noise.</p></footer>
+    </body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/focused")!
+    )
+    #expect(result.rootSelector == "#focused")
+    #expect(result.blocks.map(\.canonicalText) == ["Focused title", "Focused body."])
+
+    #expect(throws: StaticWebBuildError.noReadableBlocks) {
+        try StaticArticleExtractor().extract(
+            html: Data("<html><body><header><h1>Chrome</h1></header><footer><p>Footer</p></footer></body></html>".utf8),
+            sourceURL: URL(string: "https://fixture.invalid/chrome")!
+        )
+    }
+}
+
+@Test
+func extractsStandaloneCodeButKeepsParagraphCodeInline() throws {
+    let html = Data("""
+    <html><body><main id="code-root"><code class="language-js">const answer = 42;</code><p>Call <code>answer()</code> now.</p></main></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/code")!
+    )
+    #expect(result.blocks.map(\.role) == [.codeBlock(language: "js"), .paragraph])
+    #expect(result.blocks.map(\.canonicalText) == ["const answer = 42;", "Call answer() now."])
+    #expect(result.blocks[1].inlineMarkup.map(\.kind) == [.inlineCode])
+}
+
+@Test
+func captionsOnlyTargetImagesFromTheirOwnFigure() throws {
+    let html = Data("""
+    <html><body><article id="figures">
+      <figure><img src="one.png" alt="One"><figcaption>First caption.</figcaption></figure>
+      <figure><figcaption>Orphan caption.</figcaption></figure>
+      <figure><img src="two.png" alt="Two"><figcaption>Second caption.</figcaption></figure>
+    </article></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/figures/")!
+    )
+    let captions = result.blocks.filter { $0.role == .caption }
+    #expect(captions.map(\.canonicalText) == ["First caption.", "Orphan caption.", "Second caption."])
+    #expect(captions[0].relationTargetKey == result.imageCandidates[0].stableKey)
+    #expect(captions[1].relationTargetKey == nil)
+    #expect(captions[2].relationTargetKey == result.imageCandidates[1].stableKey)
+}
+
+@Test
+func evidenceUsesIDsOnlyWhenTheyAreUnique() throws {
+    let html = Data("""
+    <html><body><article id="root"><h1 id="unique">Unique</h1><p id="duplicate">First</p><p id="duplicate">Second</p></article></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/evidence")!
+    )
+    #expect(result.blocks[0].evidenceLocator == "#unique")
+    #expect(result.blocks[1].evidenceLocator == "#root > p:nth-of-type(1)")
+    #expect(result.blocks[2].evidenceLocator == "#root > p:nth-of-type(2)")
+}
