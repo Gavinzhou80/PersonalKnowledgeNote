@@ -424,3 +424,69 @@ func blankImageSourcesDoNotBecomePageURLCandidates() throws {
     #expect(result.imageCandidates.isEmpty)
     #expect(!result.blocks.contains { $0.role == .image })
 }
+
+@Test
+func cssIdentifierEscapingMatchesCSSOMRules() {
+    let cases: [(String, String)] = [
+        ("1lead", "\\31 lead"),
+        ("-1lead", "-\\31 lead"),
+        ("-", "\\-"),
+        ("line\nbreak", "line\\a break"),
+        ("control\u{1}char", "control\\1 char"),
+        ("delete\u{7f}char", "delete\\7f char"),
+        ("colon: space\\slash", "colon\\:\\ space\\\\slash"),
+        ("nul\0char", "nul�char"),
+        ("éclair", "éclair"),
+    ]
+    for (input, expected) in cases {
+        #expect(StaticArticleExtractor.cssIdentifierEscaped(input) == expected)
+    }
+}
+
+@Test
+func standardsEscapedEvidenceFallsBackWhenSwiftSoupCannotParseIt() throws {
+    let html = """
+    <html><body><article id="css-root">
+      <h1 id="1lead">Leading digit</h1>
+      <h2 id="-1lead">Hyphen digit</h2>
+      <h3 id="-">Lone hyphen</h3>
+      <h4 id="line&#10;break">Control newline</h4>
+      <h5 id="colon: space\\slash">Escaped punctuation</h5>
+      <h6 id="éclair">Non ASCII</h6>
+    </article></body></html>
+    """
+    let result = try StaticArticleExtractor().extract(
+        html: Data(html.utf8),
+        sourceURL: URL(string: "https://fixture.invalid/cssom")!
+    )
+    #expect(result.blocks.map(\.evidenceLocator) == [
+        "#css-root > h1:nth-of-type(1)",
+        "#css-root > h2:nth-of-type(1)",
+        "#css-root > h3:nth-of-type(1)",
+        "#css-root > h4:nth-of-type(1)",
+        "#colon\\:\\ space\\\\slash",
+        "#éclair",
+    ])
+    let original = try SwiftSoup.parse(html)
+    for block in result.blocks {
+        #expect(
+            try original.select(block.evidenceLocator).size() == 1,
+            Comment(rawValue: block.evidenceLocator)
+        )
+    }
+}
+
+@Test
+func nestedListsInsideFlowWrappersAreStillExtracted() throws {
+    let html = Data("""
+    <html><body><article id="wrapped-list"><ul><li>Parent<div>before<ul><li>Wrapped child</li></ul>after</div>tail</li></ul></article></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/wrapped-list")!
+    )
+    #expect(result.blocks.map(\.canonicalText) == [
+        "Parent before after tail", "Wrapped child",
+    ])
+    #expect(result.blocks.map(\.role) == [.listItem, .listItem])
+}

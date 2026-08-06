@@ -219,10 +219,14 @@ struct StaticArticleExtractor: Sendable {
                 excludingNestedLists: true,
                 blocks: &blocks
             )
-            for child in element.children().array()
-                where ["ul", "ol"].contains(child.tagName().lowercased()) {
-                try walk(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
-            }
+            try walkNestedLists(
+                in: element,
+                root: root,
+                sourceURL: sourceURL,
+                idCounts: idCounts,
+                images: &images,
+                blocks: &blocks
+            )
             return
         case "blockquote": appendTextBlock(element, root: root, idCounts: idCounts, category: .text, role: .quotation, blocks: &blocks); return
         case "pre":
@@ -256,6 +260,24 @@ struct StaticArticleExtractor: Sendable {
         }
         for child in element.children().array() {
             try walk(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
+        }
+    }
+
+    private func walkNestedLists(
+        in container: Element,
+        root: Element,
+        sourceURL: URL,
+        idCounts: [String: Int],
+        images: inout [WebImageCandidate],
+        blocks: inout [ExtractedWebBlock]
+    ) throws {
+        for child in container.children().array() {
+            let tag = child.tagName().lowercased()
+            if ["ul", "ol"].contains(tag) {
+                try walk(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
+            } else if tag != "li" {
+                try walkNestedLists(in: child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
+            }
         }
     }
 
@@ -330,7 +352,7 @@ struct StaticArticleExtractor: Sendable {
         }
         let id = element.id()
         if !id.isEmpty, idCounts[id] == 1 {
-            return idSelector(id)
+            if let selector = idSelector(id) { return selector }
         }
         if let selector = stableAttributeSelector(element, includeTag: false) { return selector }
         var parts: [String] = []
@@ -354,7 +376,7 @@ struct StaticArticleExtractor: Sendable {
     private func selectorForRoot(_ root: Element, idCounts: [String: Int]) -> String {
         let id = root.id()
         if !id.isEmpty, idCounts[id] == 1 {
-            return idSelector(id)
+            if let selector = idSelector(id) { return selector }
         }
         if let selector = stableAttributeSelector(root, includeTag: true) { return selector }
         return root.tagName().lowercased()
@@ -457,12 +479,23 @@ struct StaticArticleExtractor: Sendable {
         return node.getChildNodes().map(rawText).joined()
     }
 
-    private func cssIdentifierEscaped(_ value: String) -> String {
+    static func cssIdentifierEscaped(_ value: String) -> String {
+        let scalars = Array(value.unicodeScalars)
         var result = ""
-        for scalar in value.unicodeScalars {
+        for (index, scalar) in scalars.enumerated() {
             let code = scalar.value
+            let isControl = code <= 0x1F || code == 0x7F
+            let isLeadingDigit = index == 0 && (0x30...0x39).contains(code)
+            let isSecondDigitAfterHyphen = index == 1
+                && scalars.first?.value == 0x2D
+                && (0x30...0x39).contains(code)
+            let isLoneHyphen = scalars.count == 1 && code == 0x2D
             if code == 0 {
                 result.append("�")
+            } else if isControl || isLeadingDigit || isSecondDigitAfterHyphen {
+                result += "\\\(String(code, radix: 16)) "
+            } else if isLoneHyphen {
+                result += "\\-"
             } else if code >= 0x80
                 || code == 0x2D
                 || code == 0x5F
@@ -478,8 +511,25 @@ struct StaticArticleExtractor: Sendable {
         return result
     }
 
-    private func idSelector(_ id: String) -> String {
-        "#\(cssIdentifierEscaped(id))"
+    private func idSelector(_ id: String) -> String? {
+        let scalars = Array(id.unicodeScalars)
+        guard let first = scalars.first else { return nil }
+        let hasUnsupportedControl = scalars.contains {
+            $0.value == 0 || $0.value <= 0x1F || $0.value == 0x7F
+        }
+        let startsWithDigit = (0x30...0x39).contains(first.value)
+        let startsWithHyphenDigit = first.value == 0x2D
+            && scalars.dropFirst().first.map {
+                (0x30...0x39).contains($0.value)
+            } == true
+        let isLoneHyphen = scalars.count == 1 && first.value == 0x2D
+        guard !hasUnsupportedControl,
+              !startsWithDigit,
+              !startsWithHyphenDigit,
+              !isLoneHyphen else {
+            return nil
+        }
+        return "#\(Self.cssIdentifierEscaped(id))"
     }
 
     private func cssStringEscaped(_ value: String) -> String {
@@ -570,7 +620,10 @@ private struct InlineBuilder {
 
     private mutating func append(_ value: String) {
         for scalar in value.unicodeScalars {
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) { pendingSpace = !text.isEmpty; continue }
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                pendingSpace = !text.isEmpty && text.last != " "
+                continue
+            }
             if pendingSpace { text.append(" "); pendingSpace = false }
             text.unicodeScalars.append(scalar)
         }
