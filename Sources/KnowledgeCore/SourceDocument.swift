@@ -222,7 +222,11 @@ public struct SourceBlock: Hashable, Codable, Sendable {
     }
 
     private static func isSafeInlineURL(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased() else {
+        guard
+            let scheme = url.scheme?.lowercased(),
+            let host = url.host,
+            !host.isEmpty
+        else {
             return false
         }
         return scheme == "http" || scheme == "https"

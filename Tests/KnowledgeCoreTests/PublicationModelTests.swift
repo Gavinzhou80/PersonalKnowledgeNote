@@ -269,6 +269,41 @@ func decodingRejectsUnsafeInlineDestinations() throws {
 }
 
 @Test
+func decodingRejectsHostlessInlineWebDestinations() throws {
+    let unsafeURLs = [
+        URL(string: "https:///article")!,
+        URL(string: "http:relative")!,
+    ]
+
+    for url in unsafeURLs {
+        for kind in [
+            InlineMarkupKind.link(url),
+            InlineMarkupKind.citation(url),
+        ] {
+            let data = try JSONEncoder().encode(
+                UncheckedSemanticSourceBlock(
+                    id: SourceBlockID(),
+                    canonicalText: "unsafe",
+                    category: .text,
+                    role: .paragraph,
+                    inlineMarkup: [
+                        InlineMarkup(
+                            range: SourceTextRange(utf16Offset: 0, utf16Length: 6),
+                            kind: kind
+                        )
+                    ],
+                    media: nil
+                )
+            )
+
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(SourceBlock.self, from: data)
+            }
+        }
+    }
+}
+
+@Test
 func decodingAllowsNestedMarkupButRejectsCrossingOverlap() throws {
     let nested = SourceBlock(
         id: SourceBlockID(),
