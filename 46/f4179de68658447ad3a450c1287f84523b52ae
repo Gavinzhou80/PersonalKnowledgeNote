@@ -1,0 +1,31 @@
+Tests/DocumentImportTests/LocalHTTPFixtureServer.swift
+  s_413052984bbc8e::t_f6e4999f2ae007 46,48-52,117-118,125,127-129,140-141,190-193,197-219,245,250-252,254,328,332,334,336,344,348,352,355-364,366-447,459-472
+  s_413052984bbc8e::t_e4db2855e2bc02 365
+Tests/DocumentImportTests/WebResourceLocalizerTests.swift
+  s_413052984bbc8e::t_cfb9443b9dc797 297
+Tests/DocumentImportTests/RealStaticWebImportIntegrationTests.swift
+  s_413052984bbc8e::t_5553451c7867ad 512,516-523,564,619-621
+  s_413052984bbc8e::t_e4db2855e2bc02 445-450,559,738
+  s_413052984bbc8e::t_63397fd80c243e 477,726-737,739-748
+  s_413052984bbc8e::t_d4b9908c27018d 388-389,394-444,451-476
+  s_413052984bbc8e::t_aaacbd689d8b28 725
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "46f4179de68658447ad3a450c1287f84523b52ae",
+  "prompts": {},
+  "logical_commit_id": "46f4179de68658447ad3a450c1287f84523b52ae",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 287,
+      "total_deletions": 43
+    }
+  }
+}
