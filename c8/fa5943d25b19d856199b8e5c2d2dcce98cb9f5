@@ -1,0 +1,39 @@
+Tests/DocumentImportTests/StaticArticleExtractorTests.swift
+  s_413052984bbc8e::t_2330dbc549a78d 85-110
+  s_413052984bbc8e::t_2736f6c1b4d0de 1-84
+Sources/DocumentImport/Internal/WebArticleModel.swift
+  s_413052984bbc8e::t_49476d4f758906 1-26
+Tests/Fixtures/Web/RichArticle/hero.svg
+  s_413052984bbc8e::t_2736f6c1b4d0de 1-5
+Package.swift
+  s_413052984bbc8e::t_49476d4f758906 18-21,37-41,79
+Tests/Fixtures/FixtureCatalog.swift
+  s_413052984bbc8e::t_2736f6c1b4d0de 10-21
+Tests/Fixtures/Web/RichArticle/index.html
+  s_413052984bbc8e::t_2736f6c1b4d0de 1-35
+Sources/DocumentImport/Internal/StaticArticleExtractor.swift
+  s_413052984bbc8e::t_641abd10297541 1-67,80-83,85-117,119,121-158,162-180,184-186,196-229,235-249,251-263,271-296
+  s_413052984bbc8e::t_2f20d0131e07fb 84,118,159-160,181-182,230-234
+  s_413052984bbc8e::t_49476d4f758906 120
+  s_413052984bbc8e::t_d9b614f9b6f639 68-79
+  s_413052984bbc8e::t_d63fba9ad1a0fb 161,183,187-195,250,264-270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c8fa5943d25b19d856199b8e5c2d2dcce98cb9f5",
+  "prompts": {},
+  "logical_commit_id": "c8fa5943d25b19d856199b8e5c2d2dcce98cb9f5",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 520,
+      "total_deletions": 28
+    }
+  }
+}
