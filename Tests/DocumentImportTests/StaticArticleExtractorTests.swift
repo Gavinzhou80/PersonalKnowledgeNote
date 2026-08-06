@@ -331,3 +331,24 @@ func sourceCannotInjectTheInternalOriginalEvidenceMarker() throws {
     )
     #expect(result.blocks[0].evidenceLocator == "#trusted-root > p:nth-of-type(1)")
 }
+
+@Test
+func candidateSelectionRejectsArticlesInsideNoiseAncestors() throws {
+    let html = Data("""
+    <html><body>
+      <div class="advertisement">
+        <article id="nested-candidate"><h1>Ad heading</h1><p>Ad one.</p><p>Ad two.</p></article>
+      </div>
+      <section aria-hidden="true">
+        <main><h1>Hidden heading</h1><p>Hidden one.</p><p>Hidden two.</p><p>Hidden three.</p></main>
+      </section>
+      <article id="real-article"><h1>Real heading</h1><p>Real body.</p></article>
+    </body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/noise-ancestor")!
+    )
+    #expect(result.rootSelector == "#real-article")
+    #expect(result.blocks.map(\.canonicalText) == ["Real heading", "Real body."])
+}

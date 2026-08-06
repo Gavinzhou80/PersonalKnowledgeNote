@@ -66,15 +66,15 @@ struct StaticArticleExtractor: Sendable {
     }
 
     private func readableRoot(in document: Document) throws -> Element? {
+        guard let body = document.body() else { return nil }
         for selector in ["article", "main"] {
             let candidates = try document.select(selector).array().filter {
-                !shouldRemoveSubtree($0)
+                !shouldRemoveSubtree($0) && !hasNoiseAncestor($0, stopAt: body)
             }
             if let best = try candidates.max(by: { try score($0) < score($1) }), try score(best) > 0 {
                 return best
             }
         }
-        guard let body = document.body() else { return nil }
         let candidates = try body.select("[role=main],section,div").array().filter {
             !shouldRemoveSubtree($0) && !hasNoiseAncestor($0, stopAt: body)
         }
