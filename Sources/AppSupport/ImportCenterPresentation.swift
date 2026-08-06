@@ -52,11 +52,25 @@ public struct ImportCenterPresentation: Equatable, Sendable {
                 )
             }
 
+        case .cancelling:
+            ImportCenterPresentation(
+                title: "Import Center",
+                message: "Cancelling import",
+                systemImage: "xmark.circle"
+            )
+
         case .failed:
             ImportCenterPresentation(
                 title: "Import Center",
                 message: "Import failed",
                 systemImage: "exclamationmark.triangle"
+            )
+
+        case .cancelled:
+            ImportCenterPresentation(
+                title: "Import Center",
+                message: "Import cancelled",
+                systemImage: "xmark.circle"
             )
 
         case let .completed(success):

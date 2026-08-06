@@ -445,7 +445,7 @@ public actor DocumentImport {
             .map(\.snapshot)
     }
 
-    private static func matches(
+    static func matches(
         _ state: ImportTaskState,
         query: ImportTaskQuery
     ) -> Bool {
@@ -454,14 +454,14 @@ public actor DocumentImport {
             return true
         case .active:
             switch state {
-            case .queued, .running:
+            case .queued, .running, .cancelling:
                 return true
-            case .failed, .completed:
+            case .failed, .cancelled, .completed:
                 return false
             }
         case .unfinished:
             switch state {
-            case .queued, .running, .failed:
+            case .queued, .running, .cancelling, .failed, .cancelled:
                 return true
             case .completed:
                 return false

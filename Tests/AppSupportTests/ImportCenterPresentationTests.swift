@@ -70,6 +70,16 @@ func taskSnapshotMapsWithoutWorkflowKnowledge() {
             "exclamationmark.triangle"
         ),
         (
+            .cancelling,
+            "Cancelling import",
+            "xmark.circle"
+        ),
+        (
+            .cancelled,
+            "Import cancelled",
+            "xmark.circle"
+        ),
+        (
             .completed(
                 .published(
                     documentID: .init(),

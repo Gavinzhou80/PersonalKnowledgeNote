@@ -91,7 +91,9 @@ final class LibraryDatabase: Sendable {
             guard currentRevision == expectedRevision else {
                 throw LocalLibraryError.staleRevision(current: currentRevision)
             }
-            guard let state = ImportTaskState(rawValue: task.state) else {
+            guard let state = ImportTaskState(rawValue: task.state),
+                  state.isValidForLegacyV1Columns
+            else {
                 throw corruptLibraryError()
             }
             guard state != .completed, state != .abandoned else {
@@ -134,7 +136,9 @@ final class LibraryDatabase: Sendable {
                     current: currentRevision
                 )
             }
-            guard let state = ImportTaskState(rawValue: task.state) else {
+            guard let state = ImportTaskState(rawValue: task.state),
+                  state.isValidForLegacyV1Columns
+            else {
                 throw corruptLibraryError()
             }
             guard state != .completed,
@@ -1066,6 +1070,8 @@ final class LibraryDatabase: Sendable {
             guard outcome == nil, intent == nil else {
                 throw corruptLibraryError()
             }
+        case .queued, .running, .cancelling, .failed, .cancelled:
+            throw corruptLibraryError()
         }
     }
 

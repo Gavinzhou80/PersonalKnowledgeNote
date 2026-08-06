@@ -1,10 +1,80 @@
 import Foundation
-import KnowledgeCore
+import struct KnowledgeCore.ImportIssue
+import struct KnowledgeCore.ImportTaskID
+import struct KnowledgeCore.SourceBlockID
+import struct KnowledgeCore.SourceDocumentID
 import Testing
-import DocumentImport
+@testable import DocumentImport
 import typealias DocumentImport.ImportIssue
 
 private func requireHashableSendable<T: Hashable & Sendable>(_: T.Type) {}
+private typealias PublicImportTaskState = ImportTaskState
+
+@Test
+func taskControlModelsAreStableAndSendable() {
+    let failure = ImportFailure(
+        code: .networkUnavailable,
+        recovery: .retryable,
+        diagnosticID: UUID(
+            uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        )!
+    )
+
+    requireHashableSendable(PublicImportTaskState.self)
+    requireHashableSendable(ImportTerminalState.self)
+    requireHashableSendable(ImportTaskControlError.self)
+    requireHashableSendable(DocumentImportAvailabilityError.self)
+    #expect(
+        PublicImportTaskState.cancelling
+            != PublicImportTaskState.cancelled
+    )
+    #expect(ImportTerminalState.cancelled != .failure(failure))
+    #expect(ImportTaskControlError.tooLate != .retryNotAllowed)
+    #expect(
+        DocumentImportAvailabilityError.localLibraryUnavailable
+            == .localLibraryUnavailable
+    )
+}
+
+@Test
+func importFailureCodeAndRecoveryRoundTripThroughCodable() throws {
+    let codes: [ImportFailure.Code] = [
+        .networkUnavailable,
+        .checkpointInvalid,
+        .publicationFailed,
+    ]
+    let recoveries: [ImportFailure.Recovery] = [
+        .retryable,
+        .requiresNewOriginalSource,
+        .requiresUserAction,
+        .unsupported,
+    ]
+
+    for code in codes {
+        let data = try JSONEncoder().encode(code)
+        #expect(try JSONDecoder().decode(
+            ImportFailure.Code.self,
+            from: data
+        ) == code)
+    }
+    for recovery in recoveries {
+        let data = try JSONEncoder().encode(recovery)
+        #expect(try JSONDecoder().decode(
+            ImportFailure.Recovery.self,
+            from: data
+        ) == recovery)
+    }
+}
+
+@Test
+func cancellingAndCancelledStatesMatchTaskQueries() {
+    #expect(DocumentImport.matches(.cancelling, query: .active))
+    #expect(!DocumentImport.matches(.cancelled, query: .active))
+    #expect(DocumentImport.matches(.cancelling, query: .unfinished))
+    #expect(DocumentImport.matches(.cancelled, query: .unfinished))
+    #expect(DocumentImport.matches(.cancelling, query: .all))
+    #expect(DocumentImport.matches(.cancelled, query: .all))
+}
 
 @Test
 func importTaskSnapshotCarriesApprovedPublicState() throws {

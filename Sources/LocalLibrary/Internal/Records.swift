@@ -213,6 +213,17 @@ enum DomainJSON {
     }
 }
 
+extension ImportTaskState {
+    var isValidForLegacyV1Columns: Bool {
+        switch self {
+        case .accepted, .working, .publicationPending, .completed, .abandoned:
+            return true
+        case .queued, .running, .cancelling, .failed, .cancelled:
+            return false
+        }
+    }
+}
+
 extension ImportTaskRecord {
     func snapshot(
         stagedArtifact: StagedArtifactRecord?
@@ -221,7 +232,8 @@ extension ImportTaskRecord {
               let decodedAttempt = UInt(exactly: attempt),
               decodedAttempt > 0,
               let decodedRevision = UInt64(exactly: revision),
-              let decodedState = ImportTaskState(rawValue: state)
+              let decodedState = ImportTaskState(rawValue: state),
+              decodedState.isValidForLegacyV1Columns
         else {
             throw corruptLibrary()
         }
@@ -302,7 +314,9 @@ extension ImportTaskRecord {
     }
 
     func storedOutcome() throws -> PublicationOutcome? {
-        guard let state = ImportTaskState(rawValue: state) else {
+        guard let state = ImportTaskState(rawValue: state),
+              state.isValidForLegacyV1Columns
+        else {
             throw corruptLibrary()
         }
         switch (state, outcomeJSON) {

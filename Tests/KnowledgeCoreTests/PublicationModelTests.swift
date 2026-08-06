@@ -3,6 +3,22 @@ import KnowledgeCore
 import Testing
 
 @Test
+func durableJournalStatesAndFailureEnvelopeRoundTrip() throws {
+    let envelope = ImportTaskFailureEnvelope(
+        codecVersion: 1,
+        payload: Data("retryable-network".utf8)
+    )
+    let data = try JSONEncoder().encode(envelope)
+
+    #expect(try JSONDecoder().decode(
+        ImportTaskFailureEnvelope.self,
+        from: data
+    ) == envelope)
+    #expect(KnowledgeCore.ImportTaskState.allCases.contains(.queued))
+    #expect(KnowledgeCore.ImportTaskState.allCases.contains(.cancelled))
+}
+
+@Test
 func identifiersRoundTripThroughCodable() throws {
     let original = ImportTaskID()
     let data = try JSONEncoder().encode(original)
