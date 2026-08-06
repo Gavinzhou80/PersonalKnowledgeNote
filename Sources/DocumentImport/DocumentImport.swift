@@ -3,21 +3,13 @@ import KnowledgeCore
 import LocalLibrary
 
 public actor DocumentImport {
-    private struct TaskRecord {
-        var snapshot: ImportTaskSnapshot
-        let sequence: UInt64
-        var terminal: ImportTerminalState?
-        var observers: [
-            UUID: AsyncStream<ImportTaskSnapshot>.Continuation
-        ] = [:]
-        var waiters: [
-            CheckedContinuation<ImportTerminalState, Never>
-        ] = []
-    }
-
-    private struct ListObserver {
-        let query: ImportTaskQuery
-        let continuation: AsyncStream<[ImportTaskSnapshot]>.Continuation
+    private enum BootstrapState {
+        case idle
+        case running(
+            generation: UUID,
+            task: Task<[DurableImportSnapshot], Error>
+        )
+        case ready
     }
 
     private let library: LocalLibrary
@@ -30,9 +22,16 @@ public actor DocumentImport {
     private let workspaceSnapshotLoader: @Sendable (
         ImportWorkspace
     ) async throws -> DurableImportSnapshot
-    private var records: [ImportTaskID: TaskRecord] = [:]
-    private var listObservers: [UUID: ListObserver] = [:]
-    private var nextSequence: UInt64 = 0
+    private let retainedImportsLoader: @Sendable () async throws
+        -> [DurableImportSnapshot]
+    private let importRunner: (
+        @Sendable (ImportWorkspace) async throws -> Void
+    )?
+    private let claimNextRunnable: @Sendable () async throws
+        -> DurableQueueClaim?
+    private var bootstrapState: BootstrapState
+    private var registry = TaskSnapshotRegistry()
+    private var scheduler = ImportScheduler()
 
     init(
         library: LocalLibrary,
@@ -53,13 +52,33 @@ public actor DocumentImport {
             ImportWorkspace
         ) async throws -> DurableImportSnapshot = { workspace in
             try await workspace.snapshot()
-        }
+        },
+        retainedImportsLoader: (@Sendable () async throws
+            -> [DurableImportSnapshot])? = nil,
+        importRunner: (@Sendable (ImportWorkspace) async throws -> Void)? = nil,
+        claimNextRunnable: (@Sendable () async throws
+            -> DurableQueueClaim?)? = nil
     ) {
+        let resolvedRetainedImportsLoader = retainedImportsLoader ?? {
+            try await library.retainedImports()
+        }
         self.library = library
         self.webAcquirer = webAcquirer
         self.webDocumentBuilder = webDocumentBuilder
         self.documentIDGenerator = documentIDGenerator
         self.workspaceSnapshotLoader = workspaceSnapshotLoader
+        self.retainedImportsLoader = resolvedRetainedImportsLoader
+        self.importRunner = importRunner
+        self.claimNextRunnable = claimNextRunnable ?? {
+            try await library.claimNextRunnable()
+        }
+        let generation = UUID()
+        bootstrapState = .running(
+            generation: generation,
+            task: Task {
+                try await resolvedRetainedImportsLoader()
+            }
+        )
     }
 
     public init(library: LocalLibrary) {
@@ -80,12 +99,61 @@ public actor DocumentImport {
                     query: query,
                     continuation: continuation
                 )
+                try? await self.start()
             }
             continuation.onTermination = { _ in
                 Task {
                     await self.removeListObserver(id: observerID)
                 }
             }
+        }
+    }
+
+    public func start() async throws {
+        let generation: UUID
+        let task: Task<[DurableImportSnapshot], Error>
+        switch bootstrapState {
+        case .ready:
+            return
+        case .running(let currentGeneration, let currentTask):
+            generation = currentGeneration
+            task = currentTask
+        case .idle:
+            generation = UUID()
+            let loader = retainedImportsLoader
+            task = Task { try await loader() }
+            bootstrapState = .running(
+                generation: generation,
+                task: task
+            )
+        }
+
+        let snapshots: [DurableImportSnapshot]
+        do {
+            snapshots = try await task.value
+        } catch {
+            if case .running(let currentGeneration, _) = bootstrapState,
+               currentGeneration == generation {
+                bootstrapState = .idle
+            }
+            throw DocumentImportAvailabilityError.localLibraryUnavailable
+        }
+
+        switch bootstrapState {
+        case .ready:
+            return
+        case .running(let currentGeneration, _)
+            where currentGeneration == generation:
+            do {
+                try registry.hydrate(snapshots)
+            } catch {
+                bootstrapState = .idle
+                throw DocumentImportAvailabilityError.localLibraryUnavailable
+            }
+            bootstrapState = .ready
+            requestSchedulerWake()
+        case .idle, .running:
+            throw DocumentImportAvailabilityError.localLibraryUnavailable
         }
     }
 
@@ -100,6 +168,7 @@ public actor DocumentImport {
                     taskID: taskID,
                     continuation: continuation
                 )
+                try? await self.start()
             }
             continuation.onTermination = { _ in
                 Task {
@@ -113,28 +182,36 @@ public actor DocumentImport {
     }
 
     func value(for taskID: ImportTaskID) async -> ImportTerminalState {
-        guard var record = records[taskID] else {
+        do {
+            try await start()
+        } catch {
             return .failure(Self.privacySafeFailure())
         }
-        if let terminal = record.terminal {
+        if let terminal = registry.terminalValue(for: taskID) {
             return terminal
         }
         return await withCheckedContinuation { continuation in
-            record.waiters.append(continuation)
-            records[taskID] = record
+            registry.registerWaiter(
+                taskID: taskID,
+                continuation: continuation
+            )
         }
     }
 
     public func submit(
         _ source: OriginalSource
     ) async throws -> ImportTaskHandle {
-        let sourceURL: URL
+        do {
+            try await start()
+        } catch {
+            throw ImportSubmissionError.localLibraryUnavailable
+        }
+
         switch source {
         case .webpage(let url):
             guard Self.isValidWebURL(url) else {
                 throw ImportSubmissionError.invalidWebURL
             }
-            sourceURL = url
         case .pdfFile:
             throw ImportSubmissionError.unsupportedOriginalSource
         }
@@ -146,39 +223,93 @@ public actor DocumentImport {
             throw Self.submissionError(for: error)
         }
 
-        let durable: DurableImportSnapshot
+        let durable: DurableImportSnapshot?
         do {
             durable = try await workspaceSnapshotLoader(workspace)
         } catch {
-            try? await workspace.abandon(expectedRevision: 0)
-            throw Self.submissionError(for: error)
+            durable = nil
         }
 
         let taskID = workspace.taskID
-        let snapshot = ImportTaskSnapshot(
-            id: taskID,
-            revision: durable.revision,
-            attempt: durable.attempt,
-            source: .webpage(sourceURL),
-            state: .queued(position: 0)
-        )
-        records[taskID] = TaskRecord(
-            snapshot: snapshot,
-            sequence: nextSequence,
-            terminal: nil
-        )
-        nextSequence += 1
-        notifyListObservers()
-
-        Task {
-            await self.runWebImport(
-                workspace: workspace,
-                source: source,
-                sourceURL: sourceURL
-            )
+        if let durable {
+            _ = try? registry.apply([durable])
+        } else if let retained = try? await library.retainedImports() {
+            _ = try? registry.apply(retained)
         }
+        requestSchedulerWake()
 
         return ImportTaskHandle(id: taskID, owner: self)
+    }
+
+    private func requestSchedulerWake() {
+        guard scheduler.requestWake() else { return }
+        let task = Task { await self.runSchedulerLoop() }
+        scheduler.install(task)
+    }
+
+    private func runSchedulerLoop() async {
+        var availabilityRetryDelayMilliseconds: Int64 = 10
+        while !Task.isCancelled {
+            guard registry.hasQueuedWork else { break }
+            let claim: DurableQueueClaim?
+            do {
+                claim = try await claimNextRunnable()
+                availabilityRetryDelayMilliseconds = 10
+            } catch DurableQueueClaimError.transientDatabaseContention {
+                do {
+                    try await Task.sleep(
+                        for: .milliseconds(
+                            availabilityRetryDelayMilliseconds
+                        )
+                    )
+                } catch {
+                    break
+                }
+                availabilityRetryDelayMilliseconds = min(
+                    availabilityRetryDelayMilliseconds * 2,
+                    250
+                )
+                continue
+            } catch {
+                break
+            }
+            guard let claim else { break }
+            _ = try? registry.apply(claim.queueUpdates + [claim.claimed])
+            guard let workspace = try? await library.importWorkspace(
+                id: claim.claimed.taskID
+            ) else {
+                continue
+            }
+
+            if let importRunner {
+                do {
+                    try await importRunner(workspace)
+                } catch {
+                    await failTask(workspace: workspace, error: error)
+                }
+            } else {
+                switch claim.claimed.originalSource {
+                case .webpage(let sourceURL):
+                    await runWebImport(
+                        workspace: workspace,
+                        source: claim.claimed.originalSource,
+                        sourceURL: sourceURL
+                    )
+                case .pdfFile:
+                    await failTask(
+                        workspace: workspace,
+                        error: ImportSubmissionError.unsupportedOriginalSource
+                    )
+                }
+            }
+        }
+        schedulerLoopDidStop()
+    }
+
+    private func schedulerLoopDidStop() {
+        if scheduler.didBecomeIdle() {
+            requestSchedulerWake()
+        }
     }
 
     private func runWebImport(
@@ -280,8 +411,7 @@ public actor DocumentImport {
                     attempt: completed?.attempt ?? publishing.attempt,
                     source: .webpage(sourceURL),
                     state: .completed(success)
-                ),
-                terminal: .success(success)
+                )
             )
         } catch {
             await failTask(workspace: workspace, error: error)
@@ -292,8 +422,9 @@ public actor DocumentImport {
         workspace: ImportWorkspace,
         error: Error
     ) async {
-        var failureRevision = (records[workspace.taskID]?.snapshot.revision ?? 0)
-            + 1
+        var failureRevision = (
+            registry.snapshot(for: workspace.taskID)?.revision ?? 0
+        ) + 1
 
         if let durable = try? await workspace.snapshot() {
             failureRevision = max(failureRevision, durable.revision)
@@ -310,23 +441,22 @@ public actor DocumentImport {
             }
         }
 
-        guard let record = records[workspace.taskID] else {
+        guard let current = registry.snapshot(for: workspace.taskID),
+              let journalSequence = registry.journalSequence(
+                for: workspace.taskID
+              ) else {
             return
         }
         let failure = Self.classify(error)
-        finishTask(
-            taskID: workspace.taskID,
-            snapshot: ImportTaskSnapshot(
-                id: record.snapshot.id,
-                revision: max(
-                    failureRevision,
-                    record.snapshot.revision + 1
-                ),
-                attempt: record.snapshot.attempt,
-                source: record.snapshot.source,
+        _ = try? registry.apply(
+            ImportTaskSnapshot(
+                id: current.id,
+                revision: max(failureRevision, current.revision + 1),
+                attempt: current.attempt,
+                source: current.source,
                 state: .failed(failure)
             ),
-            terminal: .failure(failure)
+            journalSequence: journalSequence
         )
     }
 
@@ -335,18 +465,15 @@ public actor DocumentImport {
         query: ImportTaskQuery,
         continuation: AsyncStream<[ImportTaskSnapshot]>.Continuation
     ) {
-        let result = continuation.yield(snapshots(matching: query))
-        if case .terminated = result {
-            return
-        }
-        listObservers[id] = ListObserver(
+        registry.registerListObserver(
+            id: id,
             query: query,
             continuation: continuation
         )
     }
 
     private func removeListObserver(id: UUID) {
-        listObservers.removeValue(forKey: id)
+        registry.removeListObserver(id: id)
     }
 
     private func registerTaskObserver(
@@ -354,28 +481,15 @@ public actor DocumentImport {
         taskID: ImportTaskID,
         continuation: AsyncStream<ImportTaskSnapshot>.Continuation
     ) {
-        guard var record = records[taskID] else {
-            continuation.finish()
-            return
-        }
-        let result = continuation.yield(record.snapshot)
-        if case .terminated = result {
-            return
-        }
-        if record.terminal != nil {
-            continuation.finish()
-            return
-        }
-        record.observers[id] = continuation
-        records[taskID] = record
+        registry.registerTaskObserver(
+            id: id,
+            taskID: taskID,
+            continuation: continuation
+        )
     }
 
     private func removeTaskObserver(id: UUID, taskID: ImportTaskID) {
-        guard var record = records[taskID] else {
-            return
-        }
-        record.observers.removeValue(forKey: id)
-        records[taskID] = record
+        registry.removeTaskObserver(id: id, taskID: taskID)
     }
 
     private func updateSnapshot(
@@ -383,90 +497,30 @@ public actor DocumentImport {
         revision: UInt64,
         state: ImportTaskState
     ) {
-        guard var record = records[taskID] else {
+        guard let current = registry.snapshot(for: taskID),
+              let journalSequence = registry.journalSequence(for: taskID) else {
             return
         }
-        record.snapshot = ImportTaskSnapshot(
-            id: record.snapshot.id,
-            revision: revision,
-            attempt: record.snapshot.attempt,
-            source: record.snapshot.source,
-            state: state
+        _ = try? registry.apply(
+            ImportTaskSnapshot(
+                id: current.id,
+                revision: revision,
+                attempt: current.attempt,
+                source: current.source,
+                state: state
+            ),
+            journalSequence: journalSequence
         )
-        let snapshot = record.snapshot
-        let observers = Array(record.observers.values)
-        records[taskID] = record
-        for observer in observers {
-            observer.yield(snapshot)
-        }
-        notifyListObservers()
     }
 
     private func finishTask(
         taskID: ImportTaskID,
-        snapshot: ImportTaskSnapshot,
-        terminal: ImportTerminalState
+        snapshot: ImportTaskSnapshot
     ) {
-        guard var record = records[taskID] else {
+        guard let journalSequence = registry.journalSequence(for: taskID) else {
             return
         }
-        record.snapshot = snapshot
-        record.terminal = terminal
-        let observers = Array(record.observers.values)
-        let waiters = record.waiters
-        record.observers.removeAll()
-        record.waiters.removeAll()
-        records[taskID] = record
-
-        for observer in observers {
-            observer.yield(snapshot)
-            observer.finish()
-        }
-        for waiter in waiters {
-            waiter.resume(returning: terminal)
-        }
-        notifyListObservers()
-    }
-
-    private func notifyListObservers() {
-        for observer in listObservers.values {
-            observer.continuation.yield(
-                snapshots(matching: observer.query)
-            )
-        }
-    }
-
-    private func snapshots(
-        matching query: ImportTaskQuery
-    ) -> [ImportTaskSnapshot] {
-        records.values
-            .filter { Self.matches($0.snapshot.state, query: query) }
-            .sorted { $0.sequence < $1.sequence }
-            .map(\.snapshot)
-    }
-
-    static func matches(
-        _ state: ImportTaskState,
-        query: ImportTaskQuery
-    ) -> Bool {
-        switch query {
-        case .all:
-            return true
-        case .active:
-            switch state {
-            case .queued, .running, .cancelling:
-                return true
-            case .failed, .cancelled, .completed:
-                return false
-            }
-        case .unfinished:
-            switch state {
-            case .queued, .running, .cancelling, .failed, .cancelled:
-                return true
-            case .completed:
-                return false
-            }
-        }
+        _ = try? registry.apply(snapshot, journalSequence: journalSequence)
     }
 
     private static func progress(
@@ -477,6 +531,13 @@ public actor DocumentImport {
             completedUnitCount: 0,
             totalUnitCount: nil
         )
+    }
+
+    static func matches(
+        _ state: ImportTaskState,
+        query: ImportTaskQuery
+    ) -> Bool {
+        TaskSnapshotRegistry.matches(state, query: query)
     }
 
     private static func checkpoint(

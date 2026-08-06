@@ -134,6 +134,7 @@ package struct CheckpointArtifactReplacement: Sendable {
 public struct DurableImportSnapshot: Sendable {
     public let taskID: ImportTaskID
     package let journalSequence: UInt64
+    package let originalSource: OriginalSource
     public let queueSequence: UInt64?
     public let attempt: UInt
     public let revision: UInt64
@@ -142,10 +143,13 @@ public struct DurableImportSnapshot: Sendable {
     public let checkpoint: CheckpointEnvelope?
     package let checkpointArtifact: ManagedCheckpointArtifact?
     public let stagedArtifact: StagedArtifact?
+    package let outcome: PublicationOutcome?
+    package let publicationIssues: [KnowledgeCore.ImportIssue]?
 
     package init(
         taskID: ImportTaskID,
         journalSequence: UInt64,
+        originalSource: OriginalSource,
         queueSequence: UInt64?,
         attempt: UInt,
         revision: UInt64,
@@ -153,10 +157,13 @@ public struct DurableImportSnapshot: Sendable {
         failure: ImportTaskFailureEnvelope?,
         checkpoint: CheckpointEnvelope?,
         checkpointArtifact: ManagedCheckpointArtifact?,
-        stagedArtifact: StagedArtifact?
+        stagedArtifact: StagedArtifact?,
+        outcome: PublicationOutcome?,
+        publicationIssues: [KnowledgeCore.ImportIssue]? = nil
     ) {
         self.taskID = taskID
         self.journalSequence = journalSequence
+        self.originalSource = originalSource
         self.queueSequence = queueSequence
         self.attempt = attempt
         self.revision = revision
@@ -165,6 +172,28 @@ public struct DurableImportSnapshot: Sendable {
         self.checkpoint = checkpoint
         self.checkpointArtifact = checkpointArtifact
         self.stagedArtifact = stagedArtifact
+        self.outcome = outcome
+        self.publicationIssues = publicationIssues
+    }
+
+    package func withPublicationIssues(
+        _ issues: [KnowledgeCore.ImportIssue]?
+    ) -> DurableImportSnapshot {
+        DurableImportSnapshot(
+            taskID: taskID,
+            journalSequence: journalSequence,
+            originalSource: originalSource,
+            queueSequence: queueSequence,
+            attempt: attempt,
+            revision: revision,
+            state: state,
+            failure: failure,
+            checkpoint: checkpoint,
+            checkpointArtifact: checkpointArtifact,
+            stagedArtifact: stagedArtifact,
+            outcome: outcome,
+            publicationIssues: issues
+        )
     }
 }
 
@@ -192,6 +221,10 @@ package struct DurableQueueClaim: Sendable {
         self.claimed = claimed
         self.queueUpdates = queueUpdates
     }
+}
+
+package enum DurableQueueClaimError: Error, Equatable, Sendable {
+    case transientDatabaseContention
 }
 
 public struct CheckpointUpdate: Sendable {

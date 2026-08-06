@@ -423,6 +423,72 @@ func retainedCompletedHistoryUsesConstantAssociationQueryCount() async throws {
 }
 
 @Test
+func retainedCompletedProjectionIncludesValidatedSourceOutcomeAndIssues() async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let externalPDF = root.appending(path: "projection.pdf")
+    try FileManager.default.copyItem(
+        at: FixtureCatalog.minimalPDFURL,
+        to: externalPDF
+    )
+    let library = try await LocalLibrary.open(at: root.appending(path: "Library"))
+    let workspace = try await library.accept(.pdfFile(externalPDF))
+    let accepted = try await workspace.snapshot()
+    let artifact = try #require(accepted.stagedArtifact)
+    let base = makeFixtureContent()
+    let relatedBlockID = try #require(base.blocks.first?.id)
+    let issue = KnowledgeCore.ImportIssue(
+        code: .optionalWebImageUnavailable,
+        relatedBlockID: relatedBlockID
+    )
+    let content = SourceDocumentContent(
+        documentID: base.documentID,
+        importedMetadata: base.importedMetadata,
+        blocks: base.blocks,
+        structure: base.structure,
+        evidence: base.evidence,
+        issues: [issue]
+    )
+    let outcome = try await workspace.finish(
+        PublicationCandidate(
+            fingerprint: ContentFingerprint("durable-history-projection"),
+            artifact: artifact,
+            document: content,
+            originalSource: .pdfFile(externalPDF)
+        ),
+        expectedRevision: accepted.revision
+    )
+
+    let retained = try await library.retainedImports()
+    let completed = try #require(retained.first { $0.taskID == workspace.taskID })
+    #expect(completed.originalSource == .pdfFile(externalPDF))
+    #expect(completed.outcome == outcome)
+    #expect(completed.publicationIssues == [issue])
+}
+
+@Test
+func onlySQLiteBusyAndLockedAreTransientQueueClaimErrors() {
+    #expect(transientDurableQueueClaimError(for: DatabaseError(
+        resultCode: .SQLITE_BUSY
+    )) == .transientDatabaseContention)
+    #expect(transientDurableQueueClaimError(for: DatabaseError(
+        resultCode: .SQLITE_BUSY_TIMEOUT
+    )) == .transientDatabaseContention)
+    #expect(transientDurableQueueClaimError(for: DatabaseError(
+        resultCode: .SQLITE_LOCKED
+    )) == .transientDatabaseContention)
+    #expect(transientDurableQueueClaimError(for: DatabaseError(
+        resultCode: .SQLITE_LOCKED_SHAREDCACHE
+    )) == .transientDatabaseContention)
+    #expect(transientDurableQueueClaimError(for: DatabaseError(
+        resultCode: .SQLITE_IOERR
+    )) == nil)
+    #expect(transientDurableQueueClaimError(for: DatabaseError(
+        resultCode: .SQLITE_CORRUPT
+    )) == nil)
+}
+
+@Test
 func nullJournalSequenceIsCorruptAcrossPublicReadPaths() async throws {
     let root = try makeTemporaryLibraryRoot()
     defer { removeTemporaryLibraryRoot(root) }

@@ -209,8 +209,21 @@ public actor LocalLibrary {
     }
 
     package func claimNextRunnable() throws -> DurableQueueClaim? {
-        try withLocalLibraryErrorTranslation {
-            try database.claimNextRunnable()
+        do {
+            return try database.claimNextRunnable()
+        } catch let error as DatabaseError {
+            if let transient = transientDurableQueueClaimError(for: error) {
+                throw transient
+            }
+            return try withLocalLibraryErrorTranslation {
+                () -> DurableQueueClaim? in
+                throw error
+            }
+        } catch {
+            return try withLocalLibraryErrorTranslation {
+                () -> DurableQueueClaim? in
+                throw error
+            }
         }
     }
 
@@ -456,6 +469,17 @@ func isFinalArtifactCorruption(_ error: Error) -> Bool {
          .checkpointRegression,
          .publicationFailed:
         return false
+    }
+}
+
+func transientDurableQueueClaimError(
+    for error: DatabaseError
+) -> DurableQueueClaimError? {
+    switch error.extendedResultCode {
+    case .SQLITE_BUSY, .SQLITE_LOCKED:
+        return .transientDatabaseContention
+    default:
+        return nil
     }
 }
 

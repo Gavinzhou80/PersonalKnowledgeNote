@@ -1557,7 +1557,11 @@ final class LibraryDatabase: Sendable {
                     task: item.task,
                     stagedArtifact: item.stagedArtifact,
                     checkpointArtifact: item.checkpointArtifact,
-                    snapshot: item.snapshot,
+                    snapshot: item.snapshot.withPublicationIssues(
+                        item.state == .completed
+                            ? document?.stored.content.issues
+                            : nil
+                    ),
                     outcome: item.outcome
                 )
             )

@@ -285,7 +285,10 @@ extension ImportTaskRecord {
             throw corruptLibrary()
         }
 
-        _ = try SourceColumns.decode(kind: sourceKind, value: sourceValue)
+        let originalSource = try SourceColumns.decode(
+            kind: sourceKind,
+            value: sourceValue
+        )
         let decodedQueueSequence = try decodeQueueSequence(
             for: decodedState
         )
@@ -297,10 +300,12 @@ extension ImportTaskRecord {
         )
         let artifact = try decodeStagedArtifact(stagedArtifact)
         try validateOutcome(for: decodedState)
+        let outcome = try storedOutcome()
 
         return DurableImportSnapshot(
             taskID: ImportTaskID(rawTaskID),
             journalSequence: decodedJournalSequence,
+            originalSource: originalSource,
             queueSequence: decodedQueueSequence,
             attempt: decodedAttempt,
             revision: decodedRevision,
@@ -308,7 +313,8 @@ extension ImportTaskRecord {
             failure: failure,
             checkpoint: checkpoint,
             checkpointArtifact: managedCheckpointArtifact,
-            stagedArtifact: artifact
+            stagedArtifact: artifact,
+            outcome: outcome
         )
     }
 
