@@ -14,19 +14,22 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         let body: Data
         let delay: Duration
         let framing: Framing
+        let onSendCompleted: (@Sendable () -> Void)?
 
         init(
             status: Int = 200,
             headers: [String: String] = [:],
             body: Data = Data(),
             delay: Duration = .zero,
-            framing: Framing = .contentLength
+            framing: Framing = .contentLength,
+            onSendCompleted: (@Sendable () -> Void)? = nil
         ) {
             self.status = status
             self.headers = headers
             self.body = body
             self.delay = delay
             self.framing = framing
+            self.onSendCompleted = onSendCompleted
         }
     }
 
@@ -202,6 +205,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             wire.append(Data("\r\n".utf8))
             wire.append(body)
             connection.send(content: wire, completion: .contentProcessed { _ in
+                response.onSendCompleted?()
                 connection.cancel()
                 self.remove(connection)
             })
