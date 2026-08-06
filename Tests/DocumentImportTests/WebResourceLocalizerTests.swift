@@ -169,26 +169,81 @@ func rendererPreservesNestedInlineSemantics() throws {
     #expect(try parsed.select("strong").text() == "nested text")
 }
 
+@Test(arguments: [false, true])
+func rendererDeterministicallyNestsEqualRangeStrongAndEmphasis(
+    reversed: Bool
+) throws {
+    let strong = InlineMarkup(
+        range: .init(utf16Offset: 0, utf16Length: 4),
+        kind: .strong
+    )
+    let emphasis = InlineMarkup(
+        range: .init(utf16Offset: 0, utf16Length: 4),
+        kind: .emphasis
+    )
+    let html = try renderedInlineHTML(
+        text: "same",
+        markup: reversed ? [emphasis, strong] : [strong, emphasis]
+    )
+
+    #expect(html.contains("<strong><em>same</em></strong>"))
+    let parsed = try SwiftSoup.parse(html)
+    #expect(try parsed.select("strong > em").text() == "same")
+}
+
+@Test(arguments: [false, true])
+func rendererDeterministicallyNestsEqualRangeLinkAndEmphasis(
+    reversed: Bool
+) throws {
+    let link = InlineMarkup(
+        range: .init(utf16Offset: 0, utf16Length: 4),
+        kind: .link(URL(string: "https://example.com/read")!)
+    )
+    let emphasis = InlineMarkup(
+        range: .init(utf16Offset: 0, utf16Length: 4),
+        kind: .emphasis
+    )
+    let html = try renderedInlineHTML(
+        text: "same",
+        markup: reversed ? [emphasis, link] : [link, emphasis]
+    )
+
+    #expect(html.contains(">same</em></a>"))
+    let parsed = try SwiftSoup.parse(html)
+    #expect(try parsed.select("a > em").text() == "same")
+    #expect(try parsed.body()?.text() == "same")
+}
+
 @Test
 func cancellationIsNotPersistedAsAnOptionalImageFailure() async throws {
-    let server = try await LocalHTTPFixtureServer.start { _ in
-        .init(headers: ["Content-Type": "image/svg+xml"], body: Data("<svg/>".utf8), delay: .seconds(2))
+    let probe = RequestProbe()
+    let server = try await LocalHTTPFixtureServer.start { path in
+        probe.begin(path)
+        return .init(
+            headers: ["Content-Type": "image/svg+xml"],
+            body: Data("<svg/>".utf8),
+            delay: .seconds(30),
+            onSendCompleted: { probe.end() }
+        )
     }
     defer { server.stop() }
     let package = try temporaryPackage()
     defer { try? FileManager.default.removeItem(at: package) }
     let task = Task {
         try await WebResourceLocalizer().localize(
-            [candidate("slow", server.url("slow.svg"))],
+            (0..<8).map { candidate("slow-\($0)", server.url("slow-\($0).svg")) },
             into: package
         )
     }
-    try await Task.sleep(for: .milliseconds(30))
+    await probe.wait(untilTotalCount: 4)
     task.cancel()
 
     await #expect(throws: CancellationError.self) {
         try await task.value
     }
+    await server.waitUntilNoRetainedConnectionsForTesting()
+    #expect(probe.totalCount == 4)
+    #expect(server.retainedConnectionCountForTesting == 0)
 }
 
 @Test
@@ -243,21 +298,66 @@ private func temporaryPackage() throws -> URL {
     return url
 }
 
+private func renderedInlineHTML(
+    text: String,
+    markup: [InlineMarkup]
+) throws -> String {
+    let package = try temporaryPackage()
+    defer { try? FileManager.default.removeItem(at: package) }
+    let article = ExtractedWebArticle(
+        metadata: .init(title: "Inline", author: nil),
+        blocks: [
+            .init(
+                category: .text,
+                role: .paragraph,
+                canonicalText: text,
+                inlineMarkup: markup,
+                evidenceLocator: "#inline",
+                imageKey: nil,
+                relationTargetKey: nil
+            ),
+        ],
+        rootSelector: "#inline",
+        imageCandidates: []
+    )
+    _ = try WebArtifactRenderer().render(article, localizedMedia: [:], into: package)
+    return try String(contentsOf: package.appending(path: "index.html"), encoding: .utf8)
+}
+
 private final class RequestProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var counts: [String: Int] = [:]
     private var current = 0
     private var maximum = 0
+    private var total = 0
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
 
     func begin(_ path: String) {
-        lock.withLock {
+        let ready: [CheckedContinuation<Void, Never>] = lock.withLock {
             counts[path, default: 0] += 1
             current += 1
+            total += 1
             maximum = max(maximum, current)
+            let result = waiters.filter { total >= $0.0 }.map(\ .1)
+            waiters.removeAll { total >= $0.0 }
+            return result
         }
+        ready.forEach { $0.resume() }
     }
 
     func end() { lock.withLock { current -= 1 } }
     func count(for path: String) -> Int { lock.withLock { counts[path, default: 0] } }
     var maximumConcurrent: Int { lock.withLock { maximum } }
+    var totalCount: Int { lock.withLock { total } }
+
+    func wait(untilTotalCount target: Int) async {
+        await withCheckedContinuation { continuation in
+            let resumeNow = lock.withLock {
+                if total >= target { return true }
+                waiters.append((target, continuation))
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
 }

@@ -40,6 +40,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
     private let handler: Handler
     private let lock = NSLock()
     private var connections: [NWConnection] = []
+    private var emptyConnectionWaiters: [CheckedContinuation<Void, Never>] = []
     private var stopped = false
     private(set) var baseURL = URL(string: "http://127.0.0.1:0")!
 
@@ -97,14 +98,17 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
     }
 
     func stop() {
-        let active: [NWConnection] = lock.withLock {
-            guard !stopped else { return [] }
+        let stoppedState: ([NWConnection], [CheckedContinuation<Void, Never>]) = lock.withLock {
+            guard !stopped else { return ([], []) }
             stopped = true
             let result = connections
             connections.removeAll()
-            return result
+            let waiters = emptyConnectionWaiters
+            emptyConnectionWaiters.removeAll()
+            return (result, waiters)
         }
-        active.forEach { $0.cancel() }
+        stoppedState.0.forEach { $0.cancel() }
+        stoppedState.1.forEach { $0.resume() }
         listener.stateUpdateHandler = nil
         listener.newConnectionHandler = nil
         listener.cancel()
@@ -149,6 +153,17 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         lock.withLock { connections.count }
     }
 
+    func waitUntilNoRetainedConnectionsForTesting() async {
+        await withCheckedContinuation { continuation in
+            let resumeNow = lock.withLock {
+                if connections.isEmpty { return true }
+                emptyConnectionWaiters.append(continuation)
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
     private func receiveRequest(on connection: NWConnection, accumulated: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) {
             [weak self] data, _, isComplete, error in
@@ -170,6 +185,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         let path = requestText.split(separator: "\r\n", maxSplits: 1).first?
             .split(separator: " ").dropFirst().first.map(String.init) ?? "/"
         let response = handler(path)
+        monitorPeerClosure(on: connection)
 
         Task { [weak self, weak connection] in
             if response.delay > .zero {
@@ -212,8 +228,28 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         }
     }
 
+    private func monitorPeerClosure(on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) {
+            [weak self, weak connection] data, _, isComplete, error in
+            guard let self, let connection else { return }
+            if isComplete || error != nil {
+                connection.cancel()
+                self.remove(connection)
+            } else if data?.isEmpty == false {
+                self.monitorPeerClosure(on: connection)
+            }
+        }
+    }
+
     private func remove(_ connection: NWConnection) {
-        lock.withLock { connections.removeAll { $0 === connection } }
+        let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
+            connections.removeAll { $0 === connection }
+            guard connections.isEmpty else { return [] }
+            let result = emptyConnectionWaiters
+            emptyConnectionWaiters.removeAll()
+            return result
+        }
+        waiters.forEach { $0.resume() }
     }
 
     private static func reasonPhrase(for status: Int) -> String {

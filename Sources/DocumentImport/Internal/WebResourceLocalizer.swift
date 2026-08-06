@@ -17,8 +17,9 @@ struct WebResourceLocalizer: Sendable {
         relatedBlockIDs: [String: SourceBlockID] = [:]
     ) async throws -> WebLocalizationResult {
         let assetsURL = try prepareAssetsDirectory(in: packageURL)
+        var seenURLs = Set<URL>()
         let uniqueURLs = candidates.reduce(into: [URL]()) { result, candidate in
-            guard !result.contains(candidate.resolvedURL) else { return }
+            guard seenURLs.insert(candidate.resolvedURL).inserted else { return }
             result.append(candidate.resolvedURL)
         }
         let configuration = URLSessionConfiguration.ephemeral

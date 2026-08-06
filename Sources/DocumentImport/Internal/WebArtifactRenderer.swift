@@ -95,7 +95,10 @@ struct WebArtifactRenderer: Sendable {
                 if $0.range.utf16Offset != $1.range.utf16Offset {
                     return $0.range.utf16Offset > $1.range.utf16Offset
                 }
-                return $0.range.utf16Length < $1.range.utf16Length
+                if $0.range.utf16Length != $1.range.utf16Length {
+                    return $0.range.utf16Length < $1.range.utf16Length
+                }
+                return tagPriority($0.kind) > tagPriority($1.kind)
             }
             result += closing.compactMap { tags(for: $0.kind)?.closing }.joined()
             let opening = markup.filter { $0.range.utf16Offset == position }.sorted {
