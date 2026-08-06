@@ -363,7 +363,8 @@ final class LibraryDatabase: Sendable {
     func replaceCheckpointArtifact(
         taskID: ImportTaskID,
         placement: CheckpointArtifactPlacement,
-        update: CheckpointUpdate
+        update: CheckpointUpdate,
+        faultInjector: CheckpointArtifactFaultInjector
     ) throws -> CheckpointArtifactMutation {
         try queue.write { db in
             guard var task = try ImportTaskRecord.fetchOne(
@@ -431,6 +432,9 @@ final class LibraryDatabase: Sendable {
                 placement: placement
             )
             try record.insert(db)
+            try faultInjector.hit(
+                .afterCheckpointArtifactRowMutationBeforeTaskUpdate
+            )
             task.checkpointOrdinal = checkpointOrdinal
             task.checkpointCodecVersion = Int64(
                 update.envelope.codecVersion

@@ -4,6 +4,7 @@ import KnowledgeCore
 
 enum CheckpointArtifactFaultPoint: Equatable, Sendable {
     case afterNewCopyBeforeDatabaseMutation
+    case afterCheckpointArtifactRowMutationBeforeTaskUpdate
     case afterDatabaseCommitBeforeOldRemoval
 }
 

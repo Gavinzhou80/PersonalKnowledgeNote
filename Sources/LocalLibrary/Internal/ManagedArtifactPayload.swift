@@ -3,13 +3,6 @@ import Darwin
 import Foundation
 
 enum ManagedArtifactPayload {
-    static let maximumCheckpointFileCount = 256
-    static let maximumCheckpointDirectoryCount = 64
-    static let maximumCheckpointByteCount: UInt64 = 16 * 1_024 * 1_024
-    static let maximumCheckpointFileByteCount: UInt64 = 8 * 1_024 * 1_024
-    static let maximumCheckpointDepth = 16
-    static let maximumCheckpointRelativePathByteCount = 1_024
-
     private enum ManifestEntryKind: UInt8 {
         case directory = 0
         case file = 1
@@ -103,8 +96,8 @@ enum ManagedArtifactPayload {
         let fileCount = entries.lazy.filter { $0.kind == .file }.count
         let directoryCount = entries.count - fileCount
         guard fileCount > 0,
-              fileCount <= maximumCheckpointFileCount,
-              directoryCount <= maximumCheckpointDirectoryCount
+              fileCount <= CheckpointPackageLimits.maximumFileCount,
+              directoryCount <= CheckpointPackageLimits.maximumDirectoryCount
         else {
             throw LocalLibraryError.artifactMissing
         }
@@ -136,8 +129,12 @@ enum ManagedArtifactPayload {
                   values.isSymbolicLink != true,
                   let rawFileSize = values.fileSize,
                   let expectedFileSize = UInt64(exactly: rawFileSize),
-                  expectedFileSize <= maximumCheckpointFileByteCount,
-                  byteCount <= maximumCheckpointByteCount - expectedFileSize
+                  expectedFileSize <= UInt64(
+                    CheckpointPackageLimits.maximumFileByteCount
+                  ),
+                  byteCount <= UInt64(
+                    CheckpointPackageLimits.maximumAggregateByteCount
+                  ) - expectedFileSize
             else {
                 throw LocalLibraryError.artifactMissing
             }
@@ -173,7 +170,7 @@ enum ManagedArtifactPayload {
         }
         try synchronizeDirectory(payload)
         return (
-            CheckpointArtifactDescriptor(
+            try CheckpointArtifactDescriptor(
                 byteCount: descriptorByteCount,
                 contentHash: hashString(hasher.finalize())
             ),
@@ -281,7 +278,8 @@ enum ManagedArtifactPayload {
             let relativeComponents = childComponents.dropFirst(
                 rootComponents.count
             )
-            guard relativeComponents.count <= maximumCheckpointDepth,
+            guard relativeComponents.count
+                    <= CheckpointPackageLimits.maximumDepth,
                   relativeComponents.allSatisfy(
                     isCanonicalCheckpointName
                   )
@@ -290,7 +288,7 @@ enum ManagedArtifactPayload {
             }
             let childPath = relativeComponents.joined(separator: "/")
             guard childPath.utf8.count
-                    <= maximumCheckpointRelativePathByteCount
+                    <= CheckpointPackageLimits.maximumRelativePathByteCount
             else {
                 throw LocalLibraryError.artifactMissing
             }
@@ -305,7 +303,8 @@ enum ManagedArtifactPayload {
             }
             if values.isDirectory == true {
                 directoryCount += 1
-                guard directoryCount <= maximumCheckpointDirectoryCount
+                guard directoryCount
+                        <= CheckpointPackageLimits.maximumDirectoryCount
                 else {
                     throw LocalLibraryError.artifactMissing
                 }
@@ -316,7 +315,8 @@ enum ManagedArtifactPayload {
                 ))
             } else if values.isRegularFile == true {
                 fileCount += 1
-                guard fileCount <= maximumCheckpointFileCount else {
+                guard fileCount <= CheckpointPackageLimits.maximumFileCount
+                else {
                     throw LocalLibraryError.artifactMissing
                 }
                 entries.append(ManifestEntry(

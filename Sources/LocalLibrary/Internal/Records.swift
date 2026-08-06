@@ -424,9 +424,6 @@ extension ImportTaskRecord {
             CheckpointArtifactDescriptor.self,
             from: record.descriptorJSON
         )
-        guard descriptor.byteCount > 0, !descriptor.contentHash.isEmpty else {
-            throw corruptLibrary()
-        }
         return ManagedCheckpointArtifact(
             rawValue: rawArtifactID,
             descriptor: descriptor

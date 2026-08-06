@@ -38,11 +38,31 @@ public struct PublicationCandidate: Sendable {
     }
 }
 
+package enum CheckpointPackageLimits {
+    package static let maximumFileCount = 256
+    package static let maximumDirectoryCount = 64
+    package static let maximumAggregateByteCount: Int64 =
+        16 * 1_024 * 1_024
+    package static let maximumFileByteCount: Int64 = 8 * 1_024 * 1_024
+    package static let maximumDepth = 16
+    package static let maximumRelativePathByteCount = 1_024
+}
+
 package struct CheckpointArtifactDescriptor: Hashable, Codable, Sendable {
     package let byteCount: Int64
     package let contentHash: String
 
-    package init(byteCount: Int64, contentHash: String) {
+    package init(byteCount: Int64, contentHash: String) throws {
+        guard byteCount > 0,
+              byteCount <= CheckpointPackageLimits.maximumAggregateByteCount,
+              contentHash.utf8.count == 64,
+              contentHash.utf8.allSatisfy({ byte in
+                (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                    || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+              })
+        else {
+            throw CheckpointArtifactDescriptorValidationError.invalid
+        }
         self.byteCount = byteCount
         self.contentHash = contentHash
     }
@@ -51,14 +71,21 @@ package struct CheckpointArtifactDescriptor: Hashable, Codable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let byteCount = try container.decode(Int64.self, forKey: .byteCount)
         let contentHash = try container.decode(String.self, forKey: .contentHash)
-        guard byteCount > 0, !contentHash.isEmpty else {
+        do {
+            try self.init(
+                byteCount: byteCount,
+                contentHash: contentHash
+            )
+        } catch {
             throw DecodingError.dataCorrupted(.init(
                 codingPath: decoder.codingPath,
                 debugDescription: "Invalid checkpoint artifact descriptor"
             ))
         }
-        self.byteCount = byteCount
-        self.contentHash = contentHash
+    }
+
+    private enum CheckpointArtifactDescriptorValidationError: Error {
+        case invalid
     }
 }
 

@@ -4,6 +4,268 @@ import KnowledgeCore
 import Testing
 @testable import LocalLibrary
 
+struct InvalidPersistedCheckpointDescriptor: Sendable {
+    let byteCount: Int64
+    let contentHash: String
+}
+
+private struct RawCheckpointArtifactDescriptor: Codable {
+    let byteCount: Int64
+    let contentHash: String
+}
+
+@Test(arguments: [
+    InvalidPersistedCheckpointDescriptor(
+        byteCount: Int64.max,
+        contentHash: String(repeating: "0", count: 64)
+    ),
+    InvalidPersistedCheckpointDescriptor(
+        byteCount: CheckpointPackageLimits.maximumAggregateByteCount + 1,
+        contentHash: String(repeating: "0", count: 64)
+    ),
+    InvalidPersistedCheckpointDescriptor(
+        byteCount: 1,
+        contentHash: String(repeating: "0", count: 63)
+    ),
+    InvalidPersistedCheckpointDescriptor(
+        byteCount: 1,
+        contentHash: String(repeating: "A", count: 64)
+    ),
+    InvalidPersistedCheckpointDescriptor(
+        byteCount: 1,
+        contentHash: String(repeating: "z", count: 64)
+    ),
+])
+func persistedInvalidCheckpointDescriptorIsCorruptAcrossReadPaths(
+    corruption: InvalidPersistedCheckpointDescriptor
+) async throws {
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let library = try await LocalLibrary.open(at: root)
+    let workspace = try await library.accept(
+        .webpage(URL(string: "https://example.test/descriptor-corruption")!)
+    )
+    let package = try makeCheckpointPackage(body: Data("valid".utf8))
+    defer { try? FileManager.default.removeItem(at: package) }
+    _ = try await workspace.replaceCheckpointArtifact(
+        packageURL: package,
+        update: CheckpointUpdate(
+            expectedRevision: try await workspace.snapshot().revision,
+            ordinal: 1,
+            envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+        )
+    )
+    try CheckpointArtifactTestDriver.corruptDescriptor(
+        at: root,
+        taskID: workspace.taskID,
+        byteCount: corruption.byteCount,
+        contentHash: corruption.contentHash
+    )
+
+    await expectCorruptLibrary {
+        _ = try await workspace.snapshot()
+    }
+    await expectCorruptLibrary {
+        _ = try await library.retainedImports()
+    }
+    await expectCorruptLibrary {
+        _ = try await LocalLibrary.open(at: root)
+    }
+}
+
+@Test
+func checkpointPackageByteLimitsAcceptExactBoundariesAndRejectOneOver()
+    async throws
+{
+    let perFileLimit = Int(CheckpointPackageLimits.maximumFileByteCount)
+    let aggregateLimit = Int(
+        CheckpointPackageLimits.maximumAggregateByteCount
+    )
+    let metadataByteCount = Data(#"{"codecVersion":1}"#.utf8).count
+
+    do {
+        let root = try makeTemporaryLibraryRoot()
+        defer { removeTemporaryLibraryRoot(root) }
+        let library = try await LocalLibrary.open(at: root)
+        let workspace = try await library.accept(
+            .webpage(URL(string: "https://example.test/file-boundary")!)
+        )
+        let package = try makeCheckpointPackage(
+            fileSizes: ["payload.bin": perFileLimit]
+        )
+        defer { try? FileManager.default.removeItem(at: package) }
+        let attached = try await workspace.replaceCheckpointArtifact(
+            packageURL: package,
+            update: CheckpointUpdate(
+                expectedRevision: try await workspace.snapshot().revision,
+                ordinal: 1,
+                envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+            )
+        )
+        let loaded = try await workspace.loadCheckpointArtifact(
+            attached.artifact
+        )
+        #expect(loaded.files["payload.bin"]?.count == perFileLimit)
+    }
+
+    do {
+        let root = try makeTemporaryLibraryRoot()
+        defer { removeTemporaryLibraryRoot(root) }
+        let library = try await LocalLibrary.open(at: root)
+        let workspace = try await library.accept(
+            .webpage(URL(string: "https://example.test/file-over")!)
+        )
+        let package = try makeCheckpointPackage(
+            fileSizes: ["payload.bin": perFileLimit + 1]
+        )
+        defer { try? FileManager.default.removeItem(at: package) }
+        await #expect(throws: LocalLibraryError.artifactMissing) {
+            _ = try await workspace.replaceCheckpointArtifact(
+                packageURL: package,
+                update: CheckpointUpdate(
+                    expectedRevision: try await workspace.snapshot().revision,
+                    ordinal: 1,
+                    envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+                )
+            )
+        }
+    }
+
+    do {
+        let root = try makeTemporaryLibraryRoot()
+        defer { removeTemporaryLibraryRoot(root) }
+        let library = try await LocalLibrary.open(at: root)
+        let workspace = try await library.accept(
+            .webpage(URL(string: "https://example.test/aggregate-boundary")!)
+        )
+        let package = try makeCheckpointPackage(fileSizes: [
+            "payload.bin": perFileLimit,
+            "remainder.bin": aggregateLimit
+                - perFileLimit
+                - metadataByteCount,
+        ])
+        defer { try? FileManager.default.removeItem(at: package) }
+        let attached = try await workspace.replaceCheckpointArtifact(
+            packageURL: package,
+            update: CheckpointUpdate(
+                expectedRevision: try await workspace.snapshot().revision,
+                ordinal: 1,
+                envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+            )
+        )
+        let loaded = try await workspace.loadCheckpointArtifact(
+            attached.artifact
+        )
+        #expect(loaded.descriptor.byteCount == Int64(aggregateLimit))
+    }
+
+    do {
+        let root = try makeTemporaryLibraryRoot()
+        defer { removeTemporaryLibraryRoot(root) }
+        let library = try await LocalLibrary.open(at: root)
+        let workspace = try await library.accept(
+            .webpage(URL(string: "https://example.test/aggregate-over")!)
+        )
+        let package = try makeCheckpointPackage(fileSizes: [
+            "payload.bin": perFileLimit,
+            "remainder.bin": aggregateLimit
+                - perFileLimit
+                - metadataByteCount
+                + 1,
+        ])
+        defer { try? FileManager.default.removeItem(at: package) }
+        await #expect(throws: LocalLibraryError.artifactMissing) {
+            _ = try await workspace.replaceCheckpointArtifact(
+                packageURL: package,
+                update: CheckpointUpdate(
+                    expectedRevision: try await workspace.snapshot().revision,
+                    ordinal: 1,
+                    envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+                )
+            )
+        }
+    }
+}
+
+@Test
+func managedCheckpointLoadRejectsPerFileAndAggregateBoundaryTampering()
+    async throws
+{
+    let perFileLimit = Int(CheckpointPackageLimits.maximumFileByteCount)
+    let aggregateLimit = Int(
+        CheckpointPackageLimits.maximumAggregateByteCount
+    )
+    let metadataByteCount = Data(#"{"codecVersion":1}"#.utf8).count
+
+    do {
+        let root = try makeTemporaryLibraryRoot()
+        defer { removeTemporaryLibraryRoot(root) }
+        let library = try await LocalLibrary.open(at: root)
+        let workspace = try await library.accept(
+            .webpage(URL(string: "https://example.test/managed-file-over")!)
+        )
+        let package = try makeCheckpointPackage(
+            fileSizes: ["payload.bin": 1]
+        )
+        defer { try? FileManager.default.removeItem(at: package) }
+        let attached = try await workspace.replaceCheckpointArtifact(
+            packageURL: package,
+            update: CheckpointUpdate(
+                expectedRevision: try await workspace.snapshot().revision,
+                ordinal: 1,
+                envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+            )
+        )
+        try CheckpointArtifactTestDriver.writeManagedFile(
+            at: root,
+            taskID: workspace.taskID,
+            artifact: attached.artifact,
+            name: "payload.bin",
+            byteCount: perFileLimit + 1
+        )
+        await expectCheckpointCorruption {
+            _ = try await workspace.loadCheckpointArtifact(attached.artifact)
+        }
+    }
+
+    do {
+        let root = try makeTemporaryLibraryRoot()
+        defer { removeTemporaryLibraryRoot(root) }
+        let library = try await LocalLibrary.open(at: root)
+        let workspace = try await library.accept(
+            .webpage(URL(string: "https://example.test/managed-aggregate-over")!)
+        )
+        let package = try makeCheckpointPackage(fileSizes: [
+            "payload.bin": perFileLimit,
+            "remainder.bin": aggregateLimit
+                - perFileLimit
+                - metadataByteCount,
+        ])
+        defer { try? FileManager.default.removeItem(at: package) }
+        let attached = try await workspace.replaceCheckpointArtifact(
+            packageURL: package,
+            update: CheckpointUpdate(
+                expectedRevision: try await workspace.snapshot().revision,
+                ordinal: 1,
+                envelope: CheckpointEnvelope(codecVersion: 1, payload: Data())
+            )
+        )
+        try CheckpointArtifactTestDriver.writeManagedFile(
+            at: root,
+            taskID: workspace.taskID,
+            artifact: attached.artifact,
+            name: "remainder.bin",
+            byteCount: aggregateLimit
+                - perFileLimit
+                - metadataByteCount
+                + 1
+        )
+        await expectCheckpointCorruption {
+            _ = try await workspace.loadCheckpointArtifact(attached.artifact)
+        }
+    }
+}
+
 @Test
 func checkpointPackageIsTaskOwnedAndReplaceable() async throws {
     let root = try makeTemporaryLibraryRoot()
@@ -347,6 +609,81 @@ func faultBeforeCheckpointDatabaseMutationRemovesOnlyNewBytes()
 }
 
 @Test
+func faultInsideCheckpointPairTransactionRollsBackOldPairAndNewCopy()
+    async throws
+{
+    let root = try makeTemporaryLibraryRoot()
+    defer { removeTemporaryLibraryRoot(root) }
+    let initialLibrary = try await LocalLibrary.open(at: root)
+    let initialWorkspace = try await initialLibrary.accept(
+        .webpage(URL(string: "https://example.test/in-transaction-fault")!)
+    )
+    let firstPackage = try makeCheckpointPackage(body: Data("first".utf8))
+    defer { try? FileManager.default.removeItem(at: firstPackage) }
+    let first = try await initialWorkspace.replaceCheckpointArtifact(
+        packageURL: firstPackage,
+        update: CheckpointUpdate(
+            expectedRevision: try await initialWorkspace.snapshot().revision,
+            ordinal: 3,
+            envelope: CheckpointEnvelope(
+                codecVersion: 1,
+                payload: Data("old-envelope".utf8)
+            )
+        )
+    )
+    let before = try CheckpointArtifactTestDriver.state(
+        at: root,
+        taskID: initialWorkspace.taskID
+    )
+    let faulting = try await LocalLibrary.openForTesting(
+        at: root,
+        checkpointArtifactFaultInjector: CheckpointArtifactFaultInjector { point in
+            if point == .afterCheckpointArtifactRowMutationBeforeTaskUpdate {
+                throw LocalLibraryError.unavailable
+            }
+        }
+    )
+    let workspace = try #require(
+        try await faulting.importWorkspace(id: initialWorkspace.taskID)
+    )
+    let secondPackage = try makeCheckpointPackage(body: Data("second".utf8))
+    defer { try? FileManager.default.removeItem(at: secondPackage) }
+
+    await #expect(throws: LocalLibraryError.unavailable) {
+        _ = try await workspace.replaceCheckpointArtifact(
+            packageURL: secondPackage,
+            update: CheckpointUpdate(
+                expectedRevision: first.snapshot.revision,
+                ordinal: 4,
+                envelope: CheckpointEnvelope(
+                    codecVersion: 2,
+                    payload: Data("new-envelope".utf8)
+                )
+            )
+        )
+    }
+
+    #expect(
+        try CheckpointArtifactTestDriver.state(
+            at: root,
+            taskID: workspace.taskID
+        ) == before
+    )
+    let rolledBack = try await workspace.snapshot()
+    #expect(rolledBack.revision == first.snapshot.revision)
+    #expect(rolledBack.checkpointArtifact == first.artifact)
+    #expect(rolledBack.checkpoint == CheckpointEnvelope(
+        codecVersion: 1,
+        payload: Data("old-envelope".utf8)
+    ))
+    #expect(try await workspace.checkpointArtifactCount() == 1)
+    #expect(
+        try await workspace.loadCheckpointArtifact(first.artifact)
+            .files["payload.bin"] == Data("first".utf8)
+    )
+}
+
+@Test
 func postCommitCleanupFaultLeavesNewPairAndReopenRemovesOldOrphan()
     async throws
 {
@@ -567,6 +904,27 @@ private func makeCheckpointPackage(body: Data) throws -> URL {
     return root
 }
 
+private func makeCheckpointPackage(
+    fileSizes: [String: Int]
+) throws -> URL {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(
+        at: root,
+        withIntermediateDirectories: true
+    )
+    try Data(#"{"codecVersion":1}"#.utf8).write(
+        to: root.appending(path: "metadata.json"),
+        options: .atomic
+    )
+    for (name, byteCount) in fileSizes {
+        try Data(repeating: 0x41, count: byteCount).write(
+            to: root.appending(path: name)
+        )
+    }
+    return root
+}
+
 private func attachCheckpoint(
     toNewTaskIn library: LocalLibrary,
     ordinal: UInt64
@@ -601,6 +959,22 @@ private func expectCheckpointCorruption(
             return
         default:
             Issue.record("Expected artifact/corrupt error, got \(error)")
+        }
+    } catch {
+        Issue.record("Expected LocalLibraryError, got \(error)")
+    }
+}
+
+private func expectCorruptLibrary(
+    _ operation: () async throws -> Void
+) async {
+    do {
+        try await operation()
+        Issue.record("Expected corrupt library")
+    } catch let error as LocalLibraryError {
+        guard case .corruptLibrary = error else {
+            Issue.record("Expected corruptLibrary, got \(error)")
+            return
         }
     } catch {
         Issue.record("Expected LocalLibraryError, got \(error)")
@@ -655,6 +1029,53 @@ private enum CheckpointArtifactTestDriver {
                     taskID: taskID,
                     artifactID: artifact.rawValue
                 ).relativePath + "/payload.bin"
+            )
+        )
+    }
+
+    static func corruptDescriptor(
+        at root: URL,
+        taskID: ImportTaskID,
+        byteCount: Int64,
+        contentHash: String
+    ) throws {
+        let encoded = try JSONEncoder().encode(
+            RawCheckpointArtifactDescriptor(
+                byteCount: byteCount,
+                contentHash: contentHash
+            )
+        )
+        try databaseQueue(at: root).write { db in
+            try db.execute(
+                sql: """
+                    UPDATE checkpoint_artifacts
+                    SET descriptor_json = ?
+                    WHERE task_id = ?
+                    """,
+                arguments: [
+                    encoded,
+                    taskID.rawValue.uuidString,
+                ]
+            )
+            guard db.changesCount == 1 else {
+                throw LocalLibraryError.unavailable
+            }
+        }
+    }
+
+    static func writeManagedFile(
+        at root: URL,
+        taskID: ImportTaskID,
+        artifact: ManagedCheckpointArtifact,
+        name: String,
+        byteCount: Int
+    ) throws {
+        try Data(repeating: 0x42, count: byteCount).write(
+            to: root.appending(
+                path: ManagedArtifactPath.checkpoint(
+                    taskID: taskID,
+                    artifactID: artifact.rawValue
+                ).relativePath + "/\(name)"
             )
         )
     }

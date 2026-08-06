@@ -275,7 +275,8 @@ public actor LocalLibrary {
                 mutation = try database.replaceCheckpointArtifact(
                     taskID: taskID,
                     placement: placement,
-                    update: update
+                    update: update,
+                    faultInjector: checkpointArtifactFaultInjector
                 )
             } catch {
                 try? managedArtifacts.removeCheckpointArtifact(
