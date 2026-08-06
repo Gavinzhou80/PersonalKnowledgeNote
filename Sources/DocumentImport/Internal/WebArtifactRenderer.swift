@@ -26,9 +26,17 @@ struct WebArtifactRenderer: Sendable {
         let captions = Dictionary(grouping: blocks.compactMap { block in
             block.relationTargetKey.map { ($0, block) }
         }, by: \ .0).mapValues { $0.map(\ .1) }
+        let captionConsumingImageKeys = Set<String>(blocks.compactMap { block in
+            guard block.role == .image else { return nil }
+            return block.imageKey
+        })
         var rendered: [String] = []
         for block in blocks {
-            if block.role == .caption, block.relationTargetKey != nil { continue }
+            if block.role == .caption,
+               let targetKey = block.relationTargetKey,
+               captionConsumingImageKeys.contains(targetKey) {
+                continue
+            }
             let value = render(block, media: media)
             guard !value.isEmpty else { continue }
             if block.role == .image,

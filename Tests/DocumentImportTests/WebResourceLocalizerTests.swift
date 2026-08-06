@@ -136,6 +136,61 @@ func rendererCreatesClosedParseableOfflinePackage() async throws {
 }
 
 @Test
+func rendererKeepsCaptionWhenItsTargetImageIsAbsent() throws {
+    let package = try temporaryPackage()
+    defer { try? FileManager.default.removeItem(at: package) }
+    let article = ExtractedWebArticle(
+        metadata: .init(title: "Orphan caption", author: nil),
+        blocks: [
+            .init(
+                category: .text,
+                role: .caption,
+                canonicalText: "Readable orphan caption.",
+                inlineMarkup: [],
+                evidenceLocator: "#caption",
+                imageKey: nil,
+                relationTargetKey: "missing-target"
+            ),
+        ],
+        rootSelector: "#article",
+        imageCandidates: []
+    )
+
+    try WebArtifactRenderer().render(article, localizedMedia: [:], into: package)
+
+    let parsed = try SwiftSoup.parse(String(
+        contentsOf: package.appending(path: "index.html"),
+        encoding: .utf8
+    ))
+    #expect(try parsed.select("figcaption").text() == "Readable orphan caption.")
+    #expect(try parsed.select("figcaption").count == 1)
+}
+
+@Test(arguments: ["", "Readable alt"])
+func rendererKeepsUnavailableImageCaptionExactlyOnce(alt: String) throws {
+    let package = try temporaryPackage()
+    defer { try? FileManager.default.removeItem(at: package) }
+    let article = ExtractedWebArticle(
+        metadata: .init(title: "Unavailable image", author: nil),
+        blocks: [
+            .init(category: .media, role: .image, canonicalText: alt, inlineMarkup: [], evidenceLocator: "#image", imageKey: "image", relationTargetKey: nil),
+            .init(category: .text, role: .caption, canonicalText: "Readable caption.", inlineMarkup: [], evidenceLocator: "#caption", imageKey: nil, relationTargetKey: "image"),
+        ],
+        rootSelector: "#article",
+        imageCandidates: []
+    )
+
+    try WebArtifactRenderer().render(article, localizedMedia: [:], into: package)
+
+    let html = try String(contentsOf: package.appending(path: "index.html"), encoding: .utf8)
+    let parsed = try SwiftSoup.parse(html)
+    #expect(try parsed.select("figure > figcaption").text() == "Readable caption.")
+    #expect(try parsed.select("figcaption").count == 1)
+    #expect(try parsed.select("img[src]").isEmpty())
+    #expect(!html.contains("http://") && !html.contains("https://"))
+}
+
+@Test
 func rendererPreservesNestedInlineSemantics() throws {
     let package = try temporaryPackage()
     defer { try? FileManager.default.removeItem(at: package) }

@@ -63,34 +63,40 @@ struct StaticWebDocumentBuilder: Sendable {
                 into: packageURL
             )
             try Task.checkCancellation()
-            let authoritativeBlocks = article.blocks.filter { block in
+            stageObserver(.assignIdentities)
+            let identifiedBlocks = article.blocks.enumerated().map {
+                index, block in
+                (
+                    block: block,
+                    id: StableWebIdentity.blockID(
+                        category: block.category,
+                        role: block.role,
+                        ordinal: index + 1,
+                        text: block.canonicalText
+                    )
+                )
+            }
+            let authoritativeBlocks = identifiedBlocks.filter { identified in
+                let block = identified.block
                 guard block.role == .image else { return true }
                 if !block.canonicalText.isEmpty { return true }
                 guard let imageKey = block.imageKey else { return false }
                 return localized.mediaByCandidateKey[imageKey] != nil
             }
-            stageObserver(.assignIdentities)
-            let identities = authoritativeBlocks.enumerated().map { index, block in
-                StableWebIdentity.blockID(
-                    category: block.category,
-                    role: block.role,
-                    ordinal: index + 1,
-                    text: block.canonicalText
-                )
-            }
+            let identities = authoritativeBlocks.map(\.id)
             let imageBlockIDs = Dictionary(uniqueKeysWithValues:
-                zip(authoritativeBlocks, identities).compactMap { block, id in
-                    block.imageKey.map { ($0, id) }
+                authoritativeBlocks.compactMap { identified in
+                    identified.block.imageKey.map { ($0, identified.id) }
                 }
             )
             stageObserver(.buildRelations)
-            let relations = zip(authoritativeBlocks, identities).compactMap {
-                extracted, captionID -> SourceRelation? in
-                guard let targetKey = extracted.relationTargetKey,
+            let relations = authoritativeBlocks.compactMap {
+                identified -> SourceRelation? in
+                guard let targetKey = identified.block.relationTargetKey,
                       let imageID = imageBlockIDs[targetKey]
                 else { return nil }
                 return SourceRelation(
-                    sourceBlockID: captionID,
+                    sourceBlockID: identified.id,
                     targetBlockID: imageID,
                     kind: .captionForMedia
                 )
@@ -104,9 +110,10 @@ struct StaticWebDocumentBuilder: Sendable {
             stageObserver(.describePackage)
             let descriptor = try LocalLibrary.describeWebPackage(at: packageURL)
             stageObserver(.validateContent)
-            let blocks = zip(authoritativeBlocks, identities).map { extracted, id in
-                SourceBlock(
-                    id: id,
+            let blocks = authoritativeBlocks.map { identified in
+                let extracted = identified.block
+                return SourceBlock(
+                    id: identified.id,
                     canonicalText: extracted.canonicalText,
                     category: extracted.category,
                     role: extracted.role,
@@ -117,8 +124,8 @@ struct StaticWebDocumentBuilder: Sendable {
                 )
             }
             let evidence = Dictionary(uniqueKeysWithValues:
-                zip(authoritativeBlocks, identities).map {
-                    ($1, SourceEvidence.web(locator: $0.evidenceLocator))
+                authoritativeBlocks.map {
+                    ($0.id, SourceEvidence.web(locator: $0.block.evidenceLocator))
                 }
             )
             let issues = localized.issues.map { issue in
@@ -140,7 +147,7 @@ struct StaticWebDocumentBuilder: Sendable {
             )
             let fingerprint = StableWebIdentity.fingerprint(
                 blocks: authoritativeBlocks.map {
-                    ($0.category, $0.role, $0.canonicalText)
+                    ($0.block.category, $0.block.role, $0.block.canonicalText)
                 }
             )
             return StaticWebImportProduct(

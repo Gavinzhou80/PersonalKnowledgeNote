@@ -260,6 +260,58 @@ func localizedImageWithoutAltRemainsAuthoritativeMedia() async throws {
     #expect(product.issues.isEmpty)
 }
 
+@Test
+func optionalImageOutcomeDoesNotShiftRetainedBlockIdentities() async throws {
+    let svg = Data("<svg xmlns='http://www.w3.org/2000/svg'></svg>".utf8)
+    let available = try await LocalHTTPFixtureServer.start { _ in
+        .init(headers: ["Content-Type": "image/svg+xml"], body: svg)
+    }
+    defer { available.stop() }
+    let unavailable = try await LocalHTTPFixtureServer.start { _ in
+        .init(status: 404, headers: ["Content-Type": "text/plain"])
+    }
+    defer { unavailable.stop() }
+    let html = Data("""
+    <html><body><article><h1>Stable article</h1><p>Before.</p>
+    <figure><img src="image.svg"><figcaption>Stable caption.</figcaption></figure>
+    <p>After.</p></article></body></html>
+    """.utf8)
+    func build(_ server: LocalHTTPFixtureServer) async throws -> StaticWebImportProduct {
+        try await StaticWebDocumentBuilder().build(
+            AcquiredWebPage(
+                finalURL: server.url("article/index.html"),
+                mimeType: "text/html",
+                responseBytes: html
+            ),
+            documentID: SourceDocumentID()
+        )
+    }
+
+    let success = try await build(available)
+    defer { try? FileManager.default.removeItem(at: success.packageURL) }
+    let failure = try await build(unavailable)
+    defer { try? FileManager.default.removeItem(at: failure.packageURL) }
+    let successByText = Dictionary(uniqueKeysWithValues:
+        success.document.content.blocks.map { ($0.canonicalText, $0.id) }
+    )
+    let failureByText = Dictionary(uniqueKeysWithValues:
+        failure.document.content.blocks.map { ($0.canonicalText, $0.id) }
+    )
+
+    #expect(successByText["Stable caption."] == failureByText["Stable caption."])
+    #expect(successByText["After."] == failureByText["After."])
+    #expect(success.fingerprint == failure.fingerprint)
+    let image = try #require(
+        success.document.content.blocks.first { $0.role == .image }
+    )
+    #expect(image.id == StableWebIdentity.blockID(
+        category: .media,
+        role: .image,
+        ordinal: 3,
+        text: ""
+    ))
+}
+
 private final class StaticWebStageRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: [StaticWebBuildStage] = []
