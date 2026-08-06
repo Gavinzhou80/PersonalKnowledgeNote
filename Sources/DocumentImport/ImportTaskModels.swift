@@ -63,18 +63,6 @@ public enum ImportActivity: String, Hashable, Sendable {
     case publishing
 }
 
-public struct ImportIssue: Hashable, Sendable {
-    public enum Code: String, Hashable, Sendable {
-        case optionalResourceUnavailable
-    }
-
-    public let code: Code
-
-    public init(code: Code) {
-        self.code = code
-    }
-}
-
 public enum ImportSuccess: Hashable, Sendable {
     case published(
         documentID: SourceDocumentID,
