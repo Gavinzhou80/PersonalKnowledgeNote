@@ -45,6 +45,77 @@ struct WebImportCheckpointTests {
     }
 
     @Test
+    func preparedWireIsStableAcrossEvidenceInsertionOrders() throws {
+        let forward = try WebImportCheckpointCodec.writePrepared(
+            makeRichPreparedWebPublication(reverseEvidenceInsertion: false)
+        )
+        let reverse = try WebImportCheckpointCodec.writePrepared(
+            makeRichPreparedWebPublication(reverseEvidenceInsertion: true)
+        )
+        defer {
+            try? FileManager.default.removeItem(at: forward.url)
+            try? FileManager.default.removeItem(at: reverse.url)
+        }
+
+        #expect(
+            try Data(contentsOf: forward.url.appending(path: "candidate.json"))
+                == Data(contentsOf: reverse.url.appending(path: "candidate.json"))
+        )
+        #expect(
+            try Data(contentsOf: forward.url.appending(path: "metadata.json"))
+                == Data(contentsOf: reverse.url.appending(path: "metadata.json"))
+        )
+        #expect(forward.descriptor == reverse.descriptor)
+
+        let candidate = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(
+                    contentsOf: forward.url.appending(path: "candidate.json")
+                )
+            ) as? [String: Any]
+        )
+        let document = try #require(candidate["document"] as? [String: Any])
+        let evidence = try #require(
+            document["evidence"] as? [[String: Any]]
+        )
+        #expect(evidence.compactMap { entry in
+            (entry["blockID"] as? [String: Any])?["rawValue"] as? String
+        } == [
+            "AAAAAAAA-2222-2222-2222-222222222222",
+            "AAAAAAAA-3333-3333-3333-333333333333",
+            "AAAAAAAA-4444-4444-4444-444444444444",
+            "AAAAAAAA-5555-5555-5555-555555555555",
+        ])
+        #expect(evidence.allSatisfy { Set($0.keys) == ["blockID", "evidence"] })
+    }
+
+    @Test
+    func preparedReaderRejectsDuplicateEvidenceEntryIDs() throws {
+        let package = try WebImportCheckpointCodec.writePrepared(
+            makeRichPreparedWebPublication()
+        )
+        defer { try? FileManager.default.removeItem(at: package.url) }
+        try replaceCandidate(in: package.url) { candidate in
+            var document = try #require(
+                candidate["document"] as? [String: Any]
+            )
+            var evidence = try #require(document["evidence"] as? [Any])
+            if evidence.first is [String: Any],
+               let first = evidence.first {
+                evidence.append(first)
+            } else {
+                evidence.append(contentsOf: evidence.prefix(2))
+            }
+            document["evidence"] = evidence
+            candidate["document"] = document
+        }
+
+        #expect(throws: WebImportCheckpointError.invalidPackage) {
+            try WebImportCheckpointCodec.readPrepared(at: package.url)
+        }
+    }
+
+    @Test
     func checkpointPackagesUseExactRootLayoutsAndDeterministicMetadata() throws {
         let page = AcquiredWebPage(
             sourceURL: URL(string: "https://example.test/start")!,
@@ -577,6 +648,43 @@ struct WebImportCheckpointTests {
         }
     }
 
+    @Test
+    func strictJSONRejectsNestingBeyondTheCheckpointLimit() throws {
+        let depth = 65
+        let json = String(repeating: "[", count: depth)
+            + "0"
+            + String(repeating: "]", count: depth)
+
+        #expect(throws: WebImportCheckpointError.invalidPackage) {
+            try StrictJSONValidator.validate(Data(json.utf8))
+        }
+    }
+
+    @Test
+    func strictJSONRejectsContainersBeyondTheEntryLimit() throws {
+        let json = "[" + Array(repeating: "0", count: 4_097).joined(
+            separator: ","
+        ) + "]"
+
+        #expect(throws: WebImportCheckpointError.invalidPackage) {
+            try StrictJSONValidator.validate(Data(json.utf8))
+        }
+    }
+
+    @Test
+    func strictJSONRejectsDocumentsBeyondTheTotalValueLimit() throws {
+        let fullContainer = "["
+            + Array(repeating: "0", count: 4_096).joined(separator: ",")
+            + "]"
+        let json = "["
+            + Array(repeating: fullContainer, count: 4).joined(separator: ",")
+            + "]"
+
+        #expect(throws: WebImportCheckpointError.invalidPackage) {
+            try StrictJSONValidator.validate(Data(json.utf8))
+        }
+    }
+
 }
 
 private enum InjectedWebCheckpointWriteFailure: Error {
@@ -672,13 +780,20 @@ private func injectUnknownPreparedField(
             }
             document["structure"] = structure
         case .evidenceIdentifier, .evidenceWrapper, .evidencePayload:
-            var evidence = try #require(document["evidence"] as? [Any])
+            var evidence = try #require(
+                document["evidence"] as? [[String: Any]]
+            )
+            var entry = evidence[0]
             if location == .evidenceIdentifier {
-                var identifier = try #require(evidence[0] as? [String: Any])
+                var identifier = try #require(
+                    entry["blockID"] as? [String: Any]
+                )
                 identifier["unknown"] = true
-                evidence[0] = identifier
+                entry["blockID"] = identifier
             } else {
-                var wrapper = try #require(evidence[1] as? [String: Any])
+                var wrapper = try #require(
+                    entry["evidence"] as? [String: Any]
+                )
                 if location == .evidenceWrapper {
                     wrapper["unknown"] = true
                 } else {
@@ -686,8 +801,9 @@ private func injectUnknownPreparedField(
                     web["unknown"] = true
                     wrapper["web"] = web
                 }
-                evidence[1] = wrapper
+                entry["evidence"] = wrapper
             }
+            evidence[0] = entry
             document["evidence"] = evidence
         case .documentIssue, .documentIssueReference:
             var issues = try #require(document["issues"] as? [[String: Any]])
@@ -767,7 +883,9 @@ private func makePreparedWebPublication() -> PreparedWebPublication {
     )
 }
 
-private func makeRichPreparedWebPublication() -> PreparedWebPublication {
+private func makeRichPreparedWebPublication(
+    reverseEvidenceInsertion: Bool = false
+) -> PreparedWebPublication {
     let documentID = SourceDocumentID(
         UUID(uuidString: "aaaaaaaa-1111-1111-1111-111111111111")!
     )
@@ -787,6 +905,12 @@ private func makeRichPreparedWebPublication() -> PreparedWebPublication {
         code: .optionalWebImageUnavailable,
         relatedBlockID: imageID
     )
+    let evidenceEntries: [(SourceBlockID, SourceEvidence)] = [
+        (headingID, .web(locator: "#heading")),
+        (paragraphID, .web(locator: "#paragraph")),
+        (imageID, .web(locator: "#image")),
+        (captionID, .web(locator: "#caption")),
+    ]
     let content = SourceDocumentContent(
         documentID: documentID,
         importedMetadata: ImportedDocumentMetadata(
@@ -844,12 +968,11 @@ private func makeRichPreparedWebPublication() -> PreparedWebPublication {
                 )
             ]
         ),
-        evidence: [
-            headingID: .web(locator: "#heading"),
-            paragraphID: .web(locator: "#paragraph"),
-            imageID: .web(locator: "#image"),
-            captionID: .web(locator: "#caption"),
-        ],
+        evidence: Dictionary(
+            uniqueKeysWithValues: reverseEvidenceInsertion
+                ? evidenceEntries.reversed()
+                : evidenceEntries
+        ),
         issues: [issue]
     )
     return PreparedWebPublication(

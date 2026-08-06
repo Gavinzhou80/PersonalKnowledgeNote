@@ -209,6 +209,33 @@ func ignoresMalformedOrMismatchedMetaEncodingPragmas(meta: String) throws {
     }
 }
 
+@Test(arguments: [
+    "<meta foo==charset=utf-16>",
+    "<meta foo===charset='utf-16'>",
+    "<meta foo=`charset=utf-16>",
+])
+func malformedMetaAttributeValuesDoNotCreateCharsetAttributes(
+    malformedMeta: String
+) throws {
+    let bytes = Data("""
+    <html><head>
+      \(malformedMeta)
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/malformed-attribute")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
 @Test
 func ignoresHTMLMetaCharsetAfterFirst1024Bytes() throws {
     let bytes = Data(repeating: 0x20, count: 1_024)
@@ -241,6 +268,46 @@ func decodesRepresentativeWindows1252ContentFromHTTPCharset() throws {
     )
 
     #expect(article.blocks[0].canonicalText == "Price €10 — today")
+}
+
+@Test(arguments: [
+    "iso-8859-1", "latin1", "l1", "us-ascii", "ascii", "iso-ir-100",
+    "cp1252", "windows-1252",
+])
+func htmlHTTPCharsetAliasesUseWindows1252(label: String) throws {
+    let bytes = Data("<html><body><article><p>".utf8)
+        + Data([0x80, 0x20, 0x91])
+        + Data("quoted".utf8)
+        + Data([0x92])
+        + Data("</p></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/http-alias")!,
+        textEncodingName: label
+    )
+
+    #expect(article.blocks[0].canonicalText == "€ ‘quoted’")
+}
+
+@Test(arguments: [
+    "iso-8859-1", "latin1", "l1", "us-ascii", "ascii", "iso-ir-100",
+])
+func htmlMetaCharsetAliasesUseWindows1252(label: String) throws {
+    let bytes = Data("""
+    <html><head><meta charset='\(label)'></head><body><article><p>
+    """.utf8)
+        + Data([0x80, 0x20, 0x91])
+        + Data("quoted".utf8)
+        + Data([0x92])
+        + Data("</p></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/meta-alias")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "€ ‘quoted’")
 }
 
 @Test(arguments: [

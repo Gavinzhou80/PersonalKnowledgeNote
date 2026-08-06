@@ -1,4 +1,3 @@
-import CoreFoundation
 import Foundation
 import KnowledgeCore
 import SwiftSoup
@@ -122,7 +121,7 @@ struct StaticArticleExtractor: Sendable {
         _ data: Data,
         persistedCharset: String?
     ) -> String? {
-        if let encoding = stringEncoding(for: persistedCharset),
+        if let encoding = htmlStringEncoding(for: persistedCharset),
            let decoded = String(data: data, encoding: encoding) {
             return decoded
         }
@@ -130,7 +129,7 @@ struct StaticArticleExtractor: Sendable {
             return decoded
         }
         for charset in html5MetaCharsets(in: data) {
-            guard let encoding = stringEncoding(for: charset),
+            guard let encoding = htmlStringEncoding(for: charset),
                   let decoded = String(data: data, encoding: encoding)
             else {
                 continue
@@ -161,9 +160,9 @@ struct StaticArticleExtractor: Sendable {
         return charsets
     }
 
-    private func html5MetaStartTags(in data: Data) -> [String] {
+    private func html5MetaStartTags(in data: Data) -> [[UInt8]] {
         let bytes = Array(data.prefix(1_024))
-        var tags: [String] = []
+        var tags: [[UInt8]] = []
         var index = 0
         while index < bytes.count {
             guard bytes[index] == UInt8(ascii: "<") else {
@@ -198,7 +197,7 @@ struct StaticArticleExtractor: Sendable {
                 let asciiBytes = bytes[index...tagEnd].map { byte in
                     byte < 0x80 ? byte : UInt8(ascii: " ")
                 }
-                tags.append(String(decoding: asciiBytes, as: UTF8.self))
+                tags.append(asciiBytes)
                 index = tagEnd + 1
                 continue
             }
@@ -300,26 +299,93 @@ struct StaticArticleExtractor: Sendable {
         return byte + (UInt8(ascii: "a") - UInt8(ascii: "A"))
     }
 
-    private func metaAttributes(in tag: String) -> [String: String] {
-        guard let expression = try? NSRegularExpression(
-            pattern: #"([a-z_:][a-z0-9_.:-]*)\s*(?:=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+)))?"#,
-            options: [.caseInsensitive]
-        ) else {
-            return [:]
-        }
-        let source = tag as NSString
-        let range = NSRange(location: 0, length: source.length)
+    private func metaAttributes(in tag: [UInt8]) -> [String: String] {
         var attributes: [String: String] = [:]
-        for match in expression.matches(in: tag, range: range) {
-            guard match.numberOfRanges == 5 else { continue }
-            let name = source.substring(with: match.range(at: 1)).lowercased()
-            guard name != "meta", attributes[name] == nil else { continue }
-            let valueRange = (2...4)
-                .map { match.range(at: $0) }
-                .first { $0.location != NSNotFound }
-            attributes[name] = valueRange.map(source.substring(with:)) ?? ""
+        var index = 5
+        while index < tag.count {
+            while index < tag.count, isHTMLWhitespace(tag[index]) {
+                index += 1
+            }
+            guard index < tag.count,
+                  tag[index] != UInt8(ascii: ">")
+            else {
+                break
+            }
+            if tag[index] == UInt8(ascii: "/") {
+                index += 1
+                continue
+            }
+
+            let nameStart = index
+            while index < tag.count,
+                  !isHTMLWhitespace(tag[index]),
+                  tag[index] != UInt8(ascii: "/"),
+                  tag[index] != UInt8(ascii: ">"),
+                  tag[index] != UInt8(ascii: "=") {
+                index += 1
+            }
+            guard index > nameStart else {
+                index += 1
+                while index < tag.count,
+                      !isHTMLWhitespace(tag[index]),
+                      tag[index] != UInt8(ascii: ">") {
+                    index += 1
+                }
+                continue
+            }
+
+            let name = String(
+                decoding: tag[nameStart..<index].map(asciiLowercased),
+                as: UTF8.self
+            )
+            while index < tag.count, isHTMLWhitespace(tag[index]) {
+                index += 1
+            }
+
+            var value = ""
+            if index < tag.count, tag[index] == UInt8(ascii: "=") {
+                index += 1
+                while index < tag.count, isHTMLWhitespace(tag[index]) {
+                    index += 1
+                }
+                if index < tag.count,
+                   tag[index] == UInt8(ascii: "\"")
+                    || tag[index] == UInt8(ascii: "'") {
+                    let quote = tag[index]
+                    index += 1
+                    let valueStart = index
+                    while index < tag.count, tag[index] != quote {
+                        index += 1
+                    }
+                    value = String(
+                        decoding: tag[valueStart..<index],
+                        as: UTF8.self
+                    )
+                    if index < tag.count {
+                        index += 1
+                    }
+                } else {
+                    let valueStart = index
+                    while index < tag.count,
+                          !isHTMLWhitespace(tag[index]),
+                          tag[index] != UInt8(ascii: ">") {
+                        index += 1
+                    }
+                    value = String(
+                        decoding: tag[valueStart..<index],
+                        as: UTF8.self
+                    )
+                }
+            }
+            if attributes[name] == nil {
+                attributes[name] = value
+            }
         }
         return attributes
+    }
+
+    private func isHTMLWhitespace(_ byte: UInt8) -> Bool {
+        [0x09, 0x0A, 0x0C, 0x0D, 0x20].contains(byte)
     }
 
     private func pragmaCharset(in content: String) -> String? {
@@ -340,45 +406,6 @@ struct StaticArticleExtractor: Sendable {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
         }
         return nil
-    }
-
-    private func stringEncoding(for charset: String?) -> String.Encoding? {
-        guard let normalized = normalizedWebCharsetName(charset)?
-            .replacingOccurrences(of: "_", with: "-")
-        else {
-            return nil
-        }
-        switch normalized {
-        case "utf-8", "utf8":
-            return .utf8
-        case "utf-16", "utf16":
-            return .utf16
-        case "utf-16le", "utf16le":
-            return .utf16LittleEndian
-        case "utf-16be", "utf16be":
-            return .utf16BigEndian
-        case "iso-8859-1", "iso8859-1", "latin1", "latin-1":
-            return .isoLatin1
-        case "windows-1252", "cp1252":
-            return .windowsCP1252
-        case "shift-jis", "shiftjis", "sjis", "ms-kanji", "csshiftjis":
-            return .shiftJIS
-        case "euc-jp", "eucjp", "cseucpkdfmtjapanese":
-            return .japaneseEUC
-        case "gb18030", "gbk", "cp936":
-            let coreFoundationName = normalized as CFString
-            let cfEncoding = CFStringConvertIANACharSetNameToEncoding(
-                coreFoundationName
-            )
-            guard cfEncoding != kCFStringEncodingInvalidId else {
-                return nil
-            }
-            return String.Encoding(
-                rawValue: CFStringConvertEncodingToNSStringEncoding(cfEncoding)
-            )
-        default:
-            return nil
-        }
     }
 
     private func readableRoot(in document: Document) throws -> Element? {
