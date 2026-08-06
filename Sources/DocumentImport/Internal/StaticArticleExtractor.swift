@@ -13,13 +13,20 @@ struct StaticArticleExtractor: Sendable {
         } catch {
             throw StaticWebBuildError.unreadableHTML
         }
-        guard let root = try readableRoot(in: document) else {
+        guard let originalRoot = try readableRoot(in: document) else {
             throw StaticWebBuildError.noReadableBlocks
         }
         let structured = try structuredMetadata(in: document)
         let idCounts = try document.select("[id]").array().reduce(into: [String: Int]()) { counts, element in
             let id = element.id()
             if !id.isEmpty { counts[id, default: 0] += 1 }
+        }
+        let fragment = try SwiftSoup.parseBodyFragment(
+            try originalRoot.outerHtml(),
+            sourceURL.absoluteString
+        )
+        guard let root = fragment.body()?.children().first() else {
+            throw StaticWebBuildError.noReadableBlocks
         }
         try clean(root)
         let rootSelector = selectorForRoot(root, idCounts: idCounts)
@@ -71,11 +78,20 @@ struct StaticArticleExtractor: Sendable {
     }
 
     private func score(_ element: Element) throws -> Int {
-        try element.select("h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,figure,img,figcaption").size()
+        let semantic = try element.select("h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,figure,img,figcaption").size()
+        let standaloneCode = try element.select("code").array().filter { code in
+            var parent = code.parent()
+            while let current = parent, current !== element {
+                if ["p", "pre"].contains(current.tagName().lowercased()) { return false }
+                parent = current.parent()
+            }
+            return code.parent()?.tagName().lowercased() != "pre"
+        }.count
+        return semantic + standaloneCode
     }
 
     private func clean(_ root: Element) throws {
-        try root.select("script,style,noscript,template,form,nav,header,footer,iframe,[hidden],[aria-hidden=true],[role=navigation],[role=banner],[role=complementary],[role=contentinfo],[role=form],[role=search]").remove()
+        try root.select("script,style,noscript,template,form,nav,iframe,[hidden],[aria-hidden=true],[role=navigation],[role=banner],[role=complementary],[role=contentinfo],[role=form],[role=search]").remove()
         for element in try root.getAllElements().array() {
             if element !== root, isNoise(element) || isTrackingPixel(element) {
                 try element.remove()
@@ -93,7 +109,7 @@ struct StaticArticleExtractor: Sendable {
 
     private func isNoise(_ element: Element) -> Bool {
         let tag = element.tagName().lowercased()
-        if ["nav", "header", "footer", "form"].contains(tag) { return true }
+        if ["nav", "form"].contains(tag) { return true }
         if tag == "aside", (try? element.select("figure,blockquote").isEmpty()) != false { return true }
         let role = ((try? element.attr("role")) ?? "").lowercased()
         if ["navigation", "banner", "complementary", "contentinfo", "form", "search"].contains(role) { return true }
@@ -154,16 +170,11 @@ struct StaticArticleExtractor: Sendable {
             }
             return
         case "figure":
-            var figureImageKey: String?
-            for child in element.children().array() {
-                if child.tagName().lowercased() == "img" {
-                    figureImageKey = appendImage(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks) ?? figureImageKey
-                } else if child.tagName().lowercased() == "figcaption" {
-                    appendCaption(child, root: root, idCounts: idCounts, targetKey: figureImageKey, blocks: &blocks)
-                } else {
-                    try walk(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
-                }
-            }
+            let figureImageKey = try element.select("img").array().lazy.compactMap { image -> String? in
+                guard let source = try? image.attr("src"), let url = safeURL(source, relativeTo: sourceURL) else { return nil }
+                return "image:\(url.absoluteString)"
+            }.first
+            try walkFigureChildren(element, root: root, sourceURL: sourceURL, idCounts: idCounts, targetKey: figureImageKey, images: &images, blocks: &blocks)
             return
         case "img":
             _ = appendImage(element, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
@@ -175,6 +186,29 @@ struct StaticArticleExtractor: Sendable {
         }
         for child in element.children().array() {
             try walk(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
+        }
+    }
+
+    private func walkFigureChildren(
+        _ container: Element,
+        root: Element,
+        sourceURL: URL,
+        idCounts: [String: Int],
+        targetKey: String?,
+        images: inout [WebImageCandidate],
+        blocks: inout [ExtractedWebBlock]
+    ) throws {
+        for child in container.children().array() {
+            switch child.tagName().lowercased() {
+            case "img":
+                _ = appendImage(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
+            case "figcaption":
+                appendCaption(child, root: root, idCounts: idCounts, targetKey: targetKey, blocks: &blocks)
+            case "figure":
+                try walk(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
+            default:
+                try walkFigureChildren(child, root: root, sourceURL: sourceURL, idCounts: idCounts, targetKey: targetKey, images: &images, blocks: &blocks)
+            }
         }
     }
 

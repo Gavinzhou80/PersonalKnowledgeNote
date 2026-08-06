@@ -211,3 +211,57 @@ func evidenceUsesIDsOnlyWhenTheyAreUnique() throws {
     #expect(result.blocks[1].evidenceLocator == "#root > p:nth-of-type(1)")
     #expect(result.blocks[2].evidenceLocator == "#root > p:nth-of-type(2)")
 }
+
+@Test
+func metadataSurvivesCleaningOfAClonedFocusedRoot() throws {
+    let html = Data("""
+    <html><head></head><body>
+      <article id="metadata-root">
+        <script type="application/ld+json">{"headline":"Embedded title","author":{"name":"Embedded author"}}</script>
+        <header><h1>Semantic heading</h1></header>
+        <footer><time datetime="2022-06-07T08:09:10Z">Published</time><p>Written by Ada.</p></footer>
+      </article>
+    </body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/cloned")!
+    )
+    #expect(result.metadata.title == "Embedded title")
+    #expect(result.metadata.author == "Embedded author")
+    #expect(result.metadata.publishedAt == ISO8601DateFormatter().date(from: "2022-06-07T08:09:10Z"))
+    #expect(result.blocks.map(\.canonicalText) == ["Semantic heading", "Written by Ada."])
+}
+
+@Test
+func codeOnlyMainIsReadableAndProducesAStandaloneCodeBlock() throws {
+    let html = Data("<html><body><main id='code-only'><code class='language-rust'>fn main() {}</code></main></body></html>".utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/code-only")!
+    )
+    #expect(result.rootSelector == "#code-only")
+    #expect(result.blocks.map(\.role) == [.codeBlock(language: "rust")])
+    #expect(result.blocks.map(\.canonicalText) == ["fn main() {}"])
+}
+
+@Test
+func figureCaptionsTargetNestedImagesRegardlessOfDOMOrder() throws {
+    let html = Data("""
+    <html><body><article id="compound-figures">
+      <figure><figcaption>Caption first.</figcaption><picture><source srcset="wide.webp"><img src="first.png" alt="First"></picture></figure>
+      <figure><picture><img src="second.png" alt="Second"></picture><figcaption>Caption last.</figcaption></figure>
+    </article></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/compound/")!
+    )
+    #expect(result.blocks.map(\.canonicalText) == ["Caption first.", "First", "Second", "Caption last."])
+    #expect(result.blocks[0].relationTargetKey == result.imageCandidates[0].stableKey)
+    #expect(result.blocks[3].relationTargetKey == result.imageCandidates[1].stableKey)
+    #expect(result.imageCandidates.map(\.resolvedURL) == [
+        URL(string: "https://fixture.invalid/compound/first.png")!,
+        URL(string: "https://fixture.invalid/compound/second.png")!,
+    ])
+}
