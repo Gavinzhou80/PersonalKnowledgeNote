@@ -114,6 +114,54 @@ func recognizesOnlyValidCaseInsensitiveHTMLMetaEncodingDeclarations(
     #expect(article.blocks[0].canonicalText == "“Hello”")
 }
 
+@Test
+func ignoresMetaCharsetDeclarationsInsideHTMLCommentsAndKeepsScanning() throws {
+    let bytes = Data("""
+    <html><head>
+      <!-- <meta charset='iso-8859-1'> -->
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/commented-meta")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test(arguments: [
+    "meta:bogus",
+    "meta-bogus",
+    "metadata",
+])
+func ignoresNonExactMetaLikeTagNamesAndKeepsScanning(
+    invalidTagName: String
+) throws {
+    let bytes = Data("""
+    <html><head>
+      <\(invalidTagName) charset='iso-8859-1'>
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/meta-like")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
 @Test(arguments: [
     "<meta http-equiv='refresh' content='text/html; charset=windows-1252'>",
     "<meta http-equiv='content-type' content='text/html; encoding=windows-1252'>",

@@ -141,23 +141,8 @@ struct StaticArticleExtractor: Sendable {
     }
 
     private func html5MetaCharsets(in data: Data) -> [String] {
-        let prefix = data.prefix(1_024)
-        let ascii = String(prefix.map { byte in
-            byte < 0x80 ? Character(UnicodeScalar(byte)) : " "
-        })
-        guard let metaExpression = try? NSRegularExpression(
-            pattern: #"<meta\b[^>]*>"#,
-            options: [.caseInsensitive]
-        ) else {
-            return []
-        }
-        let fullRange = NSRange(ascii.startIndex..., in: ascii)
         var charsets: [String] = []
-        for match in metaExpression.matches(
-            in: ascii,
-            range: fullRange
-        ) {
-            let tag = (ascii as NSString).substring(with: match.range)
+        for tag in html5MetaStartTags(in: data) {
             let attributes = metaAttributes(in: tag)
             if let charset = attributes["charset"] {
                 charsets.append(charset)
@@ -174,6 +159,121 @@ struct StaticArticleExtractor: Sendable {
             charsets.append(charset)
         }
         return charsets
+    }
+
+    private func html5MetaStartTags(in data: Data) -> [String] {
+        let bytes = Array(data.prefix(1_024))
+        var tags: [String] = []
+        var index = 0
+        while index < bytes.count {
+            guard bytes[index] == UInt8(ascii: "<") else {
+                index += 1
+                continue
+            }
+            if bytesMatch("<!--", in: bytes, at: index) {
+                guard let commentEnd = firstIndex(
+                    of: "-->",
+                    in: bytes,
+                    startingAt: index + 4
+                ) else {
+                    break
+                }
+                index = commentEnd + 3
+                continue
+            }
+            let nameStart = index + 1
+            let delimiterIndex = nameStart + 4
+            guard bytesMatchIgnoringASCIICase(
+                "meta",
+                in: bytes,
+                at: nameStart
+            ), delimiterIndex < bytes.count,
+               isHTMLTagNameDelimiter(bytes[delimiterIndex]),
+               let tagEnd = htmlTagEnd(in: bytes, startingAt: delimiterIndex)
+            else {
+                index += 1
+                continue
+            }
+            let asciiBytes = bytes[index...tagEnd].map { byte in
+                byte < 0x80 ? byte : UInt8(ascii: " ")
+            }
+            tags.append(String(decoding: asciiBytes, as: UTF8.self))
+            index = tagEnd + 1
+        }
+        return tags
+    }
+
+    private func htmlTagEnd(
+        in bytes: [UInt8],
+        startingAt start: Int
+    ) -> Int? {
+        var quote: UInt8?
+        var index = start
+        while index < bytes.count {
+            let byte = bytes[index]
+            if let activeQuote = quote {
+                if byte == activeQuote {
+                    quote = nil
+                }
+            } else if byte == UInt8(ascii: "\"")
+                        || byte == UInt8(ascii: "'") {
+                quote = byte
+            } else if byte == UInt8(ascii: ">") {
+                return index
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    private func isHTMLTagNameDelimiter(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: "/")
+            || byte == UInt8(ascii: ">")
+            || [0x09, 0x0A, 0x0C, 0x0D, 0x20].contains(byte)
+    }
+
+    private func bytesMatch(
+        _ literal: StaticString,
+        in bytes: [UInt8],
+        at index: Int
+    ) -> Bool {
+        let expected = Array(String(describing: literal).utf8)
+        guard index + expected.count <= bytes.count else { return false }
+        return bytes[index..<(index + expected.count)].elementsEqual(expected)
+    }
+
+    private func bytesMatchIgnoringASCIICase(
+        _ literal: StaticString,
+        in bytes: [UInt8],
+        at index: Int
+    ) -> Bool {
+        let expected = Array(String(describing: literal).utf8)
+        guard index + expected.count <= bytes.count else { return false }
+        return zip(bytes[index..<(index + expected.count)], expected)
+            .allSatisfy { asciiLowercased($0.0) == asciiLowercased($0.1) }
+    }
+
+    private func firstIndex(
+        of literal: StaticString,
+        in bytes: [UInt8],
+        startingAt start: Int
+    ) -> Int? {
+        var index = start
+        while index < bytes.count {
+            if bytesMatch(literal, in: bytes, at: index) {
+                return index
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    private func asciiLowercased(_ byte: UInt8) -> UInt8 {
+        guard (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+        else {
+            return byte
+        }
+        return byte + (UInt8(ascii: "a") - UInt8(ascii: "A"))
     }
 
     private func metaAttributes(in tag: String) -> [String: String] {
