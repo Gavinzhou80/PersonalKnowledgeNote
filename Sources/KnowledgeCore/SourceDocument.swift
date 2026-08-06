@@ -168,7 +168,7 @@ public struct SourceBlock: Hashable, Codable, Sendable {
 
         switch category {
         case .media:
-            guard media != nil else {
+            guard media != nil || !canonicalText.isEmpty else {
                 throw ValidationError.invalidMediaAssociation
             }
         case .text, .code:

@@ -6,15 +6,17 @@ enum StableWebIdentity {
     static let ruleVersion = "static-web-v1"
 
     static func blockID(
-        role: String,
+        category: SourceBlockCategory,
+        role: SourceBlockRole,
         ordinal: Int,
         text: String
     ) -> SourceBlockID {
         var identity = Data()
         append(ruleVersion, to: &identity)
-        append(role, to: &identity)
+        append(category.rawValue, to: &identity)
+        append(stableRole(role), to: &identity)
         append(String(ordinal), to: &identity)
-        append(text, to: &identity)
+        append(normalized(text), to: &identity)
 
         let bytes = Array(SHA256.hash(data: identity).prefix(16))
         let uuid = UUID(uuid: (
@@ -27,15 +29,33 @@ enum StableWebIdentity {
     }
 
     static func fingerprint(
-        blocks: [(role: String, text: String)]
+        blocks: [(category: SourceBlockCategory, role: SourceBlockRole, text: String)]
     ) -> ContentFingerprint {
         var identity = Data()
         append(ruleVersion, to: &identity)
         for block in blocks {
-            append(block.role, to: &identity)
-            append(block.text, to: &identity)
+            append(block.category.rawValue, to: &identity)
+            append(stableRole(block.role), to: &identity)
+            append(normalized(block.text), to: &identity)
         }
         return ContentFingerprint(sha256Hex(identity))
+    }
+
+    private static func stableRole(_ role: SourceBlockRole) -> String {
+        switch role {
+        case .heading(let level): "heading:\(level)"
+        case .paragraph: "paragraph"
+        case .listItem: "list-item"
+        case .quotation: "quotation"
+        case .codeBlock(let language):
+            "code-block:\(language?.precomposedStringWithCanonicalMapping ?? "")"
+        case .image: "image"
+        case .caption: "caption"
+        }
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.precomposedStringWithCanonicalMapping
     }
 
     private static func append(_ value: String, to data: inout Data) {

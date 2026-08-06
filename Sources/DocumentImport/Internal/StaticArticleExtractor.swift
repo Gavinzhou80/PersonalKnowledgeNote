@@ -279,8 +279,12 @@ struct StaticArticleExtractor: Sendable {
             return
         case "figure":
             let figureImageKey = try element.select("img").array().lazy.compactMap { image -> String? in
-                guard let source = try? image.attr("src"), let url = safeURL(source, relativeTo: sourceURL) else { return nil }
-                return "image:\(url.absoluteString)"
+                imageKey(
+                    for: image,
+                    root: root,
+                    sourceURL: sourceURL,
+                    idCounts: idCounts
+                )
             }.first
             try walkFigureChildren(element, root: root, sourceURL: sourceURL, idCounts: idCounts, targetKey: figureImageKey, images: &images, blocks: &blocks)
             return
@@ -340,13 +344,32 @@ struct StaticArticleExtractor: Sendable {
 
     @discardableResult
     private func appendImage(_ element: Element, root: Element, sourceURL: URL, idCounts: [String: Int], images: inout [WebImageCandidate], blocks: inout [ExtractedWebBlock]) -> String? {
-        guard let source = try? element.attr("src"), let url = safeURL(source, relativeTo: sourceURL) else { return nil }
+        guard let source = try? element.attr("src"),
+              let url = safeURL(source, relativeTo: sourceURL),
+              let key = imageKey(
+                for: element,
+                root: root,
+                sourceURL: sourceURL,
+                idCounts: idCounts
+              )
+        else { return nil }
         let locator = evidence(element, root: root, idCounts: idCounts)
-        let key = "image:\(url.absoluteString)"
         let alt = normalized((try? element.attr("alt")) ?? "")
         images.append(.init(stableKey: key, resolvedURL: url, altText: alt.isEmpty ? nil : alt, evidenceLocator: locator))
         blocks.append(.init(category: .media, role: .image, canonicalText: alt, inlineMarkup: [], evidenceLocator: locator, imageKey: key, relationTargetKey: nil))
         return key
+    }
+
+    private func imageKey(
+        for element: Element,
+        root: Element,
+        sourceURL: URL,
+        idCounts: [String: Int]
+    ) -> String? {
+        guard let source = try? element.attr("src"),
+              let url = safeURL(source, relativeTo: sourceURL)
+        else { return nil }
+        return "image:\(evidence(element, root: root, idCounts: idCounts)):\(url.absoluteString)"
     }
 
     private func appendCaption(_ element: Element, root: Element, idCounts: [String: Int], targetKey: String?, blocks: inout [ExtractedWebBlock]) {

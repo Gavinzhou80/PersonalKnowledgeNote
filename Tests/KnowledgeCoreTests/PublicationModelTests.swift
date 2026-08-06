@@ -612,14 +612,6 @@ func decodingRejectsInvalidBlockCategoryRoleOrEmptyMediaText() throws {
         ),
         UncheckedSemanticSourceBlock(
             id: SourceBlockID(),
-            canonicalText: "image",
-            category: .media,
-            role: .image,
-            inlineMarkup: [],
-            media: nil
-        ),
-        UncheckedSemanticSourceBlock(
-            id: SourceBlockID(),
             canonicalText: "",
             category: .media,
             role: .image,
@@ -636,6 +628,27 @@ func decodingRejectsInvalidBlockCategoryRoleOrEmptyMediaText() throws {
             )
         }
     }
+}
+
+@Test
+func mediaBlockWithCanonicalAltTextSurvivesOptionalImageFailure() throws {
+    let block = UncheckedSemanticSourceBlock(
+        id: SourceBlockID(),
+        canonicalText: "Unavailable image description",
+        category: .media,
+        role: .image,
+        inlineMarkup: [],
+        media: nil
+    )
+
+    let decoded = try JSONDecoder().decode(
+        SourceBlock.self,
+        from: JSONEncoder().encode(block)
+    )
+
+    #expect(decoded.category == .media)
+    #expect(decoded.role == .image)
+    #expect(decoded.media == nil)
 }
 
 @Test

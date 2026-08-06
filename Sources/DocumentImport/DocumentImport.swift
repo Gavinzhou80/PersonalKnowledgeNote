@@ -22,6 +22,10 @@ public actor DocumentImport {
 
     private let library: LocalLibrary
     private let webAcquirer: any WebAcquiring
+    private let webDocumentBuilder: @Sendable (
+        AcquiredWebPage,
+        SourceDocumentID
+    ) async throws -> StaticWebImportProduct
     private let documentIDGenerator: @Sendable () -> SourceDocumentID
     private let workspaceSnapshotLoader: @Sendable (
         ImportWorkspace
@@ -33,6 +37,15 @@ public actor DocumentImport {
     init(
         library: LocalLibrary,
         webAcquirer: any WebAcquiring,
+        webDocumentBuilder: @escaping @Sendable (
+            AcquiredWebPage,
+            SourceDocumentID
+        ) async throws -> StaticWebImportProduct = { page, documentID in
+            try await StaticWebDocumentBuilder().build(
+                page,
+                documentID: documentID
+            )
+        },
         documentIDGenerator: @escaping @Sendable () -> SourceDocumentID = {
             SourceDocumentID()
         },
@@ -44,8 +57,16 @@ public actor DocumentImport {
     ) {
         self.library = library
         self.webAcquirer = webAcquirer
+        self.webDocumentBuilder = webDocumentBuilder
         self.documentIDGenerator = documentIDGenerator
         self.workspaceSnapshotLoader = workspaceSnapshotLoader
+    }
+
+    public init(library: LocalLibrary) {
+        self.init(
+            library: library,
+            webAcquirer: URLSessionStaticWebAcquirer()
+        )
     }
 
     public nonisolated func observeTasks(
@@ -207,9 +228,9 @@ public actor DocumentImport {
                 )
             )
 
-            let product = try StaticWebDocumentBuilder().build(
+            let product = try await webDocumentBuilder(
                 page,
-                documentID: documentIDGenerator()
+                documentIDGenerator()
             )
             packageURL = product.packageURL
             let artifact = try await workspace.stageArtifact(
@@ -242,7 +263,10 @@ public actor DocumentImport {
                 ),
                 expectedRevision: publishing.revision
             )
-            let success = Self.success(for: outcome)
+            let success = Self.success(
+                for: outcome,
+                publishedIssues: product.issues
+            )
             let completed = try? await workspaceSnapshotLoader(workspace)
             finishTask(
                 taskID: workspace.taskID,
@@ -485,11 +509,15 @@ public actor DocumentImport {
     }
 
     private static func success(
-        for outcome: PublicationOutcome
+        for outcome: PublicationOutcome,
+        publishedIssues: [KnowledgeCore.ImportIssue]
     ) -> ImportSuccess {
         switch outcome {
         case .published(let documentID):
-            return .published(documentID: documentID, issues: [])
+            return .published(
+                documentID: documentID,
+                issues: publishedIssues
+            )
         case .alreadyImported(
             let documentID,
             let location,
