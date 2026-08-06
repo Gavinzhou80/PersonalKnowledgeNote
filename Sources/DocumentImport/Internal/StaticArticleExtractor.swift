@@ -13,6 +13,10 @@ struct StaticArticleExtractor: Sendable {
         } catch {
             throw StaticWebBuildError.unreadableHTML
         }
+        let resolutionBase = try effectiveDocumentBase(
+            in: document,
+            sourceURL: sourceURL
+        )
         guard let originalRoot = try readableRoot(in: document) else {
             throw StaticWebBuildError.noReadableBlocks
         }
@@ -23,7 +27,7 @@ struct StaticArticleExtractor: Sendable {
         }
         let fragment = try SwiftSoup.parseBodyFragment(
             try originalRoot.outerHtml(),
-            sourceURL.absoluteString
+            resolutionBase.absoluteString
         )
         guard let root = fragment.body()?.children().first() else {
             throw StaticWebBuildError.noReadableBlocks
@@ -37,7 +41,7 @@ struct StaticArticleExtractor: Sendable {
         let rootSelector = selectorForRoot(root, idCounts: idCounts)
         var images: [WebImageCandidate] = []
         var blocks: [ExtractedWebBlock] = []
-        try walk(root, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
+        try walk(root, root: root, sourceURL: resolutionBase, idCounts: idCounts, images: &images, blocks: &blocks)
         guard !blocks.isEmpty else { throw StaticWebBuildError.noReadableBlocks }
 
         let title = try metadataContent(document, selector: "meta[property=og:title]", attribute: "content")
@@ -82,6 +86,23 @@ struct StaticArticleExtractor: Sendable {
             return best
         }
         return nil
+    }
+
+    private func effectiveDocumentBase(
+        in document: Document,
+        sourceURL: URL
+    ) throws -> URL {
+        guard let value = try document.select("base[href]").first()?.attr("href") else {
+            return sourceURL
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let base = URL(string: trimmed, relativeTo: sourceURL)?.absoluteURL,
+              ["http", "https"].contains(base.scheme?.lowercased() ?? ""),
+              base.host != nil else {
+            return sourceURL
+        }
+        return base
     }
 
     private func score(_ element: Element) throws -> Int {
@@ -188,7 +209,21 @@ struct StaticArticleExtractor: Sendable {
         }
         switch tag {
         case "p": appendTextBlock(element, root: root, idCounts: idCounts, category: .text, role: .paragraph, blocks: &blocks); return
-        case "li": appendTextBlock(element, root: root, idCounts: idCounts, category: .text, role: .listItem, blocks: &blocks); return
+        case "li":
+            appendTextBlock(
+                element,
+                root: root,
+                idCounts: idCounts,
+                category: .text,
+                role: .listItem,
+                excludingNestedLists: true,
+                blocks: &blocks
+            )
+            for child in element.children().array()
+                where ["ul", "ol"].contains(child.tagName().lowercased()) {
+                try walk(child, root: root, sourceURL: sourceURL, idCounts: idCounts, images: &images, blocks: &blocks)
+            }
+            return
         case "blockquote": appendTextBlock(element, root: root, idCounts: idCounts, category: .text, role: .quotation, blocks: &blocks); return
         case "pre":
             let code = try element.select("code").first()
@@ -264,15 +299,21 @@ struct StaticArticleExtractor: Sendable {
         blocks.append(.init(category: .text, role: .caption, canonicalText: rendered.text, inlineMarkup: rendered.markup, evidenceLocator: evidence(element, root: root, idCounts: idCounts), imageKey: nil, relationTargetKey: targetKey))
     }
 
-    private func appendTextBlock(_ element: Element, root: Element, idCounts: [String: Int], category: SourceBlockCategory, role: SourceBlockRole, blocks: inout [ExtractedWebBlock]) {
-        let rendered = inlineText(element)
+    private func appendTextBlock(_ element: Element, root: Element, idCounts: [String: Int], category: SourceBlockCategory, role: SourceBlockRole, excludingNestedLists: Bool = false, blocks: inout [ExtractedWebBlock]) {
+        let rendered = inlineText(
+            element,
+            excludingNestedLists: excludingNestedLists
+        )
         guard !rendered.text.isEmpty else { return }
         blocks.append(.init(category: category, role: role, canonicalText: rendered.text, inlineMarkup: rendered.markup, evidenceLocator: evidence(element, root: root, idCounts: idCounts), imageKey: nil, relationTargetKey: nil))
     }
 
-    private func inlineText(_ element: Element) -> (text: String, markup: [InlineMarkup]) {
-        var builder = InlineBuilder()
-        builder.visit(element)
+    private func inlineText(_ element: Element, excludingNestedLists: Bool = false) -> (text: String, markup: [InlineMarkup]) {
+        var builder = InlineBuilder(
+            baseURL: URL(string: element.getBaseUri()),
+            excludesNestedLists: excludingNestedLists
+        )
+        builder.visit(element, isRoot: true)
         return (builder.text, builder.markup)
     }
 
@@ -288,7 +329,9 @@ struct StaticArticleExtractor: Sendable {
             return original
         }
         let id = element.id()
-        if !id.isEmpty, idCounts[id] == 1 { return "#\(cssEscaped(id))" }
+        if !id.isEmpty, idCounts[id] == 1 {
+            return idSelector(id)
+        }
         if let selector = stableAttributeSelector(element, includeTag: false) { return selector }
         var parts: [String] = []
         var current: Element? = element
@@ -310,7 +353,9 @@ struct StaticArticleExtractor: Sendable {
 
     private func selectorForRoot(_ root: Element, idCounts: [String: Int]) -> String {
         let id = root.id()
-        if !id.isEmpty, idCounts[id] == 1 { return "#\(cssEscaped(id))" }
+        if !id.isEmpty, idCounts[id] == 1 {
+            return idSelector(id)
+        }
         if let selector = stableAttributeSelector(root, includeTag: true) { return selector }
         return root.tagName().lowercased()
     }
@@ -318,8 +363,12 @@ struct StaticArticleExtractor: Sendable {
     private func stableAttributeSelector(_ element: Element, includeTag: Bool) -> String? {
         for name in ["data-testid", "itemprop", "aria-label", "role"] {
             guard let value = try? element.attr(name), !value.isEmpty else { continue }
+            guard value.unicodeScalars.allSatisfy({ scalar in
+                let code = scalar.value
+                return code >= 0x20 && code != 0x7F && code != 0x22 && code != 0x5C
+            }) else { continue }
             let prefix = includeTag ? element.tagName().lowercased() : ""
-            return "\(prefix)[\(name)=\"\(cssEscaped(value))\"]"
+            return "\(prefix)[\(name)=\"\(cssStringEscaped(value))\"]"
         }
         return nil
     }
@@ -374,7 +423,9 @@ struct StaticArticleExtractor: Sendable {
     }
 
     private func safeURL(_ value: String, relativeTo base: URL) -> URL? {
-        guard let url = URL(string: value, relativeTo: base)?.absoluteURL,
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed, relativeTo: base)?.absoluteURL,
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return nil }
         return url
     }
@@ -406,7 +457,48 @@ struct StaticArticleExtractor: Sendable {
         return node.getChildNodes().map(rawText).joined()
     }
 
-    private func cssEscaped(_ value: String) -> String { value.replacingOccurrences(of: "\"", with: "\\\"") }
+    private func cssIdentifierEscaped(_ value: String) -> String {
+        var result = ""
+        for scalar in value.unicodeScalars {
+            let code = scalar.value
+            if code == 0 {
+                result.append("�")
+            } else if code >= 0x80
+                || code == 0x2D
+                || code == 0x5F
+                || (0x30...0x39).contains(code)
+                || (0x41...0x5A).contains(code)
+                || (0x61...0x7A).contains(code) {
+                result.unicodeScalars.append(scalar)
+            } else {
+                result.append("\\")
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
+    }
+
+    private func idSelector(_ id: String) -> String {
+        "#\(cssIdentifierEscaped(id))"
+    }
+
+    private func cssStringEscaped(_ value: String) -> String {
+        var result = ""
+        for scalar in value.unicodeScalars {
+            let code = scalar.value
+            if code == 0 {
+                result.append("�")
+            } else if code <= 0x1F || code == 0x7F {
+                result += "\\\(String(code, radix: 16)) "
+            } else if code == 0x22 || code == 0x5C {
+                result.append("\\")
+                result.unicodeScalars.append(scalar)
+            } else {
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
+    }
 
     private func captureOriginalEvidence(
         originalRoot: Element,
@@ -446,14 +538,26 @@ private struct StructuredMetadata {
 private struct InlineBuilder {
     var text = ""
     var markup: [InlineMarkup] = []
+    let baseURL: URL?
+    let excludesNestedLists: Bool
     private var pendingSpace = false
 
-    mutating func visit(_ node: Node) {
+    init(baseURL: URL?, excludesNestedLists: Bool) {
+        self.baseURL = baseURL
+        self.excludesNestedLists = excludesNestedLists
+    }
+
+    mutating func visit(_ node: Node, isRoot: Bool = false) {
         if let textNode = node as? TextNode {
             append(textNode.getWholeText())
             return
         }
         guard let element = node as? Element else { return }
+        if excludesNestedLists,
+           !isRoot,
+           ["ul", "ol"].contains(element.tagName().lowercased()) {
+            return
+        }
         let kind = markupKind(element)
         flushPendingSpace()
         let start = text.utf16.count
@@ -495,7 +599,12 @@ private struct InlineBuilder {
     }
 
     private func cleanLink(_ value: String) -> URL? {
-        guard var components = URLComponents(string: value), ["http", "https"].contains(components.scheme?.lowercased() ?? ""), components.host != nil else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed, relativeTo: baseURL)?.absoluteURL,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              components.host != nil else { return nil }
         let tracking = Set(["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid"])
         components.queryItems = components.queryItems?.filter { !tracking.contains($0.name.lowercased()) }
         if components.queryItems?.isEmpty == true { components.queryItems = nil }

@@ -1,5 +1,6 @@
 import Foundation
 import KnowledgeCore
+import SwiftSoup
 import TestFixtures
 import Testing
 @testable import DocumentImport
@@ -351,4 +352,75 @@ func candidateSelectionRejectsArticlesInsideNoiseAncestors() throws {
     )
     #expect(result.rootSelector == "#real-article")
     #expect(result.blocks.map(\.canonicalText) == ["Real heading", "Real body."])
+}
+
+@Test
+func effectiveDocumentBaseResolvesImagesAndRejectsUnsafeBase() throws {
+    let sourceURL = URL(string: "https://fixture.invalid/articles/page.html")!
+    let valid = Data("<html><head><base href='/shared/assets/'></head><body><article><h1>Base</h1><img src='hero.png' alt='Hero'></article></body></html>".utf8)
+    let based = try StaticArticleExtractor().extract(html: valid, sourceURL: sourceURL)
+    #expect(based.imageCandidates.map(\.resolvedURL) == [URL(string: "https://fixture.invalid/shared/assets/hero.png")!])
+
+    let unsafe = Data("<html><head><base href='javascript:alert(1)'></head><body><article><h1>Fallback</h1><img src='hero.png' alt='Hero'></article></body></html>".utf8)
+    let fallback = try StaticArticleExtractor().extract(html: unsafe, sourceURL: sourceURL)
+    #expect(fallback.imageCandidates.map(\.resolvedURL) == [URL(string: "https://fixture.invalid/articles/hero.png")!])
+}
+
+@Test
+func evidenceLocatorsAreValidCSSForComplexIdentifiersAndStrings() throws {
+    let complexID = "1lead: odd\\path\nline"
+    let semanticHTML = "quote &quot; slash\\line&#10;next"
+    let html = """
+    <html><body><article id="root"><h1 id="\(complexID)">Complex ID</h1><p data-testid="\(semanticHTML)">Complex attribute</p></article></body></html>
+    """
+    let result = try StaticArticleExtractor().extract(
+        html: Data(html.utf8),
+        sourceURL: URL(string: "https://fixture.invalid/css")!
+    )
+    let original = try SwiftSoup.parse(html)
+    for block in result.blocks {
+        let matches = try original.select(block.evidenceLocator)
+        #expect(matches.size() == 1)
+        #expect(try matches.first()?.text() == block.canonicalText)
+    }
+}
+
+@Test
+func nestedListItemsBecomeIndependentBlocksWithoutDuplicatedText() throws {
+    let html = Data("""
+    <html><body><article id="lists"><ul><li>Parent <strong>own</strong><ul><li>Child <em>emphasis</em></li></ul> tail</li></ul></article></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/lists")!
+    )
+    #expect(result.blocks.map(\.role) == [.listItem, .listItem])
+    #expect(result.blocks.map(\.canonicalText) == ["Parent own tail", "Child emphasis"])
+    #expect(result.blocks[0].inlineMarkup.map(\.kind) == [.strong])
+    #expect(result.blocks[1].inlineMarkup.map(\.kind) == [.emphasis])
+}
+
+@Test
+func relativeLinksUseTheEffectiveDocumentBaseAndUnsafeLinksAreIgnored() throws {
+    let html = Data("""
+    <html><head><base href="https://cdn.example.test/docs/"></head><body><article><p>Read <a href="guide.html?utm_source=x&amp;keep=1">guide</a> but not <a href="data:text/html,no">unsafe</a>.</p></article></body></html>
+    """.utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/article")!
+    )
+    #expect(result.blocks[0].inlineMarkup.map(\.kind) == [
+        .link(URL(string: "https://cdn.example.test/docs/guide.html?keep=1")!),
+    ])
+}
+
+@Test
+func blankImageSourcesDoNotBecomePageURLCandidates() throws {
+    let html = Data("<html><body><article><h1>Images</h1><img src='   ' alt='Blank'><p>Body.</p></article></body></html>".utf8)
+    let result = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/article/page.html")!
+    )
+    #expect(result.imageCandidates.isEmpty)
+    #expect(!result.blocks.contains { $0.role == .image })
 }
