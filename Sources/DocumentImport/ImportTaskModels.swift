@@ -81,6 +81,11 @@ public enum ImportSuccess: Hashable, Sendable {
 public struct ImportFailure: Error, Hashable, Sendable {
     public enum Code: String, Hashable, Sendable {
         case networkUnavailable
+        case requestTimedOut
+        case accessDenied
+        case invalidHTTPResponse
+        case unsupportedContentType
+        case responseTooLarge
         case webpageHasNoReadableArticle
         case artifactConstructionFailed
         case localLibraryUnavailable

@@ -536,11 +536,39 @@ public actor DocumentImport {
     }
 
     private static func classify(_ error: Error) -> ImportFailure {
-        if error is WebAcquisitionError {
-            return ImportFailure(
-                code: .networkUnavailable,
-                recovery: .retryable
-            )
+        if let error = error as? WebAcquisitionError {
+            switch error {
+            case .networkUnavailable:
+                return ImportFailure(
+                    code: .networkUnavailable,
+                    recovery: .retryable
+                )
+            case .requestTimedOut:
+                return ImportFailure(
+                    code: .requestTimedOut,
+                    recovery: .retryable
+                )
+            case .accessDenied:
+                return ImportFailure(
+                    code: .accessDenied,
+                    recovery: .requiresUserAction
+                )
+            case .invalidHTTPResponse:
+                return ImportFailure(
+                    code: .invalidHTTPResponse,
+                    recovery: .retryable
+                )
+            case .unsupportedContentType:
+                return ImportFailure(
+                    code: .unsupportedContentType,
+                    recovery: .unsupported
+                )
+            case .responseTooLarge:
+                return ImportFailure(
+                    code: .responseTooLarge,
+                    recovery: .unsupported
+                )
+            }
         }
 
         if let error = error as? StaticWebBuildError {
