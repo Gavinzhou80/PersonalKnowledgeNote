@@ -490,3 +490,50 @@ func nestedListsInsideFlowWrappersAreStillExtracted() throws {
     ])
     #expect(result.blocks.map(\.role) == [.listItem, .listItem])
 }
+
+@Test
+func structuralRootSelectorsUniquelyIdentifyTheChosenRoot() throws {
+    let cases = [
+        """
+        <html><body><article><p>Short.</p></article><article><h1>Chosen article</h1><p>Article body.</p></article></body></html>
+        """,
+        """
+        <html><body><div><p>Short.</p></div><div><h1>Chosen div</h1><p>Div body.</p></div></body></html>
+        """,
+        """
+        <html><body><article><p>Short.</p></article><article id="1complex: root"><h1>Chosen complex root</h1><p>Complex body.</p></article></body></html>
+        """,
+    ]
+    for html in cases {
+        let result = try StaticArticleExtractor().extract(
+            html: Data(html.utf8),
+            sourceURL: URL(string: "https://fixture.invalid/unique-root")!
+        )
+        let original = try SwiftSoup.parse(html)
+        #expect(try original.select(result.rootSelector).size() == 1)
+        for block in result.blocks {
+            let matches = try original.select(block.evidenceLocator)
+            #expect(matches.size() == 1, Comment(rawValue: block.evidenceLocator))
+            #expect(try matches.first()?.text() == block.canonicalText)
+        }
+    }
+}
+
+@Test
+func duplicateStableSemanticAttributesFallBackToStructuralEvidence() throws {
+    let html = """
+    <html><body><article id="semantic-root"><p data-testid="shared">First.</p><p data-testid="shared">Second.</p></article></body></html>
+    """
+    let result = try StaticArticleExtractor().extract(
+        html: Data(html.utf8),
+        sourceURL: URL(string: "https://fixture.invalid/semantic-duplicates")!
+    )
+    #expect(result.blocks.map(\.evidenceLocator) == [
+        "#semantic-root > p:nth-of-type(1)",
+        "#semantic-root > p:nth-of-type(2)",
+    ])
+    let original = try SwiftSoup.parse(html)
+    for block in result.blocks {
+        #expect(try original.select(block.evidenceLocator).size() == 1)
+    }
+}

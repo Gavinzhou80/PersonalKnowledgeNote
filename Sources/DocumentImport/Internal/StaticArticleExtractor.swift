@@ -25,6 +25,11 @@ struct StaticArticleExtractor: Sendable {
             let id = element.id()
             if !id.isEmpty { counts[id, default: 0] += 1 }
         }
+        let originalRootSelector = try uniqueSelector(
+            for: originalRoot,
+            in: document,
+            idCounts: idCounts
+        )
         let fragment = try SwiftSoup.parseBodyFragment(
             try originalRoot.outerHtml(),
             resolutionBase.absoluteString
@@ -35,10 +40,12 @@ struct StaticArticleExtractor: Sendable {
         try captureOriginalEvidence(
             originalRoot: originalRoot,
             clonedRoot: root,
-            idCounts: idCounts
+            idCounts: idCounts,
+            rootSelector: originalRootSelector,
+            document: document
         )
         try clean(root)
-        let rootSelector = selectorForRoot(root, idCounts: idCounts)
+        let rootSelector = originalRootSelector
         var images: [WebImageCandidate] = []
         var blocks: [ExtractedWebBlock] = []
         try walk(root, root: root, sourceURL: resolutionBase, idCounts: idCounts, images: &images, blocks: &blocks)
@@ -553,7 +560,9 @@ struct StaticArticleExtractor: Sendable {
     private func captureOriginalEvidence(
         originalRoot: Element,
         clonedRoot: Element,
-        idCounts: [String: Int]
+        idCounts: [String: Int],
+        rootSelector: String,
+        document: Document
     ) throws {
         let originals = try originalRoot.getAllElements().array()
         let clones = try clonedRoot.getAllElements().array()
@@ -566,14 +575,131 @@ struct StaticArticleExtractor: Sendable {
         for (original, clone) in zip(originals, clones) {
             try clone.attr(
                 Self.originalEvidenceAttribute,
-                evidence(
-                    original,
+                uniqueEvidenceLocator(
+                    for: original,
                     root: originalRoot,
-                    idCounts: idCounts,
-                    allowCapturedOriginal: false
+                    rootSelector: rootSelector,
+                    document: document,
+                    idCounts: idCounts
                 )
             )
         }
+    }
+
+    private func uniqueEvidenceLocator(
+        for element: Element,
+        root: Element,
+        rootSelector: String,
+        document: Document,
+        idCounts: [String: Int]
+    ) throws -> String {
+        if element === root { return rootSelector }
+        let id = element.id()
+        if !id.isEmpty,
+           idCounts[id] == 1,
+           let selector = idSelector(id),
+           try selectorUniquelyMatches(selector, element: element, in: document) {
+            return selector
+        }
+        if let selector = try uniqueStableAttributeSelector(
+            for: element,
+            in: document,
+            includeTag: false
+        ) {
+            return selector
+        }
+        return rootSelector + " > " + relativeStructuralPath(
+            from: element,
+            to: root
+        )
+    }
+
+    private func uniqueSelector(
+        for element: Element,
+        in document: Document,
+        idCounts: [String: Int]
+    ) throws -> String {
+        let id = element.id()
+        if !id.isEmpty,
+           idCounts[id] == 1,
+           let selector = idSelector(id),
+           try selectorUniquelyMatches(selector, element: element, in: document) {
+            return selector
+        }
+        if let selector = try uniqueStableAttributeSelector(
+            for: element,
+            in: document,
+            includeTag: true
+        ) {
+            return selector
+        }
+        return fullStructuralPath(for: element)
+    }
+
+    private func uniqueStableAttributeSelector(
+        for element: Element,
+        in document: Document,
+        includeTag: Bool
+    ) throws -> String? {
+        for name in ["data-testid", "itemprop", "aria-label", "role"] {
+            guard let value = try? element.attr(name), !value.isEmpty else { continue }
+            guard value.unicodeScalars.allSatisfy({ scalar in
+                let code = scalar.value
+                return code >= 0x20 && code != 0x7F && code != 0x22 && code != 0x5C
+            }) else { continue }
+            let prefix = includeTag ? element.tagName().lowercased() : ""
+            let selector = "\(prefix)[\(name)=\"\(cssStringEscaped(value))\"]"
+            if try selectorUniquelyMatches(selector, element: element, in: document) {
+                return selector
+            }
+        }
+        return nil
+    }
+
+    private func selectorUniquelyMatches(
+        _ selector: String,
+        element: Element,
+        in document: Document
+    ) throws -> Bool {
+        let matches = try document.select(selector).array()
+        return matches.count == 1 && matches[0] === element
+    }
+
+    private func fullStructuralPath(for element: Element) -> String {
+        var parts: [String] = []
+        var current: Element? = element
+        while let node = current {
+            if node is Document { break }
+            parts.append(structuralComponent(for: node))
+            current = node.parent()
+        }
+        return parts.reversed().joined(separator: " > ")
+    }
+
+    private func relativeStructuralPath(
+        from element: Element,
+        to root: Element
+    ) -> String {
+        var parts: [String] = []
+        var current: Element? = element
+        while let node = current, node !== root {
+            parts.append(structuralComponent(for: node))
+            current = node.parent()
+        }
+        return parts.reversed().joined(separator: " > ")
+    }
+
+    private func structuralComponent(for element: Element) -> String {
+        let tag = element.tagName().lowercased()
+        if tag == "html" || tag == "body" { return tag }
+        var ordinal = 1
+        if let parent = element.parent() {
+            for sibling in parent.children().array() {
+                if sibling === element { break }
+                if sibling.tagName().lowercased() == tag { ordinal += 1 }
+            }
+        }
+        return "\(tag):nth-of-type(\(ordinal))"
     }
 
     private static let originalEvidenceAttribute = "data-document-import-original-evidence"
