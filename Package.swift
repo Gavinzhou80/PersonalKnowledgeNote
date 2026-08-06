@@ -72,6 +72,8 @@ let package = Package(
                 "KnowledgeCore",
                 "LocalLibrary",
                 "TestFixtures",
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "SwiftSoup", package: "SwiftSoup"),
             ]
         ),
         .testTarget(

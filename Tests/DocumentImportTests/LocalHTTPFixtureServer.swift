@@ -14,6 +14,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         let body: Data
         let delay: Duration
         let framing: Framing
+        let beforeSend: (@Sendable () async -> Void)?
         let onSendCompleted: (@Sendable () -> Void)?
 
         init(
@@ -22,6 +23,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             body: Data = Data(),
             delay: Duration = .zero,
             framing: Framing = .contentLength,
+            beforeSend: (@Sendable () async -> Void)? = nil,
             onSendCompleted: (@Sendable () -> Void)? = nil
         ) {
             self.status = status
@@ -29,6 +31,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
             self.body = body
             self.delay = delay
             self.framing = framing
+            self.beforeSend = beforeSend
             self.onSendCompleted = onSendCompleted
         }
     }
@@ -192,6 +195,7 @@ final class LocalHTTPFixtureServer: @unchecked Sendable {
         monitorPeerClosure(on: connection)
 
         Task { [weak self, weak connection] in
+            await response.beforeSend?()
             if response.delay > .zero {
                 try? await Task.sleep(for: response.delay)
             }
