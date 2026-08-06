@@ -1,0 +1,24 @@
+Tests/DocumentImportTests/LocalHTTPFixtureServer.swift
+  s_413052984bbc8e::t_f16c070ee347fc 120,198-201,250-255
+Tests/DocumentImportTests/RealStaticWebImportIntegrationTests.swift
+  s_413052984bbc8e::t_b5229c140775f7 381,387,477-498,500
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "126c127b9d98c588a4dfe050e33ea5729b6a453e",
+  "prompts": {},
+  "logical_commit_id": "126c127b9d98c588a4dfe050e33ea5729b6a453e",
+  "sessions": {
+    "s_413052984bbc8e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd219-9afe-74b2-93a0-e4e1aed447b1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zhouli.gavin <zhouli.gavin@bigo.sg>",
+      "total_additions": 36,
+      "total_deletions": 2
+    }
+  }
+}
