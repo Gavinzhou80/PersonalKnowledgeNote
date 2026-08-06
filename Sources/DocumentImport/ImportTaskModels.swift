@@ -1,6 +1,9 @@
 import Foundation
 import KnowledgeCore
 
+@available(*, deprecated, renamed: "KnowledgeCore.ImportIssue")
+public typealias ImportIssue = KnowledgeCore.ImportIssue
+
 public enum ImportTaskQuery: Hashable, Sendable {
     case unfinished
     case active
@@ -63,22 +66,10 @@ public enum ImportActivity: String, Hashable, Sendable {
     case publishing
 }
 
-public struct ImportIssue: Hashable, Sendable {
-    public enum Code: String, Hashable, Sendable {
-        case optionalResourceUnavailable
-    }
-
-    public let code: Code
-
-    public init(code: Code) {
-        self.code = code
-    }
-}
-
 public enum ImportSuccess: Hashable, Sendable {
     case published(
         documentID: SourceDocumentID,
-        issues: [ImportIssue]
+        issues: [KnowledgeCore.ImportIssue]
     )
     case alreadyImported(
         documentID: SourceDocumentID,
@@ -90,6 +81,11 @@ public enum ImportSuccess: Hashable, Sendable {
 public struct ImportFailure: Error, Hashable, Sendable {
     public enum Code: String, Hashable, Sendable {
         case networkUnavailable
+        case requestTimedOut
+        case accessDenied
+        case invalidHTTPResponse
+        case unsupportedContentType
+        case responseTooLarge
         case webpageHasNoReadableArticle
         case artifactConstructionFailed
         case localLibraryUnavailable

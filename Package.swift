@@ -15,6 +15,10 @@ let package = Package(
     ],
     dependencies: [
         .package(
+            url: "https://github.com/scinfu/SwiftSoup.git",
+            exact: "2.13.7"
+        ),
+        .package(
             url: "https://github.com/groue/GRDB.swift.git",
             exact: "7.11.1"
         ),
@@ -30,7 +34,11 @@ let package = Package(
         ),
         .target(
             name: "DocumentImport",
-            dependencies: ["KnowledgeCore", "LocalLibrary"]
+            dependencies: [
+                "KnowledgeCore",
+                "LocalLibrary",
+                .product(name: "SwiftSoup", package: "SwiftSoup"),
+            ]
         ),
         .target(
             name: "AppSupport",
@@ -64,11 +72,13 @@ let package = Package(
                 "KnowledgeCore",
                 "LocalLibrary",
                 "TestFixtures",
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "SwiftSoup", package: "SwiftSoup"),
             ]
         ),
         .testTarget(
             name: "AppSupportTests",
-            dependencies: ["AppSupport", "TestFixtures"]
+            dependencies: ["AppSupport", "DocumentImport", "TestFixtures"]
         ),
     ],
     swiftLanguageModes: [.v6]

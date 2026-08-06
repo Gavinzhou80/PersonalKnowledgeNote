@@ -1,7 +1,12 @@
 import Foundation
 
-enum WebAcquisitionError: Error {
+enum WebAcquisitionError: Error, Equatable, Sendable {
     case networkUnavailable
+    case requestTimedOut
+    case accessDenied
+    case invalidHTTPResponse
+    case unsupportedContentType
+    case responseTooLarge
 }
 
 protocol WebAcquiring: Sendable {
@@ -9,11 +14,24 @@ protocol WebAcquiring: Sendable {
 }
 
 struct AcquiredWebPage: Sendable {
-    let sourceURL: URL
-    let html: Data
+    let finalURL: URL
+    let mimeType: String
+    let responseBytes: Data
+
+    var sourceURL: URL { finalURL }
+    var html: Data { responseBytes }
+
+    init(finalURL: URL, mimeType: String, responseBytes: Data) {
+        self.finalURL = finalURL
+        self.mimeType = mimeType
+        self.responseBytes = responseBytes
+    }
 
     init(sourceURL: URL, html: Data) {
-        self.sourceURL = sourceURL
-        self.html = html
+        self.init(
+            finalURL: sourceURL,
+            mimeType: "text/html",
+            responseBytes: html
+        )
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 import KnowledgeCore
 import Testing
 import DocumentImport
+import typealias DocumentImport.ImportIssue
 
 private func requireHashableSendable<T: Hashable & Sendable>(_: T.Type) {}
 
@@ -44,16 +45,37 @@ func importSubmissionErrorIsHashableAndSendable() {
 @Test
 func terminalSuccessPreservesPublicationOutcome() {
     let documentID = SourceDocumentID()
+    let relatedBlockID = SourceBlockID()
+    let issue = KnowledgeCore.ImportIssue(
+        code: .optionalWebImageUnavailable,
+        relatedBlockID: relatedBlockID
+    )
     let success = ImportSuccess.published(
         documentID: documentID,
-        issues: []
+        issues: [issue]
     )
 
     switch ImportTerminalState.success(success) {
     case .success(.published(let actualID, let issues)):
         #expect(actualID == documentID)
-        #expect(issues.isEmpty)
+        #expect(issues == [issue])
     default:
         Issue.record("Expected published success terminal state")
     }
+}
+
+@Test
+func deprecatedImportIssueNamesRemainSourceCompatible() {
+    let oldIssue: ImportIssue = ImportIssue(
+        code: .optionalResourceUnavailable
+    )
+    let newIssue = KnowledgeCore.ImportIssue(
+        code: .optionalWebImageUnavailable
+    )
+
+    #expect(oldIssue == newIssue)
+    #expect(
+        KnowledgeCore.ImportIssue.Code.optionalResourceUnavailable
+            == .optionalWebImageUnavailable
+    )
 }

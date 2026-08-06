@@ -1,8 +1,17 @@
 import Foundation
 import KnowledgeCore
 import LocalLibrary
+import TestFixtures
 import Testing
 @testable import DocumentImport
+
+private struct FixedPageWebAcquirer: WebAcquiring {
+    let page: AcquiredWebPage
+
+    func acquire(_ url: URL) async throws -> AcquiredWebPage {
+        page
+    }
+}
 
 @Test(.timeLimit(.minutes(1)))
 func invalidWebURLFailsBeforeDurableAcceptance() async throws {
@@ -146,10 +155,10 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
         try await library.sourceDocument(id: fixedDocumentID)
     )
     let headingID = SourceBlockID(try #require(
-        UUID(uuidString: "d3b501a8-7190-5456-0179-7fc7ed5631c9")
+        UUID(uuidString: "06ceb40e-49dc-3174-9f71-aaf5a3adfb55")
     ))
     let paragraphID = SourceBlockID(try #require(
-        UUID(uuidString: "0ac1613a-4e71-300b-c635-7731932ff4f7")
+        UUID(uuidString: "5e397cd3-3162-97e5-5d6d-f58467c74121")
     ))
     let expectedContent = SourceDocumentContent(
         documentID: fixedDocumentID,
@@ -160,7 +169,9 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
         blocks: [
             SourceBlock(
                 id: headingID,
-                canonicalText: "Fixture Article"
+                canonicalText: "Fixture Article",
+                category: .text,
+                role: .heading(level: 1)
             ),
             SourceBlock(
                 id: paragraphID,
@@ -172,10 +183,10 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
         ),
         evidence: [
             headingID: .web(
-                locator: "article > h1:nth-of-type(1)"
+                locator: "html > body > article:nth-of-type(1) > h1:nth-of-type(1)"
             ),
             paragraphID: .web(
-                locator: "article > p:nth-of-type(1)"
+                locator: "html > body > article:nth-of-type(1) > p:nth-of-type(1)"
             ),
         ]
     )
@@ -183,6 +194,52 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     #expect(located.location == .library)
     #expect(located.document.artifact.kind == .webPackage)
     #expect(located.document.content == expectedContent)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func publishedSuccessMatchesPersistentIssues() async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(
+        at: root.appending(path: "Library")
+    )
+    let fixture = try Data(contentsOf: FixtureCatalog.richArticleURL)
+    let server = try await LocalHTTPFixtureServer.start { _ in
+        .init(status: 404, headers: ["Content-Type": "text/plain"])
+    }
+    defer { server.stop() }
+    let page = AcquiredWebPage(
+        finalURL: server.url("articles/rich/index.html"),
+        mimeType: "text/html",
+        responseBytes: fixture
+    )
+    let fixedDocumentID = SourceDocumentID()
+    let documentImport = DocumentImport(
+        library: library,
+        webAcquirer: FixedPageWebAcquirer(page: page),
+        documentIDGenerator: { fixedDocumentID }
+    )
+
+    let handle = try await documentImport.submit(.webpage(page.finalURL))
+    let terminal = await handle.value()
+    let located = try #require(
+        try await library.sourceDocument(id: fixedDocumentID)
+    )
+    let persistedIssues = located.document.content.issues
+    let imageBlock = try #require(
+        located.document.content.blocks.first { $0.role == .image }
+    )
+
+    #expect(persistedIssues == [
+        .init(
+            code: .optionalWebImageUnavailable,
+            relatedBlockID: imageBlock.id
+        ),
+    ])
+    #expect(terminal == .success(.published(
+        documentID: fixedDocumentID,
+        issues: persistedIssues
+    )))
 }
 
 @Test(.timeLimit(.minutes(1)))
