@@ -31,6 +31,7 @@ final class CheckpointFileSystem: @unchecked Sendable {
         var byteCount: UInt64 = 0
         var manifestHasher = SHA256()
         var files: [String: Data] = [:]
+        var directories: Set<String> = []
 
         var entryCount: Int { fileCount + directoryCount }
     }
@@ -177,7 +178,8 @@ final class CheckpointFileSystem: @unchecked Sendable {
             }
             return VerifiedCheckpointPackage(
                 descriptor: descriptor,
-                files: state.files
+                files: state.files,
+                directories: state.directories
             )
         } catch is UnsafeFileSystemEntry {
             throw LocalLibraryError.artifactMissing
@@ -495,6 +497,9 @@ final class CheckpointFileSystem: @unchecked Sendable {
                     fileByteCount: nil,
                     fileDigest: nil
                 )
+                guard state.directories.insert(childPath).inserted else {
+                    throw UnsafeFileSystemEntry.rejected
+                }
                 try loadDirectory(
                     directory: child.rawValue,
                     relativePath: childPath,

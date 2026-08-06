@@ -67,6 +67,46 @@ public actor LocalLibrary {
         }
     }
 
+    package static func loadUnmanagedCheckpointPackage(
+        at packageURL: URL
+    ) throws -> VerifiedCheckpointPackage {
+        try withLocalLibraryErrorTranslation {
+            let inspectionRoot = FileManager.default.temporaryDirectory
+                .appending(
+                    path: "UnmanagedCheckpointInspection-\(UUID().uuidString)"
+                )
+            let checkpointsRoot = inspectionRoot.appending(path: "Checkpoints")
+            do {
+                try FileManager.default.createDirectory(
+                    at: checkpointsRoot,
+                    withIntermediateDirectories: true
+                )
+                let fileSystem = try CheckpointFileSystem(
+                    libraryRoot: inspectionRoot,
+                    checkpointsRoot: checkpointsRoot,
+                    faultInjector: .none
+                )
+                let taskID = ImportTaskID()
+                let artifactID = UUID()
+                let descriptor = try fileSystem.copyPackage(
+                    at: packageURL,
+                    taskID: taskID,
+                    artifactID: artifactID
+                )
+                let package = try fileSystem.loadPackage(
+                    taskID: taskID,
+                    artifactID: artifactID,
+                    expectedDescriptor: descriptor
+                )
+                try FileManager.default.removeItem(at: inspectionRoot)
+                return package
+            } catch {
+                try? FileManager.default.removeItem(at: inspectionRoot)
+                throw error
+            }
+        }
+    }
+
     static func openForTesting(
         at root: URL,
         faultInjector: PublicationFaultInjector = .none,

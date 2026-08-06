@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 import KnowledgeCore
 import SwiftSoup
@@ -9,18 +10,28 @@ struct EvidenceExtractionMetrics: Sendable {
 }
 
 struct StaticArticleExtractor: Sendable {
-    func extract(html: Data, sourceURL: URL) throws -> ExtractedWebArticle {
-        try extractWithMetrics(html: html, sourceURL: sourceURL).article
+    func extract(
+        html: Data,
+        sourceURL: URL,
+        textEncodingName: String? = nil
+    ) throws -> ExtractedWebArticle {
+        try extractWithMetrics(
+            html: html,
+            sourceURL: sourceURL,
+            textEncodingName: textEncodingName
+        ).article
     }
 
     func extractWithMetrics(
         html: Data,
-        sourceURL: URL
+        sourceURL: URL,
+        textEncodingName: String? = nil
     ) throws -> (article: ExtractedWebArticle, metrics: EvidenceExtractionMetrics) {
         var metrics = EvidenceExtractionMetrics()
         let article = try extractArticle(
             html: html,
             sourceURL: sourceURL,
+            textEncodingName: textEncodingName,
             metrics: &metrics
         )
         return (article, metrics)
@@ -29,9 +40,13 @@ struct StaticArticleExtractor: Sendable {
     private func extractArticle(
         html: Data,
         sourceURL: URL,
+        textEncodingName: String?,
         metrics: inout EvidenceExtractionMetrics
     ) throws -> ExtractedWebArticle {
-        guard let source = String(data: html, encoding: .utf8) else {
+        guard let source = decodeHTML(
+            html,
+            persistedCharset: textEncodingName
+        ) else {
             throw StaticWebBuildError.unreadableHTML
         }
         let document: Document
@@ -101,6 +116,98 @@ struct StaticArticleExtractor: Sendable {
             rootSelector: rootSelector,
             imageCandidates: images
         )
+    }
+
+    private func decodeHTML(
+        _ data: Data,
+        persistedCharset: String?
+    ) -> String? {
+        if let encoding = stringEncoding(for: persistedCharset),
+           let decoded = String(data: data, encoding: encoding) {
+            return decoded
+        }
+        if let decoded = String(data: data, encoding: .utf8) {
+            return decoded
+        }
+        guard let metaCharset = html5MetaCharset(in: data),
+              let encoding = stringEncoding(for: metaCharset)
+        else {
+            return nil
+        }
+        return String(data: data, encoding: encoding)
+    }
+
+    private func html5MetaCharset(in data: Data) -> String? {
+        let prefix = data.prefix(1_024)
+        let ascii = String(prefix.map { byte in
+            byte < 0x80 ? Character(UnicodeScalar(byte)) : " "
+        })
+        guard let metaExpression = try? NSRegularExpression(
+            pattern: #"<meta\b[^>]*>"#,
+            options: [.caseInsensitive]
+        ), let charsetExpression = try? NSRegularExpression(
+            pattern: #"charset\s*=\s*[\"']?\s*([a-z0-9._:-]+)"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+        let fullRange = NSRange(ascii.startIndex..., in: ascii)
+        for match in metaExpression.matches(
+            in: ascii,
+            range: fullRange
+        ) {
+            let tag = (ascii as NSString).substring(with: match.range)
+            let tagRange = NSRange(location: 0, length: (tag as NSString).length)
+            guard let charsetMatch = charsetExpression.firstMatch(
+                in: tag,
+                range: tagRange
+            ), charsetMatch.numberOfRanges == 2 else {
+                continue
+            }
+            return normalizedWebCharsetName(
+                (tag as NSString).substring(with: charsetMatch.range(at: 1))
+            )
+        }
+        return nil
+    }
+
+    private func stringEncoding(for charset: String?) -> String.Encoding? {
+        guard let normalized = normalizedWebCharsetName(charset)?
+            .replacingOccurrences(of: "_", with: "-")
+        else {
+            return nil
+        }
+        switch normalized {
+        case "utf-8", "utf8":
+            return .utf8
+        case "utf-16", "utf16":
+            return .utf16
+        case "utf-16le", "utf16le":
+            return .utf16LittleEndian
+        case "utf-16be", "utf16be":
+            return .utf16BigEndian
+        case "iso-8859-1", "iso8859-1", "latin1", "latin-1":
+            return .isoLatin1
+        case "windows-1252", "cp1252":
+            return .windowsCP1252
+        case "shift-jis", "shiftjis", "sjis", "ms-kanji", "csshiftjis":
+            return .shiftJIS
+        case "euc-jp", "eucjp", "cseucpkdfmtjapanese":
+            return .japaneseEUC
+        case "gb18030", "gbk", "cp936":
+            let coreFoundationName = normalized as CFString
+            let cfEncoding = CFStringConvertIANACharSetNameToEncoding(
+                coreFoundationName
+            )
+            guard cfEncoding != kCFStringEncodingInvalidId else {
+                return nil
+            }
+            return String.Encoding(
+                rawValue: CFStringConvertEncodingToNSStringEncoding(cfEncoding)
+            )
+        default:
+            return nil
+        }
     }
 
     private func readableRoot(in document: Document) throws -> Element? {

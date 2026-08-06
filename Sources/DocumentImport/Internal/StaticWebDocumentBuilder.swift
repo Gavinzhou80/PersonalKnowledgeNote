@@ -53,7 +53,8 @@ struct StaticWebDocumentBuilder: Sendable {
         stageObserver(.extract)
         let article = try extractor.extract(
             html: page.responseBytes,
-            sourceURL: page.finalURL
+            sourceURL: page.finalURL,
+            textEncodingName: page.textEncodingName
         )
         let packageURL = try makePackage()
         do {

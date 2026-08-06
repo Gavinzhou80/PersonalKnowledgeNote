@@ -6,6 +6,120 @@ import Testing
 @testable import DocumentImport
 
 @Test
+func recognizedHTTPCharsetTakesPrecedenceOverUTF8AndMetaCharset() throws {
+    let bytes = Data("""
+    <html><head><meta charset="utf-8"></head><body><article><h1>Café</h1></article></body></html>
+    """.utf8)
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/charset")!,
+        textEncodingName: "iso-8859-1"
+    )
+
+    #expect(article.blocks[0].canonicalText == "CafÃ©")
+}
+
+@Test
+func fallsBackToUTF8WhenPersistedCharsetIsUnknownOrAbsent() throws {
+    let bytes = Data("<html><body><article><h1>Café</h1></article></body></html>".utf8)
+    let extractor = StaticArticleExtractor()
+    let sourceURL = URL(string: "https://fixture.invalid/utf8")!
+
+    #expect(try extractor.extract(
+        html: bytes,
+        sourceURL: sourceURL,
+        textEncodingName: "x-unknown"
+    ).blocks[0].canonicalText == "Café")
+    #expect(try extractor.extract(
+        html: bytes,
+        sourceURL: sourceURL,
+        textEncodingName: nil
+    ).blocks[0].canonicalText == "Café")
+}
+
+@Test
+func detectsHTMLMetaCharsetWithinFirst1024Bytes() throws {
+    let prefix = Data("<html><head><meta charset='windows-1252'></head><body><article><h1>".utf8)
+    let suffix = Data("</h1></article></body></html>".utf8)
+    let bytes = prefix + Data([0x93]) + Data("Hello".utf8) + Data([0x94]) + suffix
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/meta")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test
+func ignoresHTMLMetaCharsetAfterFirst1024Bytes() throws {
+    let bytes = Data(repeating: 0x20, count: 1_024)
+        + Data("<meta charset='windows-1252'><article><h1>".utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article>".utf8)
+
+    #expect(throws: StaticWebBuildError.unreadableHTML) {
+        try StaticArticleExtractor().extract(
+            html: bytes,
+            sourceURL: URL(string: "https://fixture.invalid/late-meta")!
+        )
+    }
+}
+
+@Test
+func decodesRepresentativeWindows1252ContentFromHTTPCharset() throws {
+    let bytes = Data("<html><body><article><p>Price ".utf8)
+        + Data([0x80])
+        + Data("10 ".utf8)
+        + Data([0x97])
+        + Data(" today</p></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/windows")!,
+        textEncodingName: "WINDOWS_1252"
+    )
+
+    #expect(article.blocks[0].canonicalText == "Price €10 — today")
+}
+
+@Test(arguments: [
+    ("Shift_JIS", Data([0x93, 0xFA, 0x96, 0x7B]), "日本"),
+    ("EUC-JP", Data([0xC6, 0xFC, 0xCB, 0xDC]), "日本"),
+    ("GBK", Data([0xD6, 0xD0, 0xCE, 0xC4]), "中文"),
+])
+func decodesRepresentativePersistedAsianCharsets(
+    charset: String,
+    encodedText: Data,
+    expected: String
+) throws {
+    let bytes = Data("<html><body><article><p>".utf8)
+        + encodedText
+        + Data("</p></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/asian-charset")!,
+        textEncodingName: charset
+    )
+
+    #expect(article.blocks[0].canonicalText == expected)
+}
+
+@Test
+func rejectsUnsupportedMalformedHTMLBytes() throws {
+    #expect(throws: StaticWebBuildError.unreadableHTML) {
+        try StaticArticleExtractor().extract(
+            html: Data([0xFF, 0xFE, 0xFD]),
+            sourceURL: URL(string: "https://fixture.invalid/malformed")!,
+            textEncodingName: "x-unknown"
+        )
+    }
+}
+
+@Test
 func extractsRichStaticArticleSemantics() throws {
     let sourceURL = URL(string: "https://fixture.invalid/articles/rich/index.html")!
     let article = try StaticArticleExtractor().extract(

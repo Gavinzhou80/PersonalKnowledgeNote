@@ -6,7 +6,7 @@ import Testing
 @Suite(.serialized)
 struct URLSessionStaticWebAcquirerTests {
     @Test
-    func acquiresHTMLWithFinalURLMIMETypeAndBytes() async throws {
+    func acquiresHTMLWithURLProvenanceMIMETypeCharsetAndBytes() async throws {
         let html = Data("<html><article>Hello</article></html>".utf8)
         let server = try await LocalHTTPFixtureServer.start { path in
             #expect(path == "/article")
@@ -17,10 +17,14 @@ struct URLSessionStaticWebAcquirerTests {
         }
         defer { server.stop() }
 
-        let page = try await URLSessionStaticWebAcquirer().acquire(server.url("article"))
+        let sourceURL = server.url("article")
+        let page = try await URLSessionStaticWebAcquirer().acquire(sourceURL)
 
+        #expect(page.sourceURL == sourceURL)
         #expect(page.finalURL == server.url("article"))
         #expect(page.mimeType == "text/html")
+        #expect(page.textEncodingName == "utf-8")
+        #expect(page.bytes == html)
         #expect(page.responseBytes == html)
     }
 
@@ -37,10 +41,37 @@ struct URLSessionStaticWebAcquirerTests {
         }
         defer { server.stop() }
 
-        let page = try await URLSessionStaticWebAcquirer().acquire(server.url("redirect"))
+        let sourceURL = server.url("redirect")
+        let page = try await URLSessionStaticWebAcquirer().acquire(sourceURL)
 
+        #expect(page.sourceURL == sourceURL)
         #expect(page.finalURL == server.url("final"))
         #expect(page.mimeType == "application/xhtml+xml")
+        #expect(page.textEncodingName == nil)
+    }
+
+    @Test(arguments: [
+        ("text/html; charset=WiNdOwS-1252", "windows-1252"),
+        ("text/html; charset=X-UnKnOwN", "x-unknown"),
+        ("text/html", nil),
+    ])
+    func normalizesPersistedHTTPCharset(
+        contentType: String,
+        expectedCharset: String?
+    ) async throws {
+        let server = try await LocalHTTPFixtureServer.start { _ in
+            .init(
+                headers: ["Content-Type": contentType],
+                body: Data("<html></html>".utf8)
+            )
+        }
+        defer { server.stop() }
+
+        let page = try await URLSessionStaticWebAcquirer().acquire(
+            server.url("charset")
+        )
+
+        #expect(page.textEncodingName == expectedCharset)
     }
 
     @Test

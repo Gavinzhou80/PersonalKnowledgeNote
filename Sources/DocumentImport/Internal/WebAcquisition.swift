@@ -13,18 +13,38 @@ protocol WebAcquiring: Sendable {
     func acquire(_ url: URL) async throws -> AcquiredWebPage
 }
 
-struct AcquiredWebPage: Sendable {
+struct AcquiredWebPage: Hashable, Sendable {
+    let sourceURL: URL
     let finalURL: URL
     let mimeType: String
-    let responseBytes: Data
+    let textEncodingName: String?
+    let bytes: Data
 
-    var sourceURL: URL { finalURL }
-    var html: Data { responseBytes }
+    var responseBytes: Data { bytes }
+    var html: Data { bytes }
 
-    init(finalURL: URL, mimeType: String, responseBytes: Data) {
+    init(
+        sourceURL: URL,
+        finalURL: URL,
+        mimeType: String,
+        textEncodingName: String?,
+        bytes: Data
+    ) {
+        self.sourceURL = sourceURL
         self.finalURL = finalURL
         self.mimeType = mimeType
-        self.responseBytes = responseBytes
+        self.textEncodingName = normalizedWebCharsetName(textEncodingName)
+        self.bytes = bytes
+    }
+
+    init(finalURL: URL, mimeType: String, responseBytes: Data) {
+        self.init(
+            sourceURL: finalURL,
+            finalURL: finalURL,
+            mimeType: mimeType,
+            textEncodingName: nil,
+            bytes: responseBytes
+        )
     }
 
     init(sourceURL: URL, html: Data) {
@@ -34,4 +54,15 @@ struct AcquiredWebPage: Sendable {
             responseBytes: html
         )
     }
+}
+
+func normalizedWebCharsetName(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty,
+          trimmed.utf8.allSatisfy({ $0 < 0x80 })
+    else {
+        return nil
+    }
+    return trimmed.lowercased()
 }

@@ -105,13 +105,16 @@ package struct ManagedCheckpointArtifact: Hashable, Sendable {
 package struct VerifiedCheckpointPackage: Sendable {
     package let descriptor: CheckpointArtifactDescriptor
     package let files: [String: Data]
+    package let directories: Set<String>
 
     package init(
         descriptor: CheckpointArtifactDescriptor,
-        files: [String: Data]
+        files: [String: Data],
+        directories: Set<String>
     ) {
         self.descriptor = descriptor
         self.files = files
+        self.directories = directories
     }
 }
 
