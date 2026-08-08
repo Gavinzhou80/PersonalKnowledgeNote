@@ -1080,7 +1080,7 @@ git commit -m "feat: schedule durable import queue"
 - Modify: `Tests/DocumentImportTests/DocumentImportIntegrationTests.swift`
 - Create: `Tests/DocumentImportTests/ImportRestartRecoveryTests.swift`
 
-- [ ] **Step 1: Write failing stage-resume tests**
+- [x] **Step 1: Write failing stage-resume tests**
 
 Add three focused tests using injected acquisition/build counters:
 
@@ -1157,7 +1157,7 @@ pattern as the other harness waits. Production errors and
 
 Add accepted-only recovery and corrupt checkpoint retryable-failure tests.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -1167,7 +1167,7 @@ swift test --filter ImportRestartRecoveryTests
 
 Expected: FAIL because the runner does not resume checkpoints.
 
-- [ ] **Step 3: Define runner stage decoding**
+- [x] **Step 3: Define runner stage decoding**
 
 Map durable checkpoint ordinals:
 
@@ -1220,7 +1220,7 @@ The runner reads the snapshot and selects:
 
 Unknown ordinals or codec versions become retryable checkpoint failures.
 
-- [ ] **Step 4: Persist acquisition before construction**
+- [x] **Step 4: Persist acquisition before construction**
 
 After URLSession succeeds:
 
@@ -1232,7 +1232,7 @@ After URLSession succeeds:
 
 Remove temporary package data after LocalLibrary owns the copy.
 
-- [ ] **Step 5: Persist prepared publication candidate**
+- [x] **Step 5: Persist prepared publication candidate**
 
 After builder and publication staging succeed:
 
@@ -1252,7 +1252,7 @@ cleanup placement to the LocalLibrary actor and remove the package only after
 commit; if post-commit removal fails, the next `LocalLibrary.open` orphan sweep
 finishes cleanup without changing the completed result.
 
-- [ ] **Step 6: Persist failures instead of abandoning tasks**
+- [x] **Step 6: Persist failures instead of abandoning tasks**
 
 Add a versioned DocumentImport failure codec:
 
@@ -1266,7 +1266,7 @@ struct PersistedImportFailure: Codable, Sendable {
 
 On noncancellation failure, call a LocalLibrary transition that records `.failed`, clears active queue sequence, stores the failure envelope, increments revision, and retains only valid retry checkpoints. Do not call legacy `abandon` for ordinary task failure.
 
-- [ ] **Step 7: Run recovery and full DocumentImport tests**
+- [x] **Step 7: Run recovery and full DocumentImport tests**
 
 Run:
 
@@ -1278,7 +1278,7 @@ swift test --filter DocumentImportTests
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add Sources/DocumentImport/Internal/ImportTaskRunner.swift Sources/DocumentImport/DocumentImport.swift Sources/LocalLibrary/ImportWorkspace.swift Sources/LocalLibrary/LocalLibrary.swift Sources/LocalLibrary/Internal/LibraryDatabase.swift Tests/DocumentImportTests/DocumentImportTestSupport.swift Tests/DocumentImportTests/DocumentImportIntegrationTests.swift Tests/DocumentImportTests/ImportRestartRecoveryTests.swift
