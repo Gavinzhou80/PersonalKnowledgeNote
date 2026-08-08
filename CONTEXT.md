@@ -87,3 +87,7 @@ _Avoid_: Source Structure, table of contents copy
 **Reading Order**:
 The user-correctable sequence in which Source Blocks are read, translated, and composed. It begins from Source Structure while leaving Source Block identity and Source Evidence unchanged.
 _Avoid_: Source Structure, PDF object order
+
+**Import Checkpoint**:
+A task-owned durable record of completed Import Task stages that lets an interrupted attempt resume without redoing finished work. It belongs to one attempt's lifecycle, is never a Source Document, and is discarded once its task reaches a terminal result.
+_Avoid_: draft document, partial publication, cached download
