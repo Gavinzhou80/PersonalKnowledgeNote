@@ -78,6 +78,19 @@ public actor ImportWorkspace {
         )
     }
 
+    package func recordFailure(
+        expectedRevision: UInt64,
+        failure: ImportTaskFailureEnvelope,
+        retainCheckpoint: Bool
+    ) async throws -> DurableQueueMutation {
+        try await library.recordFailure(
+            taskID: taskID,
+            expectedRevision: expectedRevision,
+            failure: failure,
+            retainCheckpoint: retainCheckpoint
+        )
+    }
+
     package func verifyManagedArtifact(
         _ artifact: StagedArtifact
     ) async throws -> SourceArtifactDescriptor {

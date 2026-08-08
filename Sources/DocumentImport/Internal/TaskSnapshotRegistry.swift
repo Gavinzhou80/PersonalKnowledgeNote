@@ -444,9 +444,7 @@ struct TaskSnapshotRegistry {
         case .cancelling:
             state = .cancelling
         case .failed:
-            state = .failed(privacySafeFailure(
-                diagnosticID: durable.taskID.rawValue
-            ))
+            state = .failed(projectedFailure(for: durable))
         case .cancelled:
             state = .cancelled
         case .completed:
@@ -598,6 +596,28 @@ struct TaskSnapshotRegistry {
             activity: activity,
             completedUnitCount: 0,
             totalUnitCount: nil
+        )
+    }
+
+    private static func projectedFailure(
+        for durable: DurableImportSnapshot
+    ) -> ImportFailure {
+        let fallback = privacySafeFailure(
+            diagnosticID: durable.taskID.rawValue
+        )
+        guard let envelope = durable.failure,
+              envelope.codecVersion == 1,
+              let persisted = try? JSONDecoder().decode(
+                  PersistedImportFailure.self,
+                  from: envelope.payload
+              )
+        else {
+            return fallback
+        }
+        return ImportFailure(
+            code: persisted.code,
+            recovery: persisted.recovery,
+            diagnosticID: persisted.diagnosticID
         )
     }
 

@@ -294,6 +294,9 @@ extension ImportTaskRecord {
         )
         let failure = try decodeFailure(for: decodedState)
         let checkpoint = try decodeCheckpoint()
+        let decodedCheckpointOrdinal = try decodeCheckpointOrdinal(
+            hasCheckpoint: checkpoint != nil
+        )
         let managedCheckpointArtifact = try decodeCheckpointArtifact(
             checkpointArtifact,
             hasCheckpoint: checkpoint != nil
@@ -312,6 +315,7 @@ extension ImportTaskRecord {
             state: decodedState,
             failure: failure,
             checkpoint: checkpoint,
+            checkpointOrdinal: decodedCheckpointOrdinal,
             checkpointArtifact: managedCheckpointArtifact,
             stagedArtifact: artifact,
             outcome: outcome
@@ -378,6 +382,23 @@ extension ImportTaskRecord {
         default:
             throw corruptLibrary()
         }
+    }
+
+    private func decodeCheckpointOrdinal(
+        hasCheckpoint: Bool
+    ) throws -> UInt64? {
+        guard hasCheckpoint else {
+            guard checkpointOrdinal == nil else {
+                throw corruptLibrary()
+            }
+            return nil
+        }
+        guard let rawOrdinal = checkpointOrdinal,
+              let ordinal = UInt64(exactly: rawOrdinal)
+        else {
+            throw corruptLibrary()
+        }
+        return ordinal
     }
 
     private func decodeStagedArtifact(

@@ -74,6 +74,173 @@ enum FixtureWebAcquisitionError: Error {
     case unavailable
 }
 
+actor CountingWebAcquirer: WebAcquiring {
+    enum Mode: Sendable {
+        case normal
+        case failingIfCalled
+    }
+
+    private let html: Data
+    private let mode: Mode
+    private(set) var callCount = 0
+
+    init(mode: Mode = .normal) throws {
+        html = try Data(contentsOf: FixtureCatalog.webArticleURL)
+        self.mode = mode
+    }
+
+    func acquire(_ url: URL) async throws -> AcquiredWebPage {
+        callCount += 1
+        guard mode == .normal else {
+            throw FixtureWebAcquisitionError.unavailable
+        }
+        return AcquiredWebPage(sourceURL: url, html: html)
+    }
+}
+
+actor CountingWebBuilder {
+    enum Mode: Sendable {
+        case normal
+        case failingIfCalled
+    }
+
+    private let mode: Mode
+    private(set) var callCount = 0
+
+    init(mode: Mode = .normal) {
+        self.mode = mode
+    }
+
+    func build(
+        _ page: AcquiredWebPage,
+        documentID: SourceDocumentID
+    ) async throws -> StaticWebImportProduct {
+        callCount += 1
+        guard mode == .normal else {
+            throw StaticWebBuildError.cannotWritePackage
+        }
+        return try await StaticWebDocumentBuilder().build(
+            page,
+            documentID: documentID
+        )
+    }
+}
+
+actor ImportRunnerCrashInjector {
+    private let crashPoint: T05CrashPoint?
+    private var terminated = false
+
+    init(crashPoint: T05CrashPoint?) {
+        self.crashPoint = crashPoint
+    }
+
+    func hit(_ point: T05CrashPoint) async throws {
+        guard point == crashPoint else { return }
+        terminated = true
+        throw ImportTaskRunnerInterruption.injectedProcessTermination
+    }
+
+    func waitForInjectedTermination() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !terminated {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+}
+
+struct RecoveryHarness {
+    let root: URL
+    let articleURL: URL
+    let firstImporter: DocumentImport
+    let acquirer: CountingWebAcquirer
+    let builder: CountingWebBuilder
+    let crashInjector: ImportRunnerCrashInjector
+
+    static func make(
+        crashPoint: T05CrashPoint? = nil
+    ) async throws -> RecoveryHarness {
+        let root = try makeTemporaryDocumentImportRoot()
+        let library = try await LocalLibrary.open(
+            at: root.appending(path: "Library")
+        )
+        let acquirer = try CountingWebAcquirer()
+        let builder = CountingWebBuilder()
+        let crashInjector = ImportRunnerCrashInjector(crashPoint: crashPoint)
+        let importer = DocumentImport(
+            library: library,
+            webAcquirer: acquirer,
+            webDocumentBuilder: { page, documentID in
+                try await builder.build(page, documentID: documentID)
+            },
+            importRunnerBoundaryHook: { point in
+                try await crashInjector.hit(point)
+            }
+        )
+        return RecoveryHarness(
+            root: root,
+            articleURL: URL(string: "https://fixture.invalid/article")!,
+            firstImporter: importer,
+            acquirer: acquirer,
+            builder: builder,
+            crashInjector: crashInjector
+        )
+    }
+
+    func reopenImporter(
+        acquirer acquirerMode: CountingWebAcquirer.Mode = .normal,
+        builder builderMode: CountingWebBuilder.Mode = .normal
+    ) async throws -> DocumentImport {
+        let library = try await LocalLibrary.open(
+            at: root.appending(path: "Library")
+        )
+        let reopenedAcquirer = try CountingWebAcquirer(mode: acquirerMode)
+        let reopenedBuilder = CountingWebBuilder(mode: builderMode)
+        return DocumentImport(
+            library: library,
+            webAcquirer: reopenedAcquirer,
+            webDocumentBuilder: { page, documentID in
+                try await reopenedBuilder.build(
+                    page,
+                    documentID: documentID
+                )
+            }
+        )
+    }
+}
+
+func corruptManagedCheckpointPayload(under root: URL) throws {
+    let libraryRoot = root.appending(path: "Library")
+    guard let payloadURL = FileManager.default.enumerator(
+        at: libraryRoot,
+        includingPropertiesForKeys: [.isRegularFileKey]
+    )?.compactMap({ entry -> URL? in
+        guard let url = entry as? URL,
+              url.lastPathComponent == "response.bin"
+        else {
+            return nil
+        }
+        return url
+    }).first else {
+        throw DurableQueueTestError.timeout
+    }
+    var data = try Data(contentsOf: payloadURL)
+    data.append(0x00)
+    try data.write(to: payloadURL)
+}
+
+extension ImportTerminalState {
+    var isSuccess: Bool {
+        if case .success = self {
+            return true
+        }
+        return false
+    }
+}
+
 struct ThrowingWebAcquirer: WebAcquiring {
     func acquire(_ url: URL) async throws -> AcquiredWebPage {
         throw FixtureWebAcquisitionError.unavailable

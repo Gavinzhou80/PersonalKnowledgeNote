@@ -13,10 +13,13 @@ struct PublicationRecovery {
 
             switch finalStatus {
             case .valid(let descriptor):
-                _ = try database.finalizeRecoveredIntent(
+                let completion = try database.finalizeRecoveredIntent(
                     recovered,
                     verifiedDescriptor: descriptor
                 )
+                if let cleanup = completion.checkpointCleanup {
+                    try? managedArtifacts.removeCheckpointArtifact(cleanup)
+                }
             case .absent:
                 try database.rollbackIntent(
                     taskID: recovered.intent.taskID,

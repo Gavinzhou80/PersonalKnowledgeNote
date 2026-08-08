@@ -13,15 +13,16 @@ public actor DocumentImport {
     }
 
     private let library: LocalLibrary
-    private let webAcquirer: any WebAcquiring
-    private let webDocumentBuilder: @Sendable (
+    let webAcquirer: any WebAcquiring
+    let webDocumentBuilder: @Sendable (
         AcquiredWebPage,
         SourceDocumentID
     ) async throws -> StaticWebImportProduct
-    private let documentIDGenerator: @Sendable () -> SourceDocumentID
-    private let workspaceSnapshotLoader: @Sendable (
+    let documentIDGenerator: @Sendable () -> SourceDocumentID
+    let workspaceSnapshotLoader: @Sendable (
         ImportWorkspace
     ) async throws -> DurableImportSnapshot
+    let boundaryHook: ImportRunnerBoundaryHook
     private let retainedImportsLoader: @Sendable () async throws
         -> [DurableImportSnapshot]
     private let importRunner: (
@@ -65,7 +66,8 @@ public actor DocumentImport {
         importWorkspaceLoader: (@Sendable (ImportTaskID) async throws
             -> ImportWorkspace?)? = nil,
         acceptanceLoader: (@Sendable (OriginalSource) async throws
-            -> DurableImportAcceptance)? = nil
+            -> DurableImportAcceptance)? = nil,
+        importRunnerBoundaryHook: ImportRunnerBoundaryHook? = nil
     ) {
         let resolvedRetainedImportsLoader = retainedImportsLoader ?? {
             try await library.retainedImports()
@@ -75,6 +77,7 @@ public actor DocumentImport {
         self.webDocumentBuilder = webDocumentBuilder
         self.documentIDGenerator = documentIDGenerator
         self.workspaceSnapshotLoader = workspaceSnapshotLoader
+        self.boundaryHook = importRunnerBoundaryHook ?? { _ in }
         self.retainedImportsLoader = resolvedRetainedImportsLoader
         self.importRunner = importRunner
         self.claimNextRunnable = claimNextRunnable ?? {
@@ -259,6 +262,16 @@ public actor DocumentImport {
         return ImportTaskHandle(id: taskID, owner: self)
     }
 
+    public func task(
+        id: ImportTaskID
+    ) async throws -> ImportTaskHandle? {
+        try await start()
+        guard registry.snapshot(for: id) != nil else {
+            return nil
+        }
+        return ImportTaskHandle(id: id, owner: self)
+    }
+
     private func requestSchedulerWake() {
         guard scheduler.requestWake() else { return }
         let task = Task { await self.runSchedulerLoop() }
@@ -335,7 +348,7 @@ public actor DocumentImport {
             } else {
                 switch claim.claimed.originalSource {
                 case .webpage(let sourceURL):
-                    await runWebImport(
+                    await runResumableWebImport(
                         workspace: workspace,
                         source: claim.claimed.originalSource,
                         sourceURL: sourceURL
@@ -375,116 +388,17 @@ public actor DocumentImport {
         }
     }
 
-    private func runWebImport(
-        workspace: ImportWorkspace,
-        source: OriginalSource,
-        sourceURL: URL
-    ) async {
-        var packageURL: URL?
-        defer {
-            if let packageURL {
-                try? FileManager.default.removeItem(at: packageURL)
-            }
-        }
-
-        do {
-            let accepted = try await workspace.snapshot()
-            let acquiring = try await workspace.checkpoint(
-                CheckpointUpdate(
-                    expectedRevision: accepted.revision,
-                    ordinal: 1,
-                    envelope: Self.checkpoint(
-                        "acquiringOriginalSource"
-                    )
-                )
-            )
-            updateSnapshot(
-                taskID: workspace.taskID,
-                revision: acquiring.revision,
-                state: .running(Self.progress(.acquiringOriginalSource))
-            )
-
-            let page = try await webAcquirer.acquire(sourceURL)
-            let constructing = try await workspace.checkpoint(
-                CheckpointUpdate(
-                    expectedRevision: acquiring.revision,
-                    ordinal: 2,
-                    envelope: Self.checkpoint(
-                        "constructingSourceDocument"
-                    )
-                )
-            )
-            updateSnapshot(
-                taskID: workspace.taskID,
-                revision: constructing.revision,
-                state: .running(
-                    Self.progress(.constructingSourceDocument)
-                )
-            )
-
-            let product = try await webDocumentBuilder(
-                page,
-                documentIDGenerator()
-            )
-            packageURL = product.packageURL
-            let artifact = try await workspace.stageArtifact(
-                .package(
-                    product.packageURL,
-                    descriptor: product.descriptor
-                ),
-                expectedRevision: constructing.revision
-            )
-            let staged = try await workspace.snapshot()
-            let publishing = try await workspace.checkpoint(
-                CheckpointUpdate(
-                    expectedRevision: staged.revision,
-                    ordinal: 3,
-                    envelope: Self.checkpoint("publishing")
-                )
-            )
-            updateSnapshot(
-                taskID: workspace.taskID,
-                revision: publishing.revision,
-                state: .running(Self.progress(.publishing))
-            )
-
-            let outcome = try await workspace.finish(
-                PublicationCandidate(
-                    fingerprint: product.fingerprint,
-                    artifact: artifact,
-                    document: product.document.content,
-                    originalSource: source
-                ),
-                expectedRevision: publishing.revision
-            )
-            let success = Self.success(
-                for: outcome,
-                publishedIssues: product.issues
-            )
-            let completed = try? await workspaceSnapshotLoader(workspace)
-            finishTask(
-                taskID: workspace.taskID,
-                snapshot: ImportTaskSnapshot(
-                    id: workspace.taskID,
-                    revision: completed?.revision
-                        ?? Self.completionRevision(
-                            after: publishing.revision,
-                            outcome: outcome
-                        ),
-                    attempt: completed?.attempt ?? publishing.attempt,
-                    source: .webpage(sourceURL),
-                    state: .completed(success)
-                )
-            )
-        } catch {
-            await failTask(workspace: workspace, error: error)
-        }
-    }
-
-    private func failTask(
+    func failTask(
         workspace: ImportWorkspace,
         error: Error
     ) async {
+        guard !(error is ImportTaskRunnerInterruption) else {
+            return
+        }
+        if await persistFailure(workspace: workspace, error: error) {
+            return
+        }
+
         var failureRevision = (
             registry.snapshot(for: workspace.taskID)?.revision ?? 0
         ) + 1
@@ -523,6 +437,43 @@ public actor DocumentImport {
         )
     }
 
+    private func persistFailure(
+        workspace: ImportWorkspace,
+        error: Error
+    ) async -> Bool {
+        let failure = Self.classify(error)
+        guard let durable = try? await workspace.snapshot(),
+              durable.state == .queued || durable.state == .running
+        else {
+            return false
+        }
+        guard let payload = try? JSONEncoder().encode(
+            PersistedImportFailure(
+                code: failure.code,
+                recovery: failure.recovery,
+                diagnosticID: failure.diagnosticID
+            )
+        ) else {
+            return false
+        }
+        do {
+            let mutation = try await workspace.recordFailure(
+                expectedRevision: durable.revision,
+                failure: ImportTaskFailureEnvelope(
+                    codecVersion: 1,
+                    payload: payload
+                ),
+                retainCheckpoint: failure.recovery == .retryable
+            )
+            _ = try? registry.applyBatch(
+                mutation.queueUpdates + [mutation.primary]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private func registerListObserver(
         id: UUID,
         query: ImportTaskQuery,
@@ -555,7 +506,7 @@ public actor DocumentImport {
         registry.removeTaskObserver(id: id, taskID: taskID)
     }
 
-    private func updateSnapshot(
+    func updateSnapshot(
         taskID: ImportTaskID,
         revision: UInt64,
         state: ImportTaskState
@@ -576,7 +527,7 @@ public actor DocumentImport {
         )
     }
 
-    private func finishTask(
+    func finishTask(
         taskID: ImportTaskID,
         snapshot: ImportTaskSnapshot
     ) {
@@ -586,7 +537,7 @@ public actor DocumentImport {
         _ = try? registry.apply(snapshot, journalSequence: journalSequence)
     }
 
-    private static func progress(
+    static func progress(
         _ activity: ImportActivity
     ) -> ImportProgress {
         ImportProgress(
@@ -603,36 +554,7 @@ public actor DocumentImport {
         TaskSnapshotRegistry.matches(state, query: query)
     }
 
-    private static func checkpoint(
-        _ stage: String
-    ) -> CheckpointEnvelope {
-        CheckpointEnvelope(
-            codecVersion: 1,
-            payload: Data("document-import-t03:\(stage)".utf8)
-        )
-    }
-
-    private static func completionRevision(
-        after publishingRevision: UInt64,
-        outcome: PublicationOutcome
-    ) -> UInt64 {
-        let increment: UInt64
-        switch outcome {
-        case .published:
-            increment = 2
-        case .alreadyImported:
-            increment = 1
-        }
-        let (revision, overflow) = publishingRevision
-            .addingReportingOverflow(increment)
-        precondition(
-            !overflow,
-            "A successful Local Library finish must have completed its durable revision increments"
-        )
-        return revision
-    }
-
-    private static func success(
+    static func success(
         for outcome: PublicationOutcome,
         publishedIssues: [KnowledgeCore.ImportIssue]
     ) -> ImportSuccess {
@@ -687,7 +609,17 @@ public actor DocumentImport {
         }
     }
 
-    private static func classify(_ error: Error) -> ImportFailure {
+    static func classify(_ error: Error) -> ImportFailure {
+        if let error = error as? WebImportCheckpointError {
+            switch error {
+            case .invalidPackage, .cannotWrite:
+                return ImportFailure(
+                    code: .checkpointInvalid,
+                    recovery: .retryable
+                )
+            }
+        }
+
         if let error = error as? WebAcquisitionError {
             switch error {
             case .networkUnavailable:

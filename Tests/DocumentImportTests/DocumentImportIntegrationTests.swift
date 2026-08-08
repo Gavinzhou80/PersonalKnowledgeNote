@@ -283,9 +283,11 @@ func genericPostAcceptanceFailureFinishesAndAbandonsTask() async throws {
     #expect(failure.code == .localLibraryUnavailable)
     #expect(failure.recovery == .requiresUserAction)
     #expect(finalSnapshot?.state == .failed(failure))
-    #expect(
-        try await library.importWorkspace(id: handle.id) == nil
+    let snapshots = try await library.retainedImports()
+    let durable = try #require(
+        snapshots.first { $0.taskID == handle.id }
     )
+    #expect(durable.state == .failed)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -318,9 +320,11 @@ func acquisitionFailureIsTerminalTaskDataAfterAcceptance() async throws {
     #expect(failure.code == .networkUnavailable)
     #expect(failure.recovery == .retryable)
     #expect(finalSnapshot?.state == .failed(failure))
-    #expect(
-        try await library.importWorkspace(id: handle.id) == nil
+    let snapshots = try await library.retainedImports()
+    let durable = try #require(
+        snapshots.first { $0.taskID == handle.id }
     )
+    #expect(durable.state == .failed)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -454,5 +458,9 @@ func initialSnapshotFailureDoesNotAbandonAcceptedTaskBeforeRunnerOwnsIt() async 
         return
     }
 
-    #expect(try await library.recoverableImports().isEmpty)
+    let snapshots = try await library.retainedImports()
+    let durable = try #require(
+        snapshots.first { $0.taskID == handle.id }
+    )
+    #expect(durable.state == .failed)
 }

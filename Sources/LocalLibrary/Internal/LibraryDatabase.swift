@@ -15,6 +15,17 @@ struct DuplicatePublication: Sendable {
 struct DuplicateCompletion: Sendable {
     let outcome: PublicationOutcome
     let stagedPlacement: StagedArtifactPlacement
+    let checkpointCleanup: CheckpointArtifactCleanup?
+}
+
+struct PublicationCompletion: Sendable {
+    let outcome: PublicationOutcome
+    let checkpointCleanup: CheckpointArtifactCleanup?
+}
+
+struct FailedTaskTransition: Sendable {
+    let mutation: DurableQueueMutation
+    let checkpointCleanup: CheckpointArtifactCleanup?
 }
 
 struct RecoveredPublicationIntent: Sendable {
@@ -644,6 +655,131 @@ final class LibraryDatabase: Sendable {
         }
     }
 
+    func reconcileInterruptedRunners() throws {
+        try queue.write { db in
+            let interrupted = try ImportTaskRecord
+                .filter(
+                    Column("state")
+                        == ImportTaskState.running.rawValue
+                )
+                .order(Column("journal_sequence"))
+                .fetchAll(db)
+            for var task in interrupted {
+                guard task.queueSequence == nil,
+                      task.revision < Int64.max
+                else {
+                    throw corruptLibraryError()
+                }
+                task.queueSequence = try allocateQueueSequence(in: db)
+                task.state = ImportTaskState.queued.rawValue
+                task.revision += 1
+                try task.update(db)
+            }
+        }
+    }
+
+    func recordFailure(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        failure: ImportTaskFailureEnvelope,
+        retainCheckpoint: Bool
+    ) throws -> FailedTaskTransition {
+        try queue.write { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            try validateJournalSequences(tasks)
+            try validatePublicationAssociationRoots(in: db)
+            var associations = try PublicationAssociationBatch(
+                taskIDs: tasks.map(\.taskID),
+                in: db
+            )
+            _ = try publicationStateBundles(
+                for: tasks,
+                in: db,
+                associations: &associations
+            )
+            guard var task = tasks.first(where: {
+                $0.taskID == taskID.rawValue.uuidString
+            }) else {
+                throw LocalLibraryError.unavailable
+            }
+            guard let currentRevision = UInt64(exactly: task.revision)
+            else {
+                throw corruptLibraryError()
+            }
+            guard currentRevision == expectedRevision else {
+                throw LocalLibraryError.staleRevision(
+                    current: currentRevision
+                )
+            }
+            guard let state = ImportTaskState(rawValue: task.state),
+                  state == .queued || state == .running
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard task.revision < Int64.max,
+                  failure.payload.count <= 1_048_576
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+
+            var checkpointCleanup: CheckpointArtifactCleanup?
+            if !retainCheckpoint {
+                if let record = try checkpointArtifact(for: task, in: db) {
+                    checkpointCleanup = CheckpointArtifactCleanup(
+                        placement: try checkpointPlacement(record)
+                    )
+                    guard try record.delete(db) else {
+                        throw corruptLibraryError()
+                    }
+                }
+                task.checkpointOrdinal = nil
+                task.checkpointCodecVersion = nil
+                task.checkpointPayload = nil
+            }
+
+            var shifted: [ImportTaskRecord] = []
+            if let removedSequence = task.queueSequence {
+                shifted = tasks
+                    .filter {
+                        $0.state == ImportTaskState.queued.rawValue
+                            && ($0.queueSequence ?? Int64.min)
+                                > removedSequence
+                    }
+                    .sorted(by: queueRecordOrdering)
+                for index in shifted.indices {
+                    guard shifted[index].revision < Int64.max else {
+                        throw corruptLibraryError()
+                    }
+                    shifted[index].revision += 1
+                    try shifted[index].update(db)
+                }
+            }
+
+            task.queueSequence = nil
+            task.state = ImportTaskState.failed.rawValue
+            task.failureCodecVersion = Int64(failure.codecVersion)
+            task.failurePayload = failure.payload
+            task.revision += 1
+            try task.update(db)
+
+            let bundles = try publicationStateBundles(
+                for: [task] + shifted,
+                in: db,
+                associations: &associations
+            )
+            guard let primary = bundles.first?.snapshot else {
+                throw corruptLibraryError()
+            }
+            return FailedTaskTransition(
+                mutation: DurableQueueMutation(
+                    primary: primary,
+                    queueUpdates: bundles.dropFirst().map(\.snapshot)
+                ),
+                checkpointCleanup: checkpointCleanup
+            )
+        }
+    }
+
     func claimNextRunnable() throws -> DurableQueueClaim? {
         try queue.write { db in
             let tasks = try ImportTaskRecord.fetchAll(db)
@@ -905,7 +1041,7 @@ final class LibraryDatabase: Sendable {
     func finalizeRecoveredIntent(
         _ recovered: RecoveredPublicationIntent,
         verifiedDescriptor: SourceArtifactDescriptor
-    ) throws -> PublicationOutcome {
+    ) throws -> PublicationCompletion {
         try finalizePublication(
             candidate: recovered.candidate,
             verifiedPlacement: VerifiedPublicationPlacement(
@@ -1253,6 +1389,10 @@ final class LibraryDatabase: Sendable {
                 location: duplicate.location,
                 provenanceAdded: provenanceAdded
             )
+            let checkpointCleanup = try removeCheckpointOwnership(
+                task: &task,
+                in: db
+            )
             try removeFromActiveQueueIfNeeded(task: &task, in: db)
             task.outcomeJSON = try DomainJSON.encode(outcome)
             task.state = ImportTaskState.completed.rawValue
@@ -1262,7 +1402,8 @@ final class LibraryDatabase: Sendable {
             _ = try stagedRecord.delete(db)
             return DuplicateCompletion(
                 outcome: outcome,
-                stagedPlacement: placement
+                stagedPlacement: placement,
+                checkpointCleanup: checkpointCleanup
             )
         }
     }
@@ -1327,7 +1468,7 @@ final class LibraryDatabase: Sendable {
     func finalizePublication(
         candidate: PublicationCandidate,
         verifiedPlacement: VerifiedPublicationPlacement
-    ) throws -> PublicationOutcome {
+    ) throws -> PublicationCompletion {
         try queue.write { db in
             let expectedIntent = verifiedPlacement.intent
             guard var task = try ImportTaskRecord.fetchOne(
@@ -1407,6 +1548,10 @@ final class LibraryDatabase: Sendable {
             )
             document.visibility = SourceDocumentVisibility.visible.rawValue
             try document.update(db)
+            let checkpointCleanup = try removeCheckpointOwnership(
+                task: &task,
+                in: db
+            )
             task.outcomeJSON = try DomainJSON.encode(outcome)
             task.state = ImportTaskState.completed.rawValue
             task.stagedArtifactID = nil
@@ -1414,7 +1559,10 @@ final class LibraryDatabase: Sendable {
             try task.update(db)
             _ = try intentRecord.delete(db)
             _ = try stagedRecord.delete(db)
-            return outcome
+            return PublicationCompletion(
+                outcome: outcome,
+                checkpointCleanup: checkpointCleanup
+            )
         }
     }
 
@@ -1939,6 +2087,28 @@ final class LibraryDatabase: Sendable {
             ),
             relativePath: placement.relativePath
         )
+    }
+
+    private func removeCheckpointOwnership(
+        task: inout ImportTaskRecord,
+        in db: Database
+    ) throws -> CheckpointArtifactCleanup? {
+        guard let record = try checkpointArtifact(for: task, in: db) else {
+            task.checkpointOrdinal = nil
+            task.checkpointCodecVersion = nil
+            task.checkpointPayload = nil
+            return nil
+        }
+        let cleanup = CheckpointArtifactCleanup(
+            placement: try checkpointPlacement(record)
+        )
+        guard try record.delete(db) else {
+            throw corruptLibraryError()
+        }
+        task.checkpointOrdinal = nil
+        task.checkpointCodecVersion = nil
+        task.checkpointPayload = nil
+        return cleanup
     }
 
     private func checkpointPlacement(

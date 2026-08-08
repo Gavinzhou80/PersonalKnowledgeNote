@@ -141,6 +141,7 @@ public struct DurableImportSnapshot: Sendable {
     public let state: ImportTaskState
     public let failure: ImportTaskFailureEnvelope?
     public let checkpoint: CheckpointEnvelope?
+    package let checkpointOrdinal: UInt64?
     package let checkpointArtifact: ManagedCheckpointArtifact?
     public let stagedArtifact: StagedArtifact?
     package let outcome: PublicationOutcome?
@@ -156,6 +157,7 @@ public struct DurableImportSnapshot: Sendable {
         state: ImportTaskState,
         failure: ImportTaskFailureEnvelope?,
         checkpoint: CheckpointEnvelope?,
+        checkpointOrdinal: UInt64? = nil,
         checkpointArtifact: ManagedCheckpointArtifact?,
         stagedArtifact: StagedArtifact?,
         outcome: PublicationOutcome?,
@@ -170,6 +172,7 @@ public struct DurableImportSnapshot: Sendable {
         self.state = state
         self.failure = failure
         self.checkpoint = checkpoint
+        self.checkpointOrdinal = checkpointOrdinal
         self.checkpointArtifact = checkpointArtifact
         self.stagedArtifact = stagedArtifact
         self.outcome = outcome
@@ -189,6 +192,7 @@ public struct DurableImportSnapshot: Sendable {
             state: state,
             failure: failure,
             checkpoint: checkpoint,
+            checkpointOrdinal: checkpointOrdinal,
             checkpointArtifact: checkpointArtifact,
             stagedArtifact: stagedArtifact,
             outcome: outcome,

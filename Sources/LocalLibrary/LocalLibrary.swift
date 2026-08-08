@@ -141,6 +141,7 @@ public actor LocalLibrary {
                 database: database,
                 managedArtifacts: managedArtifacts
             ).run()
+            try database.reconcileInterruptedRunners()
             for cleanup in try database.abandonedStagedArtifactCleanups()
             {
                 try managedArtifacts.removeAbandonedStagedArtifact(cleanup)
@@ -412,8 +413,9 @@ public actor LocalLibrary {
         candidate: PublicationCandidate,
         expectedRevision: UInt64
     ) throws -> PublicationOutcome {
+        let completion: PublicationCompletion
         do {
-            return try withLocalLibraryErrorTranslation {
+            completion = try withLocalLibraryErrorTranslation {
                 try publicationCoordinator.finish(
                     taskID: taskID,
                     candidate: candidate,
@@ -423,6 +425,34 @@ public actor LocalLibrary {
         } catch let injected as InjectedPublicationFault {
             throw injected.underlying
         }
+        if let cleanup = completion.checkpointCleanup {
+            try? withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeCheckpointArtifact(cleanup)
+            }
+        }
+        return completion.outcome
+    }
+
+    package func recordFailure(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        failure: ImportTaskFailureEnvelope,
+        retainCheckpoint: Bool
+    ) throws -> DurableQueueMutation {
+        let transition = try withLocalLibraryErrorTranslation {
+            try database.recordFailure(
+                taskID: taskID,
+                expectedRevision: expectedRevision,
+                failure: failure,
+                retainCheckpoint: retainCheckpoint
+            )
+        }
+        if let cleanup = transition.checkpointCleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeCheckpointArtifact(cleanup)
+            }
+        }
+        return transition.mutation
     }
 
     package func abandon(
