@@ -28,6 +28,17 @@ struct FailedTaskTransition: Sendable {
     let checkpointCleanup: CheckpointArtifactCleanup?
 }
 
+struct CancellationCompletion: Sendable {
+    let snapshot: DurableImportSnapshot
+    let stagedCleanup: AbandonedStagedArtifactCleanup?
+    let checkpointCleanup: CheckpointArtifactCleanup?
+}
+
+struct RetryTransition: Sendable {
+    let snapshot: DurableImportSnapshot
+    let checkpointCleanup: CheckpointArtifactCleanup?
+}
+
 struct RecoveredPublicationIntent: Sendable {
     let intent: PublicationIntent
     let candidate: PublicationCandidate
@@ -927,6 +938,256 @@ final class LibraryDatabase: Sendable {
             return DurableQueueMutation(
                 primary: primary,
                 queueUpdates: bundles.dropFirst().map(\.snapshot)
+            )
+        }
+    }
+
+    func requestCancellation(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> DurableQueueMutation {
+        try queue.write { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            try validateJournalSequences(tasks)
+            try validatePublicationAssociationRoots(in: db)
+            var associations = try PublicationAssociationBatch(
+                taskIDs: tasks.map(\.taskID),
+                in: db
+            )
+            _ = try publicationStateBundles(
+                for: tasks,
+                in: db,
+                associations: &associations
+            )
+            guard var task = tasks.first(where: {
+                $0.taskID == taskID.rawValue.uuidString
+            }) else {
+                throw LocalLibraryError.unavailable
+            }
+            guard let currentRevision = UInt64(exactly: task.revision),
+                  let state = ImportTaskState(rawValue: task.state)
+            else {
+                throw corruptLibraryError()
+            }
+
+            switch state {
+            case .cancelling, .cancelled:
+                let bundles = try publicationStateBundles(
+                    for: [task],
+                    in: db,
+                    associations: &associations
+                )
+                guard let primary = bundles.first?.snapshot else {
+                    throw corruptLibraryError()
+                }
+                return DurableQueueMutation(
+                    primary: primary,
+                    queueUpdates: []
+                )
+            case .queued, .running:
+                guard currentRevision == expectedRevision,
+                      task.revision < Int64.max
+                else {
+                    if currentRevision != expectedRevision {
+                        throw LocalLibraryError.staleRevision(
+                            current: currentRevision
+                        )
+                    }
+                    throw corruptLibraryError()
+                }
+
+                var shifted: [ImportTaskRecord] = []
+                if let removedSequence = task.queueSequence {
+                    shifted = tasks
+                        .filter {
+                            $0.state
+                                == ImportTaskState.queued.rawValue
+                                && ($0.queueSequence ?? Int64.min)
+                                    > removedSequence
+                        }
+                        .sorted(by: queueRecordOrdering)
+                    for index in shifted.indices {
+                        guard shifted[index].revision < Int64.max else {
+                            throw corruptLibraryError()
+                        }
+                        shifted[index].revision += 1
+                        try shifted[index].update(db)
+                    }
+                }
+
+                task.queueSequence = nil
+                task.cancellationRequested = true
+                task.state = ImportTaskState.cancelling.rawValue
+                task.revision += 1
+                try task.update(db)
+
+                let bundles = try publicationStateBundles(
+                    for: [task] + shifted,
+                    in: db,
+                    associations: &associations
+                )
+                guard let primary = bundles.first?.snapshot else {
+                    throw corruptLibraryError()
+                }
+                return DurableQueueMutation(
+                    primary: primary,
+                    queueUpdates: bundles.dropFirst().map(\.snapshot)
+                )
+            case .completed, .publicationPending, .failed,
+                 .abandoned, .accepted, .working:
+                throw LocalLibraryError.invalidTaskState
+            }
+        }
+    }
+
+    func finishCancellation(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> CancellationCompletion {
+        try queue.write { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            try validateJournalSequences(tasks)
+            try validatePublicationAssociationRoots(in: db)
+            var associations = try PublicationAssociationBatch(
+                taskIDs: tasks.map(\.taskID),
+                in: db
+            )
+            _ = try publicationStateBundles(
+                for: tasks,
+                in: db,
+                associations: &associations
+            )
+            guard var task = tasks.first(where: {
+                $0.taskID == taskID.rawValue.uuidString
+            }), let currentRevision = UInt64(exactly: task.revision)
+            else {
+                throw LocalLibraryError.unavailable
+            }
+            guard currentRevision == expectedRevision else {
+                throw LocalLibraryError.staleRevision(
+                    current: currentRevision
+                )
+            }
+            guard task.state == ImportTaskState.cancelling.rawValue,
+                  task.queueSequence == nil,
+                  task.outcomeJSON == nil,
+                  task.revision < Int64.max
+            else {
+                throw LocalLibraryError.invalidTaskState
+            }
+
+            let stagedRecord = try stagedArtifact(for: task, in: db)
+            let stagedCleanup = try abandonedCleanup(
+                task: task,
+                stagedArtifact: stagedRecord
+            )
+            if let stagedRecord {
+                guard try stagedRecord.delete(db) else {
+                    throw corruptLibraryError()
+                }
+            }
+            task.stagedArtifactID = nil
+            let checkpointCleanup = try removeCheckpointOwnership(
+                task: &task,
+                in: db
+            )
+
+            task.state = ImportTaskState.cancelled.rawValue
+            task.revision += 1
+            try task.update(db)
+
+            let bundles = try publicationStateBundles(
+                for: [task],
+                in: db,
+                associations: &associations
+            )
+            guard let snapshot = bundles.first?.snapshot else {
+                throw corruptLibraryError()
+            }
+            return CancellationCompletion(
+                snapshot: snapshot,
+                stagedCleanup: stagedCleanup,
+                checkpointCleanup: checkpointCleanup
+            )
+        }
+    }
+
+    func retryImport(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        checkpointDisposition: RetryCheckpointDisposition
+    ) throws -> RetryTransition {
+        try queue.write { db in
+            let tasks = try ImportTaskRecord.fetchAll(db)
+            try validateJournalSequences(tasks)
+            try validatePublicationAssociationRoots(in: db)
+            var associations = try PublicationAssociationBatch(
+                taskIDs: tasks.map(\.taskID),
+                in: db
+            )
+            _ = try publicationStateBundles(
+                for: tasks,
+                in: db,
+                associations: &associations
+            )
+            guard var task = tasks.first(where: {
+                $0.taskID == taskID.rawValue.uuidString
+            }), let currentRevision = UInt64(exactly: task.revision),
+                  let state = ImportTaskState(rawValue: task.state),
+                  state == .failed || state == .cancelled
+            else {
+                if try ImportTaskRecord.fetchOne(
+                    db,
+                    key: taskID.rawValue.uuidString
+                ) == nil {
+                    throw LocalLibraryError.unavailable
+                }
+                throw LocalLibraryError.invalidTaskState
+            }
+            guard currentRevision == expectedRevision,
+                  task.attempt < Int64.max,
+                  task.revision < Int64.max
+            else {
+                if currentRevision != expectedRevision {
+                    guard let exact = UInt64(exactly: task.revision) else {
+                        throw corruptLibraryError()
+                    }
+                    throw LocalLibraryError.staleRevision(current: exact)
+                }
+                throw corruptLibraryError()
+            }
+
+            var checkpointCleanup: CheckpointArtifactCleanup?
+            switch checkpointDisposition {
+            case .retainVerified:
+                break
+            case .clear:
+                checkpointCleanup = try removeCheckpointOwnership(
+                    task: &task,
+                    in: db
+                )
+            }
+
+            task.attempt += 1
+            task.failureCodecVersion = nil
+            task.failurePayload = nil
+            task.cancellationRequested = false
+            task.queueSequence = try allocateQueueSequence(in: db)
+            task.state = ImportTaskState.queued.rawValue
+            task.revision += 1
+            try task.update(db)
+
+            let bundles = try publicationStateBundles(
+                for: [task],
+                in: db,
+                associations: &associations
+            )
+            guard let snapshot = bundles.first?.snapshot else {
+                throw corruptLibraryError()
+            }
+            return RetryTransition(
+                snapshot: snapshot,
+                checkpointCleanup: checkpointCleanup
             )
         }
     }

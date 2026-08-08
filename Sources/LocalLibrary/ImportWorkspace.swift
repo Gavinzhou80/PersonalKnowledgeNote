@@ -91,6 +91,15 @@ public actor ImportWorkspace {
         )
     }
 
+    package func finishCancellation(
+        expectedRevision: UInt64
+    ) async throws -> DurableImportSnapshot {
+        try await library.finishCancellation(
+            taskID: taskID,
+            expectedRevision: expectedRevision
+        )
+    }
+
     package func verifyManagedArtifact(
         _ artifact: StagedArtifact
     ) async throws -> SourceArtifactDescriptor {

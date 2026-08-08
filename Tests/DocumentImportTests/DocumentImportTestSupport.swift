@@ -239,6 +239,52 @@ extension ImportTerminalState {
         }
         return false
     }
+
+    var isRetryableFailure: Bool {
+        guard case .failure(let failure) = self else {
+            return false
+        }
+        return failure.recovery == .retryable
+    }
+}
+
+actor RetryableFailureGate {
+    private struct Entry {
+        let blocksTerminalDelivery: Bool
+    }
+
+    private var entries: [URL: Entry] = [:]
+    private var released = false
+    private(set) var startedTaskIDs: [ImportTaskID] = []
+
+    func mark(_ url: URL, blocksTerminalDelivery: Bool) {
+        entries[url] = Entry(blocksTerminalDelivery: blocksTerminalDelivery)
+    }
+
+    func release() {
+        released = true
+    }
+
+    func runIfMarked(_ workspace: ImportWorkspace) async throws -> Bool {
+        let snapshot = try await workspace.snapshot()
+        guard case .webpage(let url) = snapshot.originalSource,
+              let entry = entries[url]
+        else {
+            return false
+        }
+        startedTaskIDs.append(workspace.taskID)
+        if entry.blocksTerminalDelivery && !released {
+            let deadline = ContinuousClock.now + .seconds(1)
+            while !released {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else {
+                    throw DurableQueueTestError.timeout
+                }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+        }
+        throw WebAcquisitionError.networkUnavailable
+    }
 }
 
 struct ThrowingWebAcquirer: WebAcquiring {
@@ -318,6 +364,7 @@ actor DeterministicRunnerGate {
         startedIDs.append(taskID)
         runningIDs.insert(taskID)
         maximumConcurrentRuns = max(maximumConcurrentRuns, runningIDs.count)
+        defer { runningIDs.remove(taskID) }
 
         let deadline = ContinuousClock.now + .seconds(1)
         while !releasedIDs.contains(taskID) {
@@ -330,7 +377,6 @@ actor DeterministicRunnerGate {
 
         let snapshot = try await workspace.snapshot()
         try await workspace.abandon(expectedRevision: snapshot.revision)
-        runningIDs.remove(taskID)
     }
 
     func waitUntilStarted(_ taskID: ImportTaskID) async throws {
@@ -369,6 +415,7 @@ struct DurableQueueHarness {
     let library: LocalLibrary
     let importer: DocumentImport
     let runner: DeterministicRunnerGate
+    let failureGate: RetryableFailureGate
 
     static func make(
         preacceptedURLs: [URL] = []
@@ -381,10 +428,14 @@ struct DurableQueueHarness {
             _ = try await library.accept(.webpage(url))
         }
         let runner = DeterministicRunnerGate()
+        let failureGate = RetryableFailureGate()
         let importer = DocumentImport(
             library: library,
             webAcquirer: ThrowingWebAcquirer(),
             importRunner: { workspace in
+                if try await failureGate.runIfMarked(workspace) {
+                    return
+                }
                 try await runner.run(workspace)
             }
         )
@@ -392,12 +443,28 @@ struct DurableQueueHarness {
             root: root,
             library: library,
             importer: importer,
-            runner: runner
+            runner: runner,
+            failureGate: failureGate
         )
     }
 
     func url(_ path: String) -> URL {
         URL(string: "https://fixture.invalid\(path)")!
+    }
+
+    func submitRetryableFailure(
+        blockTerminalDelivery: Bool = false
+    ) async throws -> ImportTaskHandle {
+        let target = url("/retryable-failure-\(UUID().uuidString)")
+        await failureGate.mark(
+            target,
+            blocksTerminalDelivery: blockTerminalDelivery
+        )
+        return try await importer.submit(.webpage(target))
+    }
+
+    func releaseFailure() async {
+        await failureGate.release()
     }
 }
 

@@ -234,6 +234,11 @@ package enum DurableQueueClaimError: Error, Equatable, Sendable {
     case transientDatabaseContention
 }
 
+package enum RetryCheckpointDisposition: Sendable {
+    case retainVerified
+    case clear
+}
+
 package struct DurableImportAcceptance: Sendable {
     package let workspace: ImportWorkspace
     package let snapshots: [DurableImportSnapshot]

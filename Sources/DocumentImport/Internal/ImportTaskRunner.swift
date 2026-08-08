@@ -54,7 +54,13 @@ extension DocumentImport {
             )
         } catch is ImportTaskRunnerInterruption {
             return
+        } catch is CancellationError {
+            await finishRunnerCancellation(workspace: workspace)
         } catch {
+            guard !Task.isCancelled else {
+                await finishRunnerCancellation(workspace: workspace)
+                return
+            }
             await failTask(workspace: workspace, error: error)
         }
     }

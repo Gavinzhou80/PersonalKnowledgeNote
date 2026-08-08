@@ -37,6 +37,7 @@ public actor DocumentImport {
     private var bootstrapState: BootstrapState
     private var registry = TaskSnapshotRegistry()
     private var scheduler = ImportScheduler()
+    private var activeRunners: [ImportTaskID: Task<Void, Never>] = [:]
 
     init(
         library: LocalLibrary,
@@ -265,11 +266,180 @@ public actor DocumentImport {
     public func task(
         id: ImportTaskID
     ) async throws -> ImportTaskHandle? {
-        try await start()
+        do {
+            try await start()
+        } catch {
+            throw DocumentImportAvailabilityError.localLibraryUnavailable
+        }
         guard registry.snapshot(for: id) != nil else {
             return nil
         }
         return ImportTaskHandle(id: id, owner: self)
+    }
+
+    public func cancel(taskID: ImportTaskID) async throws {
+        do {
+            try await start()
+        } catch {
+            throw DocumentImportAvailabilityError.localLibraryUnavailable
+        }
+        guard let current = registry.snapshot(for: taskID) else {
+            throw ImportTaskControlError.taskNotFound
+        }
+
+        let mutation: DurableQueueMutation
+        do {
+            mutation = try await library.requestCancellation(
+                taskID: taskID,
+                expectedRevision: current.revision
+            )
+        } catch let error as LocalLibraryError {
+            throw Self.cancelControlError(
+                for: error,
+                currentState: current.state
+            )
+        } catch {
+            throw ImportTaskControlError.invalidState
+        }
+
+        _ = try? registry.applyBatch(
+            mutation.queueUpdates + [mutation.primary]
+        )
+        guard mutation.primary.state == .cancelling else {
+            return
+        }
+        if let runnerTask = activeRunners[taskID] {
+            runnerTask.cancel()
+        } else {
+            if let cancelled = try? await library.finishCancellation(
+                taskID: taskID,
+                expectedRevision: mutation.primary.revision
+            ) {
+                _ = try? registry.applyBatch([cancelled])
+            }
+        }
+        requestSchedulerWake()
+    }
+
+    public func retry(taskID: ImportTaskID) async throws {
+        do {
+            try await start()
+        } catch {
+            throw DocumentImportAvailabilityError.localLibraryUnavailable
+        }
+        guard registry.snapshot(for: taskID) != nil else {
+            throw ImportTaskControlError.taskNotFound
+        }
+
+        let durable: DurableImportSnapshot
+        do {
+            durable = try await library.snapshot(taskID: taskID)
+        } catch {
+            throw DocumentImportAvailabilityError.localLibraryUnavailable
+        }
+
+        let disposition: RetryCheckpointDisposition
+        switch durable.state {
+        case .failed:
+            guard Self.isRetryable(durable.failure) else {
+                throw ImportTaskControlError.retryNotAllowed
+            }
+            disposition = Self.retryDisposition(for: durable)
+        case .cancelled:
+            disposition = .clear
+        case .completed:
+            throw ImportTaskControlError.retryNotAllowed
+        case .queued, .running, .cancelling, .publicationPending:
+            throw ImportTaskControlError.invalidState
+        case .abandoned, .accepted, .working:
+            throw ImportTaskControlError.retryNotAllowed
+        }
+
+        let retried: DurableImportSnapshot
+        do {
+            retried = try await library.retryImport(
+                taskID: taskID,
+                expectedRevision: durable.revision,
+                checkpointDisposition: disposition
+            )
+        } catch let error as LocalLibraryError {
+            throw Self.retryControlError(for: error)
+        } catch {
+            throw ImportTaskControlError.invalidState
+        }
+        _ = try? registry.applyBatch([retried])
+        requestSchedulerWake()
+    }
+
+    private static func cancelControlError(
+        for error: LocalLibraryError,
+        currentState: ImportTaskState
+    ) -> ImportTaskControlError {
+        switch error {
+        case .unavailable:
+            return .invalidState
+        case .staleRevision:
+            return .invalidState
+        case .invalidTaskState:
+            if case .completed = currentState {
+                return .tooLate
+            }
+            return .invalidState
+        case .insufficientDiskSpace,
+             .checkpointRegression,
+             .artifactMissing,
+             .artifactOwnershipViolation,
+             .publicationFailed,
+             .corruptLibrary:
+            return .invalidState
+        }
+    }
+
+    private static func retryControlError(
+        for error: LocalLibraryError
+    ) -> ImportTaskControlError {
+        switch error {
+        case .unavailable,
+             .staleRevision,
+             .invalidTaskState,
+             .insufficientDiskSpace,
+             .checkpointRegression,
+             .artifactMissing,
+             .artifactOwnershipViolation,
+             .publicationFailed,
+             .corruptLibrary:
+            return .invalidState
+        }
+    }
+
+    private static func isRetryable(
+        _ envelope: ImportTaskFailureEnvelope?
+    ) -> Bool {
+        guard let envelope,
+              envelope.codecVersion == 1,
+              let persisted = try? JSONDecoder().decode(
+                  PersistedImportFailure.self,
+                  from: envelope.payload
+              )
+        else {
+            return false
+        }
+        return persisted.recovery == .retryable
+    }
+
+    private static func retryDisposition(
+        for durable: DurableImportSnapshot
+    ) -> RetryCheckpointDisposition {
+        guard let checkpoint = durable.checkpoint,
+              checkpoint.codecVersion == 1,
+              durable.checkpointArtifact != nil,
+              let ordinal = durable.checkpointOrdinal,
+              let stage = WebImportStage(rawValue: ordinal),
+              stage != .acquiring
+        else {
+            return .clear
+        }
+        return .retainVerified
     }
 
     private func requestSchedulerWake() {
@@ -282,6 +452,7 @@ public actor DocumentImport {
         var availabilityRetryDelayMilliseconds: Int64 = 10
         var contentionAttemptCount = 0
         while !Task.isCancelled {
+            guard activeRunners.isEmpty else { break }
             guard registry.hasQueuedWork else { break }
             let claim: DurableQueueClaim?
             do {
@@ -339,29 +510,83 @@ public actor DocumentImport {
                 break
             }
 
-            if let importRunner {
-                do {
-                    try await importRunner(workspace)
-                } catch {
-                    await failTask(workspace: workspace, error: error)
-                }
-            } else {
-                switch claim.claimed.originalSource {
-                case .webpage(let sourceURL):
-                    await runResumableWebImport(
-                        workspace: workspace,
-                        source: claim.claimed.originalSource,
-                        sourceURL: sourceURL
-                    )
-                case .pdfFile:
-                    await failTask(
-                        workspace: workspace,
-                        error: ImportSubmissionError.unsupportedOriginalSource
-                    )
-                }
+            guard activeRunners[claim.claimed.taskID] == nil else {
+                _ = await rollbackClaim(claim)
+                break
             }
+            let claimed = claim.claimed
+            activeRunners[claimed.taskID] = Task {
+                await self.runImport(
+                    workspace: workspace,
+                    claimed: claimed
+                )
+                await self.runnerDidFinish(claimed.taskID)
+            }
+            break
         }
         schedulerLoopDidStop()
+    }
+
+    private func runImport(
+        workspace: ImportWorkspace,
+        claimed: DurableImportSnapshot
+    ) async {
+        if let importRunner {
+            do {
+                try await importRunner(workspace)
+            } catch is CancellationError {
+                await finishRunnerCancellation(workspace: workspace)
+            } catch {
+                await failTask(workspace: workspace, error: error)
+            }
+            return
+        }
+        switch claimed.originalSource {
+        case .webpage(let sourceURL):
+            await runResumableWebImport(
+                workspace: workspace,
+                source: claimed.originalSource,
+                sourceURL: sourceURL
+            )
+        case .pdfFile:
+            await failTask(
+                workspace: workspace,
+                error: ImportSubmissionError.unsupportedOriginalSource
+            )
+        }
+    }
+
+    private func runnerDidFinish(_ taskID: ImportTaskID) async {
+        activeRunners.removeValue(forKey: taskID)
+        await reconcileLeftoverCancellation(taskID: taskID)
+        requestSchedulerWake()
+    }
+
+    private func reconcileLeftoverCancellation(
+        taskID: ImportTaskID
+    ) async {
+        guard let workspace = try? await importWorkspaceLoader(taskID),
+              let durable = try? await workspace.snapshot(),
+              durable.state == .cancelling,
+              let cancelled = try? await workspace.finishCancellation(
+                  expectedRevision: durable.revision
+              )
+        else {
+            return
+        }
+        _ = try? registry.applyBatch([cancelled])
+    }
+
+    func finishRunnerCancellation(workspace: ImportWorkspace) async {
+        guard let durable = try? await workspace.snapshot(),
+              durable.state == .cancelling,
+              let cancelled = try? await workspace.finishCancellation(
+                  expectedRevision: durable.revision
+              )
+        else {
+            return
+        }
+        _ = try? registry.applyBatch([cancelled])
     }
 
     private func rollbackClaim(_ claim: DurableQueueClaim) async -> Bool {

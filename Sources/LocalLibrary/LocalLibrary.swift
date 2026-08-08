@@ -455,6 +455,63 @@ public actor LocalLibrary {
         return transition.mutation
     }
 
+    package func requestCancellation(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> DurableQueueMutation {
+        try withLocalLibraryErrorTranslation {
+            try database.requestCancellation(
+                taskID: taskID,
+                expectedRevision: expectedRevision
+            )
+        }
+    }
+
+    package func finishCancellation(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> DurableImportSnapshot {
+        let completion = try withLocalLibraryErrorTranslation {
+            try database.finishCancellation(
+                taskID: taskID,
+                expectedRevision: expectedRevision
+            )
+        }
+        if let cleanup = completion.checkpointCleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeCheckpointArtifact(cleanup)
+            }
+        }
+        if let stagedCleanup = completion.stagedCleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeAbandonedStagedArtifact(
+                    stagedCleanup
+                )
+            }
+        }
+        return completion.snapshot
+    }
+
+    package func retryImport(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        checkpointDisposition: RetryCheckpointDisposition
+    ) throws -> DurableImportSnapshot {
+        let transition = try withLocalLibraryErrorTranslation {
+            try database.retryImport(
+                taskID: taskID,
+                expectedRevision: expectedRevision,
+                checkpointDisposition: checkpointDisposition
+            )
+        }
+        if let cleanup = transition.checkpointCleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeCheckpointArtifact(cleanup)
+            }
+        }
+        return transition.snapshot
+    }
+
     package func abandon(
         taskID: ImportTaskID,
         expectedRevision: UInt64
