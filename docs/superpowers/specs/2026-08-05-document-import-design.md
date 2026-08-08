@@ -1,6 +1,6 @@
 # Document Import Architecture Design
 
-> Status: approved design, pending user review  
+> Status: approved  
 > Date: 2026-08-05  
 > Product scope: macOS V1, one developer, six-month target  
 > Related documents: [macOS V1 scope](../../product/macos-v1-scope.md), [domain language](../../../CONTEXT.md)

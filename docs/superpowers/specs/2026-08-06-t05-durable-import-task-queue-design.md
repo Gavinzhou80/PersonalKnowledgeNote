@@ -139,7 +139,7 @@ Bootstrap performs these steps:
 
 1. Ask Local Library for retained import snapshots in authoritative order.
 2. Rebuild the snapshot registry.
-3. Reconcile interrupted durable states into recoverable queue states without discarding valid checkpoints.
+3. Consume the recovery reconciliation already performed once by `LocalLibrary.open`; Document Import bootstrap does not independently reset running rows.
 4. Complete any cancellation cleanup left in `cancelling`.
 5. Start the scheduler if a runnable task exists.
 6. Release the barrier.
@@ -302,9 +302,11 @@ The scheduler is event-driven. It wakes after:
 - active runner completion;
 - completion of cancellation cleanup.
 
-The scheduling transaction claims the lowest active queue sequence and moves that task to running with a new revision. Claiming is durable and exclusive. A second scheduler instance or reentrant wake-up cannot claim the same task.
+`LocalLibrary.open` performs interrupted-runner reconciliation once for that opened library instance, before any Document Import scheduler exists. It returns prior `running` rows to queued while preserving valid checkpoints. A second `DocumentImport` actor sharing the same opened `LocalLibrary` does not repeat reconciliation.
 
-Only one runner exists per `DocumentImport` instance. Local Library claim semantics additionally protect against two `DocumentImport` instances opened over the same library root.
+The scheduling transaction claims the lowest active queue sequence and moves that task to running with a new revision. Claiming is durable and exclusive. A second scheduler sharing that Local Library or a reentrant wake-up cannot claim the same task.
+
+Only one runner exists per `DocumentImport` instance. Local Library claim semantics additionally protect two `DocumentImport` instances that share the same opened `LocalLibrary`. Concurrent independent `LocalLibrary.open` calls for the same root are outside T05 and remain an application composition error.
 
 The runner uses structured child tasks for acquisition, resource localization, and construction. Closing an observation stream does not retain or cancel any runner task.
 
