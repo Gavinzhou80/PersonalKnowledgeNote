@@ -1305,7 +1305,7 @@ git commit -m "feat: resume web imports from checkpoints"
 - Create: `Tests/DocumentImportTests/ImportTaskControlTests.swift`
 - Modify: `Tests/LocalLibraryTests/ImportQueueTests.swift`
 
-- [ ] **Step 1: Write failing cancel, retry, and waiter tests**
+- [x] **Step 1: Write failing cancel, retry, and waiter tests**
 
 Cover queued cancellation, running cancellation, repeated cancellation, too-late publication, retry tail fairness, attempt increments, and waiter binding:
 
@@ -1362,7 +1362,7 @@ var isSuccess: Bool {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -1372,7 +1372,7 @@ swift test --filter ImportTaskControlTests
 
 Expected: FAIL because durable control transitions are not implemented.
 
-- [ ] **Step 3: Implement LocalLibrary cancellation transitions**
+- [x] **Step 3: Implement LocalLibrary cancellation transitions**
 
 Add transactional operations:
 
@@ -1396,7 +1396,7 @@ Rules:
 - failure remains failure until explicit retry;
 - finishCancellation requires cancelling, no publication intent, and completed owned checkpoint/staging cleanup.
 
-- [ ] **Step 4: Implement LocalLibrary retry transaction**
+- [x] **Step 4: Implement LocalLibrary retry transaction**
 
 Add:
 
@@ -1429,7 +1429,7 @@ requested, allocates the queue tail, sets queued, and increments revision once.
 Owned bytes selected for clearing are removed after commit and any orphan is
 recovered on open.
 
-- [ ] **Step 5: Connect structured cancellation**
+- [x] **Step 5: Connect structured cancellation**
 
 `DocumentImport.cancel(taskID:)`:
 
@@ -1444,7 +1444,7 @@ recovered on open.
 
 The runner catches `CancellationError` separately and never records failure. Resource localizer and URLSession cancellation regressions must remain green.
 
-- [ ] **Step 6: Implement retry and task lookup**
+- [x] **Step 6: Implement retry and task lookup**
 
 Add:
 
@@ -1477,7 +1477,7 @@ public func retry() async throws {
 
 The handle exposes no queue sequence, checkpoint, workspace, or runner value.
 
-- [ ] **Step 7: Bind waiters to attempt**
+- [x] **Step 7: Bind waiters to attempt**
 
 Change registry waiters from a task-only array to:
 
@@ -1487,7 +1487,7 @@ private var waiters: [TaskAttemptKey: [CheckedContinuation<ImportTerminalState, 
 
 where `TaskAttemptKey` contains task ID and attempt. `value()` captures the current attempt after bootstrap and registration. Finishing attempt one never resumes attempt-two waiters.
 
-- [ ] **Step 8: Run control and regression tests**
+- [x] **Step 8: Run control and regression tests**
 
 Run:
 
@@ -1501,7 +1501,7 @@ swift test --filter DocumentImportTests
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add Sources/LocalLibrary Sources/DocumentImport Tests/LocalLibraryTests/ImportQueueTests.swift Tests/DocumentImportTests/DocumentImportTestSupport.swift Tests/DocumentImportTests/ImportTaskControlTests.swift Tests/DocumentImportTests/DurableImportQueueTests.swift
