@@ -93,7 +93,7 @@ M  docs/superpowers/specs/2026-08-05-document-import-design.md
 - Modify: `Tests/DocumentImportTests/ImportTaskModelTests.swift`
 - Modify: `Tests/AppSupportTests/ImportCenterPresentationTests.swift`
 
-- [ ] **Step 1: Write failing model and API tests**
+- [x] **Step 1: Write failing model and API tests**
 
 Add tests that require the new states, terminal cancellation, and errors:
 
@@ -131,7 +131,7 @@ func durableJournalStatesAndFailureEnvelopeRoundTrip() throws {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -142,7 +142,7 @@ swift test --filter durableJournalStatesAndFailureEnvelopeRoundTrip
 
 Expected: FAIL because the new public states, durable states, and errors do not exist.
 
-- [ ] **Step 3: Add durable and public values**
+- [x] **Step 3: Add durable and public values**
 
 Extend the existing KnowledgeCore journal enum. Keep its legacy values for v1 decoding and schema migration; qualify it as `KnowledgeCore.ImportTaskState` where the public DocumentImport enum would otherwise be ambiguous:
 
@@ -214,7 +214,7 @@ durable checkpoint data. It is persisted with `.retryable` recovery and an
 opaque diagnostic ID; callers never receive a managed path, response body, or
 decoder detail.
 
-- [ ] **Step 4: Update exhaustive state switches**
+- [x] **Step 4: Update exhaustive state switches**
 
 Update `ImportCenterPresentation`, query matching, tests, and all switches so `cancelling` and `cancelled` are explicit. Use these initial presentation mappings:
 
@@ -244,7 +244,7 @@ durable states are explicit under the v1 column model. Treat `queued`,
 those v1-only switches; do not silently map them to legacy states. Task 2 must
 replace these temporary guards with the complete v2 validation rules.
 
-- [ ] **Step 5: Run focused model tests**
+- [x] **Step 5: Run focused model tests**
 
 Run:
 
@@ -256,7 +256,7 @@ swift test --filter ImportCenterPresentationTests
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Sources/KnowledgeCore/ImportTask.swift Sources/DocumentImport/ImportTaskModels.swift Sources/AppSupport/ImportCenterPresentation.swift Sources/LocalLibrary/Internal/Records.swift Sources/LocalLibrary/Internal/LibraryDatabase.swift Tests/KnowledgeCoreTests/PublicationModelTests.swift Tests/DocumentImportTests/ImportTaskModelTests.swift Tests/AppSupportTests/ImportCenterPresentationTests.swift
@@ -277,7 +277,7 @@ git commit -m "feat: define durable import task lifecycle"
 - Modify: `Tests/LocalLibraryTests/ImportAcceptanceTests.swift`
 - Create: `Tests/LocalLibraryTests/ImportQueueTests.swift`
 
-- [ ] **Step 1: Write failing migration and FIFO tests**
+- [x] **Step 1: Write failing migration and FIFO tests**
 
 Add tests that submit three sources and inspect package-level durable snapshots:
 
@@ -316,7 +316,7 @@ func claimNextRunnableIsExclusiveAndDurable() async throws {
 
 Add a migration fixture with v1 rows in `accepted`, `working`, `completed`, and `abandoned` states. Assert migration maps accepted/working to queued in deterministic `rowid` order, leaves completed history intact, and does not resurrect abandoned rows.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -328,7 +328,7 @@ swift test --filter migratesV1ImportTasksIntoDurableQueue
 
 Expected: FAIL because queue columns and APIs do not exist.
 
-- [ ] **Step 3: Add the v2 schema migration**
+- [x] **Step 3: Add the v2 schema migration**
 
 Register `v2_durable_import_queue` after v1:
 
@@ -403,7 +403,7 @@ migrator.registerMigration("v2_durable_import_queue") { db in
 
 Use GRDB APIs that compile under 7.11.1; if conditional-index builder syntax differs, issue an explicit `CREATE UNIQUE INDEX ... WHERE queue_sequence IS NOT NULL` statement.
 
-- [ ] **Step 4: Extend records and snapshots**
+- [x] **Step 4: Extend records and snapshots**
 
 Add record fields:
 
@@ -441,7 +441,7 @@ Validate that every retained row has a unique positive journal sequence, queued
 rows have a positive queue sequence, nonqueued rows do not, failed rows have a
 valid failure envelope, and other rows do not carry failure payload.
 
-- [ ] **Step 5: Implement queue allocation and exclusive claim**
+- [x] **Step 5: Implement queue allocation and exclusive claim**
 
 In one SQLite write transaction, read and increment the singleton
 `import_queue_clock.last_sequence`, reject Int64 overflow, and insert accepted
@@ -480,7 +480,7 @@ those rows in `queueUpdates`, ordered by queue sequence, from the same
 transaction. Appending a new tail item does not change existing positions and
 does not revise existing rows.
 
-- [ ] **Step 6: Run LocalLibrary queue tests**
+- [x] **Step 6: Run LocalLibrary queue tests**
 
 Run:
 
@@ -492,7 +492,7 @@ swift test --filter LocalLibraryTests
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add Sources/LocalLibrary Sources/KnowledgeCore/ImportTask.swift Tests/LocalLibraryTests/ImportAcceptanceTests.swift Tests/LocalLibraryTests/ImportQueueTests.swift
@@ -516,7 +516,7 @@ git commit -m "feat: persist import task fifo queue"
 - Modify: `Tests/LocalLibraryTests/CheckpointTests.swift`
 - Create: `Tests/LocalLibraryTests/CheckpointArtifactTests.swift`
 
-- [ ] **Step 1: Write failing checkpoint package tests**
+- [x] **Step 1: Write failing checkpoint package tests**
 
 Create a deterministic package containing `metadata.json` and `payload.bin`. Assert attach, verify, replace, cleanup, and reopen behavior:
 
@@ -587,7 +587,7 @@ private func makeCheckpointPackage(body: Data) throws -> URL {
 
 Add tests for cross-task artifact forgery, symlinked packages, corruption after attach, cleanup after cancellation, and orphan cleanup on library reopen.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -597,7 +597,7 @@ swift test --filter CheckpointArtifactTests
 
 Expected: FAIL because checkpoint artifact types, storage, and APIs do not exist.
 
-- [ ] **Step 3: Define checkpoint artifact values**
+- [x] **Step 3: Define checkpoint artifact values**
 
 Add package-scoped values that expose identity and descriptor but not paths:
 
@@ -625,7 +625,7 @@ package struct CheckpointArtifactReplacement: Sendable {
 
 Add `package let checkpointArtifact: ManagedCheckpointArtifact?` to `DurableImportSnapshot`. Checkpoint identity remains invisible outside the Swift package.
 
-- [ ] **Step 4: Add the additive schema migration and managed path scope**
+- [x] **Step 4: Add the additive schema migration and managed path scope**
 
 Register `v3_import_checkpoint_artifacts` after
 `v2_durable_import_queue`; never append this table to the already-applied v2
@@ -654,7 +654,7 @@ Checkpoints/<TASK-UUID>/<ARTIFACT-UUID>
 
 Create and validate a dedicated `Checkpoints` root beside `Staging` and `Artifacts`.
 
-- [ ] **Step 5: Implement safe copy, verify, replace, and remove**
+- [x] **Step 5: Implement safe copy, verify, replace, and remove**
 
 Reuse `ManagedArtifactPayload.verifyAndSynchronize` for package hashing. Replacement order must be:
 
@@ -669,7 +669,7 @@ The database must never expose a new artifact with an old checkpoint envelope,
 or a new envelope with an old artifact. Never overwrite an existing package in
 place. Never expose the resolved path to Document Import.
 
-- [ ] **Step 6: Add workspace operations**
+- [x] **Step 6: Add workspace operations**
 
 Add:
 
@@ -701,7 +701,7 @@ validation on this verified package.
 
 Add package-only test helpers for artifact count and fault injection.
 
-- [ ] **Step 7: Run checkpoint artifact tests**
+- [x] **Step 7: Run checkpoint artifact tests**
 
 Run:
 
@@ -713,7 +713,7 @@ swift test --filter LocalLibraryTests
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add Sources/LocalLibrary Tests/LocalLibraryTests/CheckpointTests.swift Tests/LocalLibraryTests/CheckpointArtifactTests.swift
@@ -734,7 +734,7 @@ git commit -m "feat: manage import checkpoint packages"
 - Modify: `Tests/DocumentImportTests/StaticArticleExtractorTests.swift`
 - Create: `Tests/DocumentImportTests/WebImportCheckpointTests.swift`
 
-- [ ] **Step 1: Write failing acquired and prepared checkpoint tests**
+- [x] **Step 1: Write failing acquired and prepared checkpoint tests**
 
 Add exact round-trip tests:
 
@@ -757,7 +757,7 @@ func acquiredWebCheckpointRoundTripsResponseBytesAndCharset() throws {
 
 Add prepared-candidate round trip with fixed document content, fingerprint, issues, staged artifact identity, and Original Source. Add rejection tests for missing files, extra files, traversal, unsupported codec, mismatched integrity metadata, oversized body, and corrupt JSON.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -768,7 +768,7 @@ swift test --filter URLSessionStaticWebAcquirerTests
 
 Expected: FAIL because charset and checkpoint codec do not exist.
 
-- [ ] **Step 3: Preserve HTTP charset**
+- [x] **Step 3: Preserve HTTP charset**
 
 Extend `AcquiredWebPage`:
 
@@ -787,7 +787,7 @@ Update the extractor to decode bytes in this order:
 
 Use Foundation `String.Encoding` mappings for UTF-8, UTF-16, ISO-8859-1, Windows-1252, Shift-JIS, EUC-JP, GB18030/GBK where supported. Unknown charsets do not bypass byte bounds.
 
-- [ ] **Step 4: Define checkpoint metadata and package layout**
+- [x] **Step 4: Define checkpoint metadata and package layout**
 
 Use these exact package layouts:
 
@@ -834,7 +834,7 @@ static func readPrepared(
 
 Both variants include codec version 1, SHA-256 hashes for payload files, byte counts, and a domain tag. URLs are stored only as required task data and never logged.
 
-- [ ] **Step 5: Implement strict read/write validation**
+- [x] **Step 5: Implement strict read/write validation**
 
 Writers create a new temporary directory, write deterministic sorted-key JSON, synchronize files, and return the package URL plus descriptor. Readers require the exact file set, reject symlinks, verify byte counts and hashes before decoding, and validate every domain value.
 
@@ -852,7 +852,7 @@ struct PreparedWebPublication: Codable, Sendable {
 }
 ```
 
-- [ ] **Step 6: Run focused codec and extraction tests**
+- [x] **Step 6: Run focused codec and extraction tests**
 
 Run:
 
@@ -864,7 +864,7 @@ swift test --filter StaticArticleExtractorTests
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add Sources/DocumentImport/Internal/WebImportCheckpoint.swift Sources/DocumentImport/Internal/WebAcquisition.swift Sources/DocumentImport/Internal/URLSessionStaticWebAcquirer.swift Sources/DocumentImport/Internal/StaticArticleExtractor.swift Tests/DocumentImportTests/WebImportCheckpointTests.swift Tests/DocumentImportTests/URLSessionStaticWebAcquirerTests.swift Tests/DocumentImportTests/StaticArticleExtractorTests.swift
@@ -885,7 +885,7 @@ git commit -m "feat: persist web import checkpoints"
 - Modify: `Tests/DocumentImportTests/RealStaticWebImportIntegrationTests.swift`
 - Create: `Tests/DocumentImportTests/DurableImportQueueTests.swift`
 
-- [ ] **Step 1: Write failing scheduler and bootstrap tests**
+- [x] **Step 1: Write failing scheduler and bootstrap tests**
 
 Use a deterministic runner gate and real temporary LocalLibrary:
 
@@ -943,7 +943,7 @@ Implement waits with cancellation and one-second timeouts using the bounded cont
 
 Add a bootstrap ordering test that accepts tasks directly in LocalLibrary, creates `DocumentImport`, immediately submits another task, and proves recovered tasks run first. Add simultaneous wake-up stress coverage.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -953,7 +953,7 @@ swift test --filter DurableImportQueueTests
 
 Expected: FAIL because scheduler, bootstrap, and durable positions do not exist.
 
-- [ ] **Step 3: Implement TaskSnapshotRegistry**
+- [x] **Step 3: Implement TaskSnapshotRegistry**
 
 Use an actor-confined value owned by `DocumentImport`. Store records keyed by task ID and terminal waiters keyed by `(taskID, attempt)`.
 
@@ -991,7 +991,7 @@ List emissions order running/cancelling first, queued snapshots by public
 position, and retained terminal history by immutable journal sequence. A
 position-only durable revision produces a new list emission.
 
-- [ ] **Step 4: Implement idempotent bootstrap barrier**
+- [x] **Step 4: Implement idempotent bootstrap barrier**
 
 Add a stored bootstrap state:
 
@@ -1016,7 +1016,7 @@ second scheduler. Hydrate retained tasks before starting the scheduler.
 Observation registrations remain pending until successful hydration and do
 not receive a fabricated empty authoritative list.
 
-- [ ] **Step 5: Implement ImportScheduler**
+- [x] **Step 5: Implement ImportScheduler**
 
 The scheduler owns:
 
@@ -1031,7 +1031,7 @@ Apply `DurableQueueClaim.queueUpdates` and then the claimed running snapshot to
 the registry before starting the runner, so every shifted queued position is
 observable at its new revision.
 
-- [ ] **Step 6: Route submit through the scheduler**
+- [x] **Step 6: Route submit through the scheduler**
 
 `submit` now:
 
@@ -1046,7 +1046,7 @@ Remove the direct unstructured `Task { runWebImport(...) }` launch.
 If implicit bootstrap fails, map it to
 `ImportSubmissionError.localLibraryUnavailable` before durable acceptance.
 
-- [ ] **Step 7: Run queue and legacy integration tests**
+- [x] **Step 7: Run queue and legacy integration tests**
 
 Run:
 
@@ -1058,7 +1058,7 @@ swift test --filter RealStaticWebImportIntegrationTests
 
 Expected: PASS with T04 lifecycle semantics preserved for a single task.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add Sources/DocumentImport/Internal/TaskSnapshotRegistry.swift Sources/DocumentImport/Internal/ImportScheduler.swift Sources/DocumentImport/DocumentImport.swift Tests/DocumentImportTests/DocumentImportTestSupport.swift Tests/DocumentImportTests/DurableImportQueueTests.swift Tests/DocumentImportTests/DocumentImportIntegrationTests.swift Tests/DocumentImportTests/RealStaticWebImportIntegrationTests.swift
