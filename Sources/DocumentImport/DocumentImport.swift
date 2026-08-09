@@ -102,7 +102,7 @@ public actor DocumentImport {
     public init(library: LocalLibrary) {
         self.init(
             library: library,
-            webAcquirer: URLSessionStaticWebAcquirer()
+            webAcquirer: DynamicFallbackWebAcquirer()
         )
     }
 

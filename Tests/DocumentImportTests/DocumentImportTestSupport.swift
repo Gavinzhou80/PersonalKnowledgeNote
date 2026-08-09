@@ -75,6 +75,34 @@ enum FixtureWebAcquisitionError: Error {
     case unavailable
 }
 
+actor SpyDynamicRenderer: DynamicWebRendering {
+    private let html: Data
+    private let finalURLOverride: URL?
+    private let errorToThrow: Error?
+    private(set) var renderCallCount = 0
+
+    init(
+        html: Data,
+        finalURLOverride: URL? = nil,
+        errorToThrow: Error? = nil
+    ) {
+        self.html = html
+        self.finalURLOverride = finalURLOverride
+        self.errorToThrow = errorToThrow
+    }
+
+    func render(_ url: URL) async throws -> RenderedWebPage {
+        renderCallCount += 1
+        if let errorToThrow {
+            throw errorToThrow
+        }
+        return RenderedWebPage(
+            finalURL: finalURLOverride ?? url,
+            html: html
+        )
+    }
+}
+
 actor CountingWebAcquirer: WebAcquiring {
     enum Mode: Sendable {
         case normal

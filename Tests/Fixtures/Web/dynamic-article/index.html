@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dynamic Fixture Article</title>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(function () {
+    var root = document.getElementById("root");
+    var article = document.createElement("article");
+    var title = document.createElement("h1");
+    title.textContent = "Dynamic Fixture Article";
+    var intro = document.createElement("p");
+    intro.textContent = "This paragraph is rendered entirely by script.";
+    var heading = document.createElement("h2");
+    heading.textContent = "Generated Section";
+    var body = document.createElement("p");
+    body.textContent = "Second rendered paragraph with a "
+        + (document.cookie ? "leaked cookie" : "clean session") + ".";
+    article.appendChild(title);
+    article.appendChild(intro);
+    article.appendChild(heading);
+    article.appendChild(body);
+    root.appendChild(article);
+})();
+</script>
+</body>
+</html>
