@@ -263,7 +263,9 @@ Static-first acquisition with extraction-probe-gated dynamic fallback, wired int
 - Modify: `Tests/DocumentImportTests/DocumentImportTestSupport.swift`
 - Modify: `Tests/DocumentImportTests/DynamicWebImportTests.swift`
 
-- [ ] **Step 1: Write failing acquirer tests**
+- [x] **Step 1: Write failing acquirer tests**
+
+> Adjusted: `SpyDynamicRenderer` injects its error at construction (actor properties are not externally mutable), and a `FixedWebAcquirer` stub feeds the static side.
 
 Add a spy helper to `DocumentImportTestSupport.swift`:
 
@@ -290,7 +292,7 @@ Add suite `DynamicFallbackAcquirerTests` to `DynamicWebImportTests.swift`:
 - `insufficientStaticContentFallsBackToRenderedHTML`: a static acquirer returning the raw dynamic fixture bytes (static probe fails); the spy returns rendered HTML with a distinct final URL; the composite returns those bytes, `mimeType == "text/html"`, `sourceURL` preserved, `finalURL` from the renderer.
 - `rendererAcquisitionErrorsPropagate`: spy throws `WebAcquisitionError.requestTimedOut`; the composite throws the same error.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -300,7 +302,7 @@ swift test --filter DynamicFallbackAcquirerTests
 
 Expected: compile failure because `DynamicFallbackWebAcquirer` does not exist.
 
-- [ ] **Step 3: Implement the composite acquirer**
+- [x] **Step 3: Implement the composite acquirer**
 
 Create `Sources/DocumentImport/Internal/WebResourceLoading.swift`:
 
@@ -352,7 +354,7 @@ public init(library: LocalLibrary) {
 }
 ```
 
-- [ ] **Step 4: Run acquirer tests and regressions**
+- [x] **Step 4: Run acquirer tests and regressions**
 
 Run:
 
@@ -364,7 +366,7 @@ swift test --filter StaticArticleExtractorTests
 
 Expected: PASS. Existing suites keep injecting their own `WebAcquiring` doubles, so no behavioral change for them.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Sources/DocumentImport/Internal/WebResourceLoading.swift \

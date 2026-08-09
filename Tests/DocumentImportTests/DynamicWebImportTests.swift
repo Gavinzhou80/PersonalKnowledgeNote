@@ -70,6 +70,91 @@ struct DynamicWebRenderingSeamTests {
     }
 }
 
+/// Static acquirer stub that returns a fixed page regardless of the URL.
+struct FixedWebAcquirer: WebAcquiring {
+    let page: AcquiredWebPage
+
+    func acquire(_ url: URL) async throws -> AcquiredWebPage { page }
+}
+
+@Suite(.serialized)
+struct DynamicFallbackAcquirerTests {
+    @Test func sufficientStaticContentNeverInvokesTheDynamicRenderer()
+    async throws {
+        let sourceURL = URL(string: "https://example.com/static/article")!
+        let staticHTML = try Data(contentsOf: FixtureCatalog.webArticleURL)
+        let spy = SpyDynamicRenderer(
+            html: Data(simulatedDynamicArticleHTML.utf8)
+        )
+        let acquirer = DynamicFallbackWebAcquirer(
+            staticAcquirer: FixedWebAcquirer(page: AcquiredWebPage(
+                sourceURL: sourceURL,
+                html: staticHTML
+            )),
+            dynamicRenderer: spy
+        )
+
+        let page = try await acquirer.acquire(sourceURL)
+
+        #expect(await spy.renderCallCount == 0)
+        #expect(page.bytes == staticHTML)
+        #expect(page.finalURL == sourceURL)
+    }
+
+    @Test func insufficientStaticContentFallsBackToRenderedHTML()
+    async throws {
+        let sourceURL = URL(string: "https://example.com/dynamic/article")!
+        let renderedFinalURL = URL(
+            string: "https://cdn.example.com/rendered/article"
+        )!
+        let rawDynamicHTML = try Data(
+            contentsOf: FixtureCatalog.dynamicWebArticleURL
+        )
+        let renderedHTML = Data(simulatedDynamicArticleHTML.utf8)
+        let spy = SpyDynamicRenderer(
+            html: renderedHTML,
+            finalURLOverride: renderedFinalURL
+        )
+        let acquirer = DynamicFallbackWebAcquirer(
+            staticAcquirer: FixedWebAcquirer(page: AcquiredWebPage(
+                sourceURL: sourceURL,
+                html: rawDynamicHTML
+            )),
+            dynamicRenderer: spy
+        )
+
+        let page = try await acquirer.acquire(sourceURL)
+
+        #expect(await spy.renderCallCount == 1)
+        #expect(page.bytes == renderedHTML)
+        #expect(page.mimeType == "text/html")
+        #expect(page.sourceURL == sourceURL)
+        #expect(page.finalURL == renderedFinalURL)
+    }
+
+    @Test func rendererAcquisitionErrorsPropagate() async throws {
+        let sourceURL = URL(string: "https://example.com/dynamic/slow")!
+        let rawDynamicHTML = try Data(
+            contentsOf: FixtureCatalog.dynamicWebArticleURL
+        )
+        let spy = SpyDynamicRenderer(
+            html: Data(),
+            errorToThrow: WebAcquisitionError.requestTimedOut
+        )
+        let acquirer = DynamicFallbackWebAcquirer(
+            staticAcquirer: FixedWebAcquirer(page: AcquiredWebPage(
+                sourceURL: sourceURL,
+                html: rawDynamicHTML
+            )),
+            dynamicRenderer: spy
+        )
+
+        await #expect(throws: WebAcquisitionError.self) {
+            _ = try await acquirer.acquire(sourceURL)
+        }
+    }
+}
+
 /// The DOM the dynamic-article fixture produces after its inline script runs.
 /// Kept in sync with Tests/Fixtures/Web/dynamic-article/index.html so seam
 /// tests exercise exactly what the production renderer would hand back.
