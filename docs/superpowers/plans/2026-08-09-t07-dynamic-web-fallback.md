@@ -442,7 +442,7 @@ git commit -m "test: prove dynamic web import publishes through shared semantics
 
 ## Task 4: Final regression, review, and merge
 
-- [ ] **Step 1: Run full Debug verification**
+- [x] **Step 1: Run full Debug verification**
 
 ```bash
 swift test
@@ -451,7 +451,7 @@ swift build
 
 Expected: all tests pass, Debug build succeeds.
 
-- [ ] **Step 2: Run Debug macOS app build**
+- [x] **Step 2: Run Debug macOS app build**
 
 ```bash
 xcodebuild \
@@ -459,13 +459,16 @@ xcodebuild \
   -scheme PersonalKnowledgeNote \
   -configuration Debug \
   -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath .build/xcode-t07 \
+  -derivedDataPath .build/xcodebuild \
+  -onlyUsePackageVersionsFromResolvedFile \
   build
 ```
 
 Expected: `** BUILD SUCCEEDED **`.
 
-- [ ] **Step 3: Whitespace and scope check**
+> Executed against the shared `.build/xcodebuild` DerivedData (fresh DerivedData hangs cloning package mirrors from the network); result was `** BUILD SUCCEEDED **`.
+
+- [x] **Step 3: Whitespace and scope check**
 
 ```bash
 git diff --check origin/main...HEAD
@@ -480,7 +483,7 @@ Use `superpowers:requesting-code-review` against the master plan Task 7 definiti
 
 > Review outcome: no Critical findings. One Important finding fixed: the navigation-policy and authentication callbacks were migrated to the SDK's async delegate variants (the completion-handler variants share their Objective-C selectors with those async requirements in the current SDK, so selector pinning conflicted); a bounded grace timer now covers DOM serialization after `didFinish`. Standalone diagnostics were extended to prove real WKWebView dispatch of the pinned selectors for redirect follow, redirect-overflow cancellation, and basic rendering; the 401 probe showed WKWebView delivers that case as a finished empty load rather than an authentication challenge, which still degrades safely to the typed `webpageHasNoReadableArticle` failure with a script-free artifact.
 
-- [ ] **Step 5: Push and merge**
+- [x] **Step 5: Push and merge**
 
 ```bash
 git push -u origin feature/t07-dynamic-web-fallback
