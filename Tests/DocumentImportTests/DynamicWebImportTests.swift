@@ -1,4 +1,6 @@
 import Foundation
+import KnowledgeCore
+import LocalLibrary
 import TestFixtures
 import Testing
 @testable import DocumentImport
@@ -75,6 +77,172 @@ struct FixedWebAcquirer: WebAcquiring {
     let page: AcquiredWebPage
 
     func acquire(_ url: URL) async throws -> AcquiredWebPage { page }
+}
+
+@Suite(.serialized)
+struct DynamicWebImportIntegrationTests {
+    @Test(.timeLimit(.minutes(3)))
+    func dynamicArticlePublishesAScriptFreeSourceDocument() async throws {
+        let root = try makeTemporaryDocumentImportRoot()
+        defer { removeTemporaryDocumentImportRoot(root) }
+        let libraryRoot = root.appending(path: "Library")
+        let library = try await LocalLibrary.open(at: libraryRoot)
+        let rawDynamicHTML = try Data(
+            contentsOf: FixtureCatalog.dynamicWebArticleURL
+        )
+        let server = try await LocalHTTPFixtureServer.start { path in
+            guard path == "/dynamic/index.html" else {
+                return .init(
+                    status: 404,
+                    headers: ["Content-Type": "text/plain"]
+                )
+            }
+            return .init(
+                headers: ["Content-Type": "text/html; charset=utf-8"],
+                body: rawDynamicHTML
+            )
+        }
+        defer { server.stop() }
+        let spy = SpyDynamicRenderer(
+            html: Data(simulatedDynamicArticleHTML.utf8)
+        )
+        let importer = DocumentImport(
+            library: library,
+            webAcquirer: DynamicFallbackWebAcquirer(dynamicRenderer: spy)
+        )
+
+        let terminal = try await importer.submit(
+            .webpage(server.url("dynamic/index.html"))
+        ).value()
+
+        guard case .success(.published(let documentID, _)) = terminal else {
+            Issue.record("Expected published, got \(terminal)")
+            return
+        }
+        let located = try #require(
+            try await library.sourceDocument(id: documentID)
+        )
+        let text = located.document.content.blocks
+            .map(\.canonicalText)
+            .joined(separator: "\n")
+        #expect(text.contains(
+            "This paragraph is rendered entirely by script."
+        ))
+        #expect(text.contains("clean session"))
+
+        let packageURL = libraryRoot.appending(
+            path: "Artifacts/\(documentID.rawValue.uuidString)/payload"
+        )
+        let artifactHTML = try String(
+            decoding: Data(
+                contentsOf: packageURL.appending(path: "index.html")
+            ),
+            as: UTF8.self
+        )
+        #expect(!artifactHTML.contains("<script"))
+        #expect(artifactHTML.contains("script-src 'none'"))
+        #expect(await spy.renderCallCount == 1)
+    }
+
+    @Test(.timeLimit(.minutes(3)))
+    func restartAfterAcquiredCheckpointReusesRenderedHTML() async throws {
+        let root = try makeTemporaryDocumentImportRoot()
+        defer { removeTemporaryDocumentImportRoot(root) }
+        let libraryRoot = root.appending(path: "Library")
+        let library = try await LocalLibrary.open(at: libraryRoot)
+        let rawDynamicHTML = try Data(
+            contentsOf: FixtureCatalog.dynamicWebArticleURL
+        )
+        let server = try await LocalHTTPFixtureServer.start { path in
+            guard path == "/dynamic/index.html" else {
+                return .init(
+                    status: 404,
+                    headers: ["Content-Type": "text/plain"]
+                )
+            }
+            return .init(
+                headers: ["Content-Type": "text/html; charset=utf-8"],
+                body: rawDynamicHTML
+            )
+        }
+        defer { server.stop() }
+        let spy = SpyDynamicRenderer(
+            html: Data(simulatedDynamicArticleHTML.utf8)
+        )
+        let crashInjector = ImportRunnerCrashInjector(
+            crashPoint: .afterAcquiredCheckpoint
+        )
+        let first = DocumentImport(
+            library: library,
+            webAcquirer: DynamicFallbackWebAcquirer(dynamicRenderer: spy),
+            importRunnerBoundaryHook: { point in
+                try crashInjector.hit(point)
+            }
+        )
+
+        let handle = try await first.submit(
+            .webpage(server.url("dynamic/index.html"))
+        )
+        try await crashInjector.waitForInjectedTermination()
+        #expect(await spy.renderCallCount == 1)
+
+        let reopened = try await LocalLibrary.open(at: libraryRoot)
+        let second = DocumentImport(
+            library: reopened,
+            webAcquirer: DynamicFallbackWebAcquirer(
+                staticAcquirer: ThrowingWebAcquirer(),
+                dynamicRenderer: spy
+            )
+        )
+        try await second.start()
+
+        let recovered = try #require(try await second.task(id: handle.id))
+        let terminal = await recovered.value()
+
+        guard case .success(.published) = terminal else {
+            Issue.record("Expected published after restart, got \(terminal)")
+            return
+        }
+        #expect(await spy.renderCallCount == 1)
+    }
+
+    @Test(.timeLimit(.minutes(3)))
+    func dynamicRenderingFailureSurfacesTypedRetryableFailure() async throws {
+        let root = try makeTemporaryDocumentImportRoot()
+        defer { removeTemporaryDocumentImportRoot(root) }
+        let library = try await LocalLibrary.open(
+            at: root.appending(path: "Library")
+        )
+        let sourceURL = URL(
+            string: "https://example.com/dynamic/unreachable"
+        )!
+        let rawDynamicHTML = try Data(
+            contentsOf: FixtureCatalog.dynamicWebArticleURL
+        )
+        let spy = SpyDynamicRenderer(
+            html: Data(),
+            errorToThrow: WebAcquisitionError.requestTimedOut
+        )
+        let importer = DocumentImport(
+            library: library,
+            webAcquirer: DynamicFallbackWebAcquirer(
+                staticAcquirer: FixedWebAcquirer(page: AcquiredWebPage(
+                    sourceURL: sourceURL,
+                    html: rawDynamicHTML
+                )),
+                dynamicRenderer: spy
+            )
+        )
+
+        let terminal = try await importer.submit(.webpage(sourceURL)).value()
+
+        guard case .failure(let failure) = terminal else {
+            Issue.record("Expected typed failure, got \(terminal)")
+            return
+        }
+        #expect(failure.code == .requestTimedOut)
+        #expect(failure.recovery == .retryable)
+    }
 }
 
 @Suite(.serialized)

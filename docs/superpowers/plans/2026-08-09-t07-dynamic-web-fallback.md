@@ -388,7 +388,7 @@ Prove dynamic articles publish through identical task semantics: durable queue, 
 
 - Modify: `Tests/DocumentImportTests/DynamicWebImportTests.swift`
 
-- [ ] **Step 1: Write failing integration tests**
+- [x] **Step 1: Write failing integration tests**
 
 Add suite `DynamicWebImportIntegrationTests` (`@Suite(.serialized)`, real `LocalLibrary` + real `DocumentImport` + `LocalHTTPFixtureServer` following the `RealStaticWebImportIntegrationTests` harness style):
 
@@ -407,7 +407,7 @@ func dynamicRenderingFailureSurfacesTypedRetryableFailure() async throws
 - `restartAfterAcquiredCheckpointReusesRenderedHTML`: inject `importRunnerBoundaryHook` throwing `ImportTaskRunnerInterruption.injectedProcessTermination` at `.afterAcquiredCheckpoint`; discard the importer, reopen `LocalLibrary.open(at:)` on the same root with a fresh `DocumentImport` sharing the same spy renderer; the task resumes to `.published` and total `renderCallCount` stays 1 (no network for the page either: fixture server counts requests).
 - `dynamicRenderingFailureSurfacesTypedRetryableFailure`: static acquirer succeeds but returns the dynamic fixture bytes while the renderer throws `WebAcquisitionError.requestTimedOut`; expect terminal failure with code `.requestTimedOut` and recovery `.retryable`.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -417,7 +417,9 @@ swift test --filter DynamicWebImportIntegrationTests
 
 Expected: FAIL — publication of script-rendered content, restart reuse, or typed failure edges are not yet proven (first run may already pass partially; any failing edge justifies the task; if all pass immediately, record that and move on without inventing behavior).
 
-- [ ] **Step 3: Fix until GREEN**
+> Outcome: all three integration tests passed on the first run — the seam composition from Tasks 1–2 already carries dynamic content through the shared task semantics, so no new behavior was invented.
+
+- [x] **Step 3: Fix until GREEN**
 
 Only fix genuine gaps (e.g., probe edge cases, fixture serving details). Do not widen interfaces.
 
@@ -429,7 +431,7 @@ swift test --filter DynamicWebImportIntegrationTests
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Tests/DocumentImportTests/DynamicWebImportTests.swift
