@@ -105,7 +105,7 @@ Replace the placeholder window with the three-pane workbench backed by a real li
 
 **Steps**
 
-- [ ] **Step 1: Manual acceptance checklist** (run the Debug app; record results in the completion report)
+- [x] **Step 1: Manual acceptance checklist** (run the Debug app; record results in the completion report)
   - Boot with an empty library shows the empty list state.
   - Import a fixture URL served by the local test fixture server pattern or a local static file server; task completes.
   - The document appears at the top of the list with its title.
@@ -113,7 +113,7 @@ Replace the placeholder window with the three-pane workbench backed by a real li
   - Every outline node scrolls to its section.
   - Clicking an external link opens the default browser and the view does not navigate.
   - Relaunch keeps the document list.
-- [ ] **Step 2: Full `swift test`; `git diff --check origin/main...HEAD`**
-- [ ] **Step 3: Final code review** — fix every Critical/Important finding with a failing regression test first.
-- [ ] **Step 4: Push branch** `git push -u origin feature/t06-reading-workbench`
+- [x] **Step 2: Full `swift test`; `git diff --check origin/main...HEAD`**
+- [x] **Step 3: Final code review** — fix every Critical/Important finding with a failing regression test first.
+- [x] **Step 4: Push branch** `git push -u origin feature/t06-reading-workbench`
 - [ ] **Step 5: Merge into `main` (--no-ff), verify full suite on `main`, push**
