@@ -37,10 +37,10 @@ Expose the read-only queries the reading side needs: listed published document s
 
 **Steps**
 
-- [ ] **Step 1: Write ReadingSeamTests and verify red**
-- [ ] **Step 2: Implement summaries and resource serving until green**
-- [ ] **Step 3: Run LocalLibraryTests suite; then full `swift test`**
-- [ ] **Step 4: Commit** `feat: expose library reading seam`
+- [x] **Step 1: Write ReadingSeamTests and verify red**
+- [x] **Step 2: Implement summaries and resource serving until green**
+- [x] **Step 3: Run LocalLibraryTests suite; then full `swift test`**
+- [x] **Step 4: Commit** `feat: expose library reading seam`
 
 ---
 

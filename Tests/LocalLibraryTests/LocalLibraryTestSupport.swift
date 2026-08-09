@@ -16,7 +16,8 @@ func removeTemporaryLibraryRoot(_ root: URL) {
     try? FileManager.default.removeItem(at: root)
 }
 
-func makeFixtureContent() -> SourceDocumentContent {
+func makeFixtureContent(titled title: String = "Fixture")
+    -> SourceDocumentContent {
     let block = SourceBlock(
         id: SourceBlockID(),
         canonicalText: "Fixture document"
@@ -24,7 +25,7 @@ func makeFixtureContent() -> SourceDocumentContent {
     return SourceDocumentContent(
         documentID: SourceDocumentID(),
         importedMetadata: ImportedDocumentMetadata(
-            title: "Fixture",
+            title: title,
             author: nil
         ),
         blocks: [block],

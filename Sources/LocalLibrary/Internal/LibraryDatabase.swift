@@ -1852,6 +1852,30 @@ final class LibraryDatabase: Sendable {
         }
     }
 
+    func publishedDocumentSummaries()
+        throws -> [SourceDocumentSummary]
+    {
+        try queue.read { db in
+            let records = try SourceDocumentRecord
+                .filter(
+                    Column("visibility")
+                        == SourceDocumentVisibility.visible.rawValue
+                )
+                .order(Column.rowID.desc)
+                .fetchAll(db)
+            return try records.map { record in
+                let decoded = try record.decoded()
+                guard decoded.visibility == .visible else {
+                    throw corruptLibraryError()
+                }
+                return SourceDocumentSummary(
+                    documentID: decoded.documentID,
+                    title: decoded.content.importedMetadata.title
+                )
+            }
+        }
+    }
+
     private func stagedArtifact(
         for task: ImportTaskRecord,
         in db: Database

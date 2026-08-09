@@ -290,6 +290,29 @@ public struct LocatedSourceDocument: Sendable {
     }
 }
 
+public struct SourceDocumentSummary: Hashable, Sendable {
+    public let documentID: SourceDocumentID
+    public let title: String
+
+    package init(
+        documentID: SourceDocumentID,
+        title: String
+    ) {
+        self.documentID = documentID
+        self.title = title
+    }
+}
+
+public struct ArtifactResource: Sendable {
+    public let data: Data
+    public let contentType: String
+
+    package init(data: Data, contentType: String) {
+        self.data = data
+        self.contentType = contentType
+    }
+}
+
 public enum LocalLibraryError: Error, Equatable, Sendable {
     case unavailable
     case insufficientDiskSpace

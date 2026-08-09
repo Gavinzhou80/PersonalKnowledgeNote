@@ -591,6 +591,115 @@ struct ManagedArtifacts {
         )
     }
 
+    func finalArtifactResource(
+        documentID: SourceDocumentID,
+        relativePath: String
+    ) throws -> ArtifactResource? {
+        guard let components = Self.validatedResourceComponents(
+            relativePath
+        ) else {
+            return nil
+        }
+        let containerComponents = ManagedArtifactPath.artifacts(
+            documentID: documentID
+        ).identityComponents
+        var resolvedComponents = containerComponents
+        resolvedComponents.append("payload")
+        resolvedComponents.append(contentsOf: components)
+        try rejectSymbolicLinks(
+            from: artifactsRoot,
+            components: resolvedComponents
+        )
+        let standardized = resolvedComponents.reduce(artifactsRoot) {
+            $0.appending(path: $1)
+        }.standardizedFileURL
+        guard Self.isStrictDescendant(standardized, of: artifactsRoot)
+        else {
+            return nil
+        }
+        let resolved = standardized.resolvingSymlinksInPath()
+        guard resolved == standardized,
+              Self.isStrictDescendant(resolved, of: artifactsRoot)
+        else {
+            return nil
+        }
+        guard FileManager.default.fileExists(atPath: resolved.path) else {
+            return nil
+        }
+        let values = try resolved.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+        ])
+        guard values.isSymbolicLink != true,
+              values.isRegularFile == true
+        else {
+            return nil
+        }
+        return ArtifactResource(
+            data: try Data(contentsOf: resolved),
+            contentType: Self.artifactContentType(for: resolved)
+        )
+    }
+
+    private static func validatedResourceComponents(
+        _ relativePath: String
+    ) -> [String]? {
+        guard !relativePath.isEmpty,
+              !relativePath.contains("\\"),
+              !relativePath.hasPrefix("/")
+        else {
+            return nil
+        }
+        let components = relativePath.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        ).map(String.init)
+        guard components.allSatisfy({ component in
+            !component.isEmpty
+                && component != "."
+                && component != ".."
+        })
+        else {
+            return nil
+        }
+        return components
+    }
+
+    private static func artifactContentType(
+        for url: URL
+    ) -> String {
+        switch url.pathExtension.lowercased() {
+        case "html", "htm":
+            "text/html"
+        case "css":
+            "text/css"
+        case "js":
+            "application/javascript"
+        case "json":
+            "application/json"
+        case "txt":
+            "text/plain"
+        case "svg":
+            "image/svg+xml"
+        case "png":
+            "image/png"
+        case "jpg", "jpeg":
+            "image/jpeg"
+        case "gif":
+            "image/gif"
+        case "webp":
+            "image/webp"
+        case "ico":
+            "image/x-icon"
+        case "woff":
+            "font/woff"
+        case "woff2":
+            "font/woff2"
+        default:
+            "application/octet-stream"
+        }
+    }
+
     func exists(relativePath: String) throws -> Bool {
         let path: ManagedArtifactPath
         do {
