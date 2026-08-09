@@ -116,4 +116,4 @@ Replace the placeholder window with the three-pane workbench backed by a real li
 - [x] **Step 2: Full `swift test`; `git diff --check origin/main...HEAD`**
 - [x] **Step 3: Final code review** — fix every Critical/Important finding with a failing regression test first.
 - [x] **Step 4: Push branch** `git push -u origin feature/t06-reading-workbench`
-- [ ] **Step 5: Merge into `main` (--no-ff), verify full suite on `main`, push**
+- [x] **Step 5: Merge into `main` (--no-ff), verify full suite on `main`, push**
