@@ -67,10 +67,10 @@ An observable store that projects document list, selection, outline, and artifac
 
 **Steps**
 
-- [ ] **Step 1: Write ReadingWorkbenchStoreTests and verify red**
-- [ ] **Step 2: Implement port, store, and projection until green**
-- [ ] **Step 3: Run AppSupportTests suite; then full `swift test`**
-- [ ] **Step 4: Commit** `feat: add reading workbench presentation store`
+- [x] **Step 1: Write ReadingWorkbenchStoreTests and verify red**
+- [x] **Step 2: Implement port, store, and projection until green**
+- [x] **Step 3: Run AppSupportTests suite; then full `swift test`**
+- [x] **Step 4: Commit** `feat: add reading workbench presentation store`
 
 ---
 
@@ -94,10 +94,10 @@ Replace the placeholder window with the three-pane workbench backed by a real li
 
 **Steps**
 
-- [ ] **Step 1: Write and verify navigation-policy tests**
-- [ ] **Step 2: Implement scheme handler, web view, workbench view, bootstrap**
-- [ ] **Step 3: `swift build` + `xcodebuild` Debug succeed; focused suites green**
-- [ ] **Step 4: Commit** `feat: open published documents in reading workbench`
+- [x] **Step 1: Write and verify navigation-policy tests**
+- [x] **Step 2: Implement scheme handler, web view, workbench view, bootstrap**
+- [x] **Step 3: `swift build` + `xcodebuild` Debug succeed; focused suites green**
+- [x] **Step 4: Commit** `feat: open published documents in reading workbench`
 
 ---
 

@@ -7,15 +7,24 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0EE59A0380E6F6910FF5BB7C /* ReadingWorkbenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AD6B9670D7260130C18A6EE /* ReadingWorkbenchView.swift */; };
+		1D2D6291CBB91CBD317A49DF /* LocalLibrary in Frameworks */ = {isa = PBXBuildFile; productRef = 0292A62C3A22626F9D331C48 /* LocalLibrary */; };
 		748B9C4FA0550826B2D4C613 /* PersonalKnowledgeNoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDFDF72037EDE715B6D382C2 /* PersonalKnowledgeNoteApp.swift */; };
+		9F297F16C382D3456461FD0B /* KnowledgeCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3C0FF6F92630F5761683F524 /* KnowledgeCore */; };
+		A06BB4D92747AF40DE23A227 /* DocumentImport in Frameworks */ = {isa = PBXBuildFile; productRef = 0E61813C13E9400699318865 /* DocumentImport */; };
 		B2A4D708E95A71B3A94FFD2C /* ImportCenterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BF3F90707A70CEA69012ED1 /* ImportCenterView.swift */; };
+		E0FFF842AEAC5FE400A4908E /* ArtifactWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50B04FAF4BB1460579CA6104 /* ArtifactWebView.swift */; };
+		E45FB080300A8F0F941BDF0D /* ArtifactSchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05F97DA457CF48644B577EEE /* ArtifactSchemeHandler.swift */; };
 		FCD280731ACAA301DDF86A5E /* AppSupport in Frameworks */ = {isa = PBXBuildFile; productRef = 1A69319E3A18A946B9A9CA8F /* AppSupport */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		05F97DA457CF48644B577EEE /* ArtifactSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactSchemeHandler.swift; sourceTree = "<group>"; };
 		4255889FFC26671E27B662CB /* PersonalKnowledgeNote */ = {isa = PBXFileReference; lastKnownFileType = folder; name = PersonalKnowledgeNote; path = .; sourceTree = SOURCE_ROOT; };
+		50B04FAF4BB1460579CA6104 /* ArtifactWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactWebView.swift; sourceTree = "<group>"; };
 		5BF3F90707A70CEA69012ED1 /* ImportCenterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportCenterView.swift; sourceTree = "<group>"; };
 		64506752E13DA3B4D14F3FCB /* PersonalKnowledgeNote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PersonalKnowledgeNote.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8AD6B9670D7260130C18A6EE /* ReadingWorkbenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingWorkbenchView.swift; sourceTree = "<group>"; };
 		DDFDF72037EDE715B6D382C2 /* PersonalKnowledgeNoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalKnowledgeNoteApp.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -25,6 +34,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				FCD280731ACAA301DDF86A5E /* AppSupport in Frameworks */,
+				A06BB4D92747AF40DE23A227 /* DocumentImport in Frameworks */,
+				9F297F16C382D3456461FD0B /* KnowledgeCore in Frameworks */,
+				1D2D6291CBB91CBD317A49DF /* LocalLibrary in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -42,8 +54,11 @@
 		6A9EC30D69E51AF52D19785C /* App */ = {
 			isa = PBXGroup;
 			children = (
+				05F97DA457CF48644B577EEE /* ArtifactSchemeHandler.swift */,
+				50B04FAF4BB1460579CA6104 /* ArtifactWebView.swift */,
 				5BF3F90707A70CEA69012ED1 /* ImportCenterView.swift */,
 				DDFDF72037EDE715B6D382C2 /* PersonalKnowledgeNoteApp.swift */,
+				8AD6B9670D7260130C18A6EE /* ReadingWorkbenchView.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -82,6 +97,9 @@
 			name = PersonalKnowledgeNote;
 			packageProductDependencies = (
 				1A69319E3A18A946B9A9CA8F /* AppSupport */,
+				0E61813C13E9400699318865 /* DocumentImport */,
+				3C0FF6F92630F5761683F524 /* KnowledgeCore */,
+				0292A62C3A22626F9D331C48 /* LocalLibrary */,
 			);
 			productName = PersonalKnowledgeNote;
 			productReference = 64506752E13DA3B4D14F3FCB /* PersonalKnowledgeNote.app */;
@@ -123,8 +141,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E45FB080300A8F0F941BDF0D /* ArtifactSchemeHandler.swift in Sources */,
+				E0FFF842AEAC5FE400A4908E /* ArtifactWebView.swift in Sources */,
 				B2A4D708E95A71B3A94FFD2C /* ImportCenterView.swift in Sources */,
 				748B9C4FA0550826B2D4C613 /* PersonalKnowledgeNoteApp.swift in Sources */,
+				0EE59A0380E6F6910FF5BB7C /* ReadingWorkbenchView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -321,9 +342,21 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		0292A62C3A22626F9D331C48 /* LocalLibrary */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LocalLibrary;
+		};
+		0E61813C13E9400699318865 /* DocumentImport */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DocumentImport;
+		};
 		1A69319E3A18A946B9A9CA8F /* AppSupport */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = AppSupport;
+		};
+		3C0FF6F92630F5761683F524 /* KnowledgeCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = KnowledgeCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
