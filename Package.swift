@@ -78,7 +78,13 @@ let package = Package(
         ),
         .testTarget(
             name: "AppSupportTests",
-            dependencies: ["AppSupport", "DocumentImport", "TestFixtures"]
+            dependencies: [
+                "AppSupport",
+                "DocumentImport",
+                "KnowledgeCore",
+                "LocalLibrary",
+                "TestFixtures",
+            ]
         ),
     ],
     swiftLanguageModes: [.v6]

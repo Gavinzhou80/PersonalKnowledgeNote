@@ -40,7 +40,9 @@ public struct ImportTaskSnapshot: Hashable, Sendable {
 public enum ImportTaskState: Hashable, Sendable {
     case queued(position: Int)
     case running(ImportProgress)
+    case cancelling
     case failed(ImportFailure)
+    case cancelled
     case completed(ImportSuccess)
 }
 
@@ -79,7 +81,7 @@ public enum ImportSuccess: Hashable, Sendable {
 }
 
 public struct ImportFailure: Error, Hashable, Sendable {
-    public enum Code: String, Hashable, Sendable {
+    public enum Code: String, Hashable, Codable, Sendable {
         case networkUnavailable
         case requestTimedOut
         case accessDenied
@@ -88,11 +90,12 @@ public struct ImportFailure: Error, Hashable, Sendable {
         case responseTooLarge
         case webpageHasNoReadableArticle
         case artifactConstructionFailed
+        case checkpointInvalid
         case localLibraryUnavailable
         case publicationFailed
     }
 
-    public enum Recovery: String, Hashable, Sendable {
+    public enum Recovery: String, Hashable, Codable, Sendable {
         case retryable
         case requiresNewOriginalSource
         case requiresUserAction
@@ -117,6 +120,18 @@ public struct ImportFailure: Error, Hashable, Sendable {
 public enum ImportTerminalState: Hashable, Sendable {
     case success(ImportSuccess)
     case failure(ImportFailure)
+    case cancelled
+}
+
+public enum ImportTaskControlError: Error, Hashable, Sendable {
+    case taskNotFound
+    case invalidState
+    case retryNotAllowed
+    case tooLate
+}
+
+public enum DocumentImportAvailabilityError: Error, Hashable, Sendable {
+    case localLibraryUnavailable
 }
 
 public enum ImportSubmissionError: Error, Equatable, Sendable {

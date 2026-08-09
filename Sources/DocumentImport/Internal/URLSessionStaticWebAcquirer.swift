@@ -49,6 +49,7 @@ struct URLSessionStaticWebAcquirer: WebAcquiring {
         )
 
         let receiver = BoundedWebResponseReceiver(
+            sourceURL: url,
             maximumResponseBytes: maximumResponseBytes
         )
         let session = URLSession(
@@ -63,6 +64,7 @@ struct URLSessionStaticWebAcquirer: WebAcquiring {
 private final class BoundedWebResponseReceiver: NSObject,
     URLSessionDataDelegate, @unchecked Sendable
 {
+    private let sourceURL: URL
     private let maximumResponseBytes: Int
     private let lock = NSLock()
     private var continuation: CheckedContinuation<AcquiredWebPage, Error>?
@@ -72,7 +74,8 @@ private final class BoundedWebResponseReceiver: NSObject,
     private var taskWasCancelled = false
     private weak var session: URLSession?
 
-    init(maximumResponseBytes: Int) {
+    init(sourceURL: URL, maximumResponseBytes: Int) {
+        self.sourceURL = sourceURL
         self.maximumResponseBytes = maximumResponseBytes
     }
 
@@ -186,9 +189,13 @@ private final class BoundedWebResponseReceiver: NSObject,
             }
             return .success(
                 AcquiredWebPage(
+                    sourceURL: sourceURL,
                     finalURL: finalURL,
                     mimeType: mimeType,
-                    responseBytes: bytes
+                    textEncodingName: normalizedWebCharsetName(
+                        response.textEncodingName
+                    ),
+                    bytes: bytes
                 )
             )
         }

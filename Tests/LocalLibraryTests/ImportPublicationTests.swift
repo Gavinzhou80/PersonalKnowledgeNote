@@ -374,7 +374,7 @@ func finishRejectsInvalidStagingBeforeFingerprintReservation(
     }
 
     let afterFailure = try await first.workspace.snapshot()
-    #expect(afterFailure.state == .working)
+    #expect(afterFailure.state == .running)
     #expect(afterFailure.revision == first.revision)
     #expect(
         try await first.library.sourceDocument(

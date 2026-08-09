@@ -6,11 +6,14 @@ public actor LocalLibrary {
     private let database: LibraryDatabase
     private let managedArtifacts: ManagedArtifacts
     private let publicationCoordinator: PublicationCoordinator
+    private let checkpointArtifactFaultInjector:
+        CheckpointArtifactFaultInjector
 
     private init(
         database: LibraryDatabase,
         managedArtifacts: ManagedArtifacts,
-        faultInjector: PublicationFaultInjector
+        faultInjector: PublicationFaultInjector,
+        checkpointArtifactFaultInjector: CheckpointArtifactFaultInjector
     ) {
         self.database = database
         self.managedArtifacts = managedArtifacts
@@ -19,12 +22,14 @@ public actor LocalLibrary {
             managedArtifacts: managedArtifacts,
             faultInjector: faultInjector
         )
+        self.checkpointArtifactFaultInjector = checkpointArtifactFaultInjector
     }
 
     public static func open(at root: URL) async throws -> LocalLibrary {
         try open(
             at: root,
-            faultInjector: .none
+            faultInjector: .none,
+            checkpointArtifactFaultInjector: .none
         )
     }
 
@@ -62,19 +67,62 @@ public actor LocalLibrary {
         }
     }
 
+    package static func loadUnmanagedCheckpointPackage(
+        at packageURL: URL
+    ) throws -> VerifiedCheckpointPackage {
+        try withLocalLibraryErrorTranslation {
+            let inspectionRoot = FileManager.default.temporaryDirectory
+                .appending(
+                    path: "UnmanagedCheckpointInspection-\(UUID().uuidString)"
+                )
+            let checkpointsRoot = inspectionRoot.appending(path: "Checkpoints")
+            do {
+                try FileManager.default.createDirectory(
+                    at: checkpointsRoot,
+                    withIntermediateDirectories: true
+                )
+                let fileSystem = try CheckpointFileSystem(
+                    libraryRoot: inspectionRoot,
+                    checkpointsRoot: checkpointsRoot,
+                    faultInjector: .none
+                )
+                let taskID = ImportTaskID()
+                let artifactID = UUID()
+                let descriptor = try fileSystem.copyPackage(
+                    at: packageURL,
+                    taskID: taskID,
+                    artifactID: artifactID
+                )
+                let package = try fileSystem.loadPackage(
+                    taskID: taskID,
+                    artifactID: artifactID,
+                    expectedDescriptor: descriptor
+                )
+                try FileManager.default.removeItem(at: inspectionRoot)
+                return package
+            } catch {
+                try? FileManager.default.removeItem(at: inspectionRoot)
+                throw error
+            }
+        }
+    }
+
     static func openForTesting(
         at root: URL,
-        faultInjector: PublicationFaultInjector
+        faultInjector: PublicationFaultInjector = .none,
+        checkpointArtifactFaultInjector: CheckpointArtifactFaultInjector = .none
     ) async throws -> LocalLibrary {
         try open(
             at: root,
-            faultInjector: faultInjector
+            faultInjector: faultInjector,
+            checkpointArtifactFaultInjector: checkpointArtifactFaultInjector
         )
     }
 
     private static func open(
         at root: URL,
-        faultInjector: PublicationFaultInjector
+        faultInjector: PublicationFaultInjector,
+        checkpointArtifactFaultInjector: CheckpointArtifactFaultInjector
     ) throws -> LocalLibrary {
         try withLocalLibraryErrorTranslation {
             try FileManager.default.createDirectory(
@@ -84,11 +132,16 @@ public actor LocalLibrary {
             let database = try LibraryDatabase(
                 url: root.appending(path: "library.sqlite")
             )
-            let managedArtifacts = try ManagedArtifacts(root: root)
+            let managedArtifacts = try ManagedArtifacts(
+                root: root,
+                checkpointArtifactFaultInjector:
+                    checkpointArtifactFaultInjector
+            )
             try PublicationRecovery(
                 database: database,
                 managedArtifacts: managedArtifacts
             ).run()
+            try database.reconcileInterruptedRunners()
             for cleanup in try database.abandonedStagedArtifactCleanups()
             {
                 try managedArtifacts.removeAbandonedStagedArtifact(cleanup)
@@ -96,10 +149,15 @@ public actor LocalLibrary {
             try managedArtifacts.removeUnownedStaging(
                 ownedPaths: database.ownedStagingPaths()
             )
+            try managedArtifacts.removeUnownedCheckpoints(
+                ownedPaths: database.ownedCheckpointPaths()
+            )
             return LocalLibrary(
                 database: database,
                 managedArtifacts: managedArtifacts,
-                faultInjector: faultInjector
+                faultInjector: faultInjector,
+                checkpointArtifactFaultInjector:
+                    checkpointArtifactFaultInjector
             )
         }
     }
@@ -107,19 +165,29 @@ public actor LocalLibrary {
     public func accept(
         _ source: OriginalSource
     ) async throws -> ImportWorkspace {
+        try await acceptWithAuthoritativeSnapshots(source).workspace
+    }
+
+    package func acceptWithAuthoritativeSnapshots(
+        _ source: OriginalSource
+    ) async throws -> DurableImportAcceptance {
         try withLocalLibraryErrorTranslation {
             _ = try SourceColumns.encode(source)
             let taskID = ImportTaskID()
+            let snapshots: [DurableImportSnapshot]
             switch source {
             case .webpage:
-                try database.insertAcceptedTask(id: taskID, source: source)
+                snapshots = try database.insertAcceptedTaskReturningRetained(
+                    id: taskID,
+                    source: source
+                )
             case .pdfFile(let externalPDF):
                 let placement = try managedArtifacts.capturePDF(
                     at: externalPDF,
                     for: taskID
                 )
                 do {
-                    try database.insertAcceptedTask(
+                    snapshots = try database.insertAcceptedTaskReturningRetained(
                         id: taskID,
                         source: source,
                         placement: placement
@@ -131,7 +199,10 @@ public actor LocalLibrary {
                     )
                 }
             }
-            return ImportWorkspace(taskID: taskID, library: self)
+            return DurableImportAcceptance(
+                workspace: ImportWorkspace(taskID: taskID, library: self),
+                snapshots: snapshots
+            )
         }
     }
 
@@ -142,6 +213,45 @@ public actor LocalLibrary {
             return try database.recoverableTasks().map {
                 ImportWorkspace(taskID: $0.taskID, library: self)
             }
+        }
+    }
+
+    package func retainedImports() throws -> [DurableImportSnapshot] {
+        try withLocalLibraryErrorTranslation {
+            try database.retainedImports()
+        }
+    }
+
+    package func claimNextRunnable() throws -> DurableQueueClaim? {
+        do {
+            return try database.claimNextRunnable()
+        } catch let error as DatabaseError {
+            if let transient = transientDurableQueueClaimError(for: error) {
+                throw transient
+            }
+            return try withLocalLibraryErrorTranslation {
+                () -> DurableQueueClaim? in
+                throw error
+            }
+        } catch {
+            return try withLocalLibraryErrorTranslation {
+                () -> DurableQueueClaim? in
+                throw error
+            }
+        }
+    }
+
+    package func rollbackClaim(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        previousQueueSequence: UInt64
+    ) throws -> DurableQueueMutation {
+        try withLocalLibraryErrorTranslation {
+            try database.rollbackClaim(
+                taskID: taskID,
+                expectedRevision: expectedRevision,
+                previousQueueSequence: previousQueueSequence
+            )
         }
     }
 
@@ -232,13 +342,80 @@ public actor LocalLibrary {
         }
     }
 
+    package func replaceCheckpointArtifact(
+        packageURL: URL,
+        taskID: ImportTaskID,
+        update: CheckpointUpdate
+    ) throws -> CheckpointArtifactReplacement {
+        try withLocalLibraryErrorTranslation {
+            let placement = try managedArtifacts.copyCheckpointPackage(
+                at: packageURL,
+                for: taskID
+            )
+            let mutation: CheckpointArtifactMutation
+            do {
+                try checkpointArtifactFaultInjector.hit(
+                    .afterNewCopyBeforeDatabaseMutation
+                )
+                mutation = try database.replaceCheckpointArtifact(
+                    taskID: taskID,
+                    placement: placement,
+                    update: update,
+                    faultInjector: checkpointArtifactFaultInjector
+                )
+            } catch {
+                try? managedArtifacts.removeCheckpointArtifact(
+                    CheckpointArtifactCleanup(placement: placement)
+                )
+                throw error
+            }
+            try checkpointArtifactFaultInjector.hit(
+                .afterDatabaseCommitBeforeOldRemoval
+            )
+            if let oldCleanup = mutation.oldCleanup {
+                try managedArtifacts.removeCheckpointArtifact(oldCleanup)
+            }
+            return mutation.replacement
+        }
+    }
+
+    package func loadCheckpointArtifact(
+        _ artifact: ManagedCheckpointArtifact,
+        taskID: ImportTaskID
+    ) throws -> VerifiedCheckpointPackage {
+        try withLocalLibraryErrorTranslation {
+            let placement = try database.ownedCheckpointArtifactPlacement(
+                taskID: taskID,
+                artifact: artifact
+            )
+            return try managedArtifacts.loadCheckpointPackage(placement)
+        }
+    }
+
+    package func removeCheckpointArtifact(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> DurableImportSnapshot {
+        let removal = try withLocalLibraryErrorTranslation {
+            try database.removeCheckpointArtifact(
+                taskID: taskID,
+                expectedRevision: expectedRevision
+            )
+        }
+        try withLocalLibraryErrorTranslation {
+            try managedArtifacts.removeCheckpointArtifact(removal.cleanup)
+        }
+        return removal.snapshot
+    }
+
     package func finish(
         taskID: ImportTaskID,
         candidate: PublicationCandidate,
         expectedRevision: UInt64
     ) throws -> PublicationOutcome {
+        let completion: PublicationCompletion
         do {
-            return try withLocalLibraryErrorTranslation {
+            completion = try withLocalLibraryErrorTranslation {
                 try publicationCoordinator.finish(
                     taskID: taskID,
                     candidate: candidate,
@@ -248,6 +425,91 @@ public actor LocalLibrary {
         } catch let injected as InjectedPublicationFault {
             throw injected.underlying
         }
+        if let cleanup = completion.checkpointCleanup {
+            try? withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeCheckpointArtifact(cleanup)
+            }
+        }
+        return completion.outcome
+    }
+
+    package func recordFailure(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        failure: ImportTaskFailureEnvelope,
+        retainCheckpoint: Bool
+    ) throws -> DurableQueueMutation {
+        let transition = try withLocalLibraryErrorTranslation {
+            try database.recordFailure(
+                taskID: taskID,
+                expectedRevision: expectedRevision,
+                failure: failure,
+                retainCheckpoint: retainCheckpoint
+            )
+        }
+        if let cleanup = transition.checkpointCleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeCheckpointArtifact(cleanup)
+            }
+        }
+        return transition.mutation
+    }
+
+    package func requestCancellation(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> DurableQueueMutation {
+        try withLocalLibraryErrorTranslation {
+            try database.requestCancellation(
+                taskID: taskID,
+                expectedRevision: expectedRevision
+            )
+        }
+    }
+
+    package func finishCancellation(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) throws -> DurableImportSnapshot {
+        let completion = try withLocalLibraryErrorTranslation {
+            try database.finishCancellation(
+                taskID: taskID,
+                expectedRevision: expectedRevision
+            )
+        }
+        if let cleanup = completion.checkpointCleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeCheckpointArtifact(cleanup)
+            }
+        }
+        if let stagedCleanup = completion.stagedCleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeAbandonedStagedArtifact(
+                    stagedCleanup
+                )
+            }
+        }
+        return completion.snapshot
+    }
+
+    package func retryImport(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64,
+        checkpointDisposition: RetryCheckpointDisposition
+    ) throws -> DurableImportSnapshot {
+        let transition = try withLocalLibraryErrorTranslation {
+            try database.retryImport(
+                taskID: taskID,
+                expectedRevision: expectedRevision,
+                checkpointDisposition: checkpointDisposition
+            )
+        }
+        if let cleanup = transition.checkpointCleanup {
+            try withLocalLibraryErrorTranslation {
+                try managedArtifacts.removeCheckpointArtifact(cleanup)
+            }
+        }
+        return transition.snapshot
     }
 
     package func abandon(
@@ -288,6 +550,14 @@ public actor LocalLibrary {
         }
     }
 
+    package func checkpointArtifactCount(
+        taskID: ImportTaskID
+    ) throws -> Int {
+        try withLocalLibraryErrorTranslation {
+            try managedArtifacts.checkpointArtifactCount(for: taskID)
+        }
+    }
+
     private func rethrow(
         _ primaryError: Error,
         afterBestEffortRemovalOf placement: StagedArtifactPlacement
@@ -316,6 +586,17 @@ func isFinalArtifactCorruption(_ error: Error) -> Bool {
     }
 }
 
+func transientDurableQueueClaimError(
+    for error: DatabaseError
+) -> DurableQueueClaimError? {
+    switch error.extendedResultCode {
+    case .SQLITE_BUSY, .SQLITE_LOCKED:
+        return .transientDatabaseContention
+    default:
+        return nil
+    }
+}
+
 private func withLocalLibraryErrorTranslation<Value>(
     _ operation: () throws -> Value
 ) throws -> Value {
@@ -325,6 +606,8 @@ private func withLocalLibraryErrorTranslation<Value>(
         throw error
     } catch let error as InjectedPublicationFault {
         throw error
+    } catch is RowDecodingError {
+        throw LocalLibraryError.corruptLibrary(diagnosticID: UUID())
     } catch let error as DatabaseError {
         switch error.resultCode {
         case .SQLITE_CORRUPT, .SQLITE_NOTADB:

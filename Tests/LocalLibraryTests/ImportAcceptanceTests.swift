@@ -29,7 +29,7 @@ func acceptedImportSurvivesLibraryReopen() async throws {
         .map(\.taskID)
 
     #expect(snapshot.taskID == accepted.taskID)
-    #expect(snapshot.state == .accepted)
+    #expect(snapshot.state == .queued)
     #expect(recoverableTaskIDs.contains(accepted.taskID))
 }
 
@@ -132,7 +132,7 @@ private func acceptInReleasedScope(
     let workspace = try await library.accept(source)
     let snapshot = try await workspace.snapshot()
 
-    #expect(snapshot.state == .accepted)
+    #expect(snapshot.state == .queued)
     #expect(snapshot.revision == 0)
 
     return ReleasedAcceptance(

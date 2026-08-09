@@ -6,6 +6,345 @@ import Testing
 @testable import DocumentImport
 
 @Test
+func recognizedHTTPCharsetTakesPrecedenceOverUTF8AndMetaCharset() throws {
+    let bytes = Data("""
+    <html><head><meta charset="utf-8"></head><body><article><h1>Café</h1></article></body></html>
+    """.utf8)
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/charset")!,
+        textEncodingName: "iso-8859-1"
+    )
+
+    #expect(article.blocks[0].canonicalText == "CafÃ©")
+}
+
+@Test
+func fallsBackToUTF8WhenPersistedCharsetIsUnknownOrAbsent() throws {
+    let bytes = Data("<html><body><article><h1>Café</h1></article></body></html>".utf8)
+    let extractor = StaticArticleExtractor()
+    let sourceURL = URL(string: "https://fixture.invalid/utf8")!
+
+    #expect(try extractor.extract(
+        html: bytes,
+        sourceURL: sourceURL,
+        textEncodingName: "x-unknown"
+    ).blocks[0].canonicalText == "Café")
+    #expect(try extractor.extract(
+        html: bytes,
+        sourceURL: sourceURL,
+        textEncodingName: nil
+    ).blocks[0].canonicalText == "Café")
+}
+
+@Test
+func detectsHTMLMetaCharsetWithinFirst1024Bytes() throws {
+    let prefix = Data("<html><head><meta charset='windows-1252'></head><body><article><h1>".utf8)
+    let suffix = Data("</h1></article></body></html>".utf8)
+    let bytes = prefix + Data([0x93]) + Data("Hello".utf8) + Data([0x94]) + suffix
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/meta")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test(arguments: [
+    "<meta name='description' content='charset=windows-1252'>",
+    "<meta data-note='charset=windows-1252'>",
+])
+func ignoresCharsetTextOutsideARealMetaEncodingDeclaration(
+    meta: String
+) throws {
+    let bytes = Data("<html><head>\(meta)</head><body><article><h1>".utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    #expect(throws: StaticWebBuildError.unreadableHTML) {
+        try StaticArticleExtractor().extract(
+            html: bytes,
+            sourceURL: URL(string: "https://fixture.invalid/not-a-declaration")!
+        )
+    }
+}
+
+@Test
+func skipsUnsupportedMetaCharsetAndUsesALaterSupportedDeclaration() throws {
+    let bytes = Data("""
+    <html><head>
+      <meta charset='x-unknown-future'>
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/later-meta")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test(arguments: [
+    "<MeTa ChArSeT='WiNdOwS-1252'>",
+    "<META HTTP-EQUIV='Content-Type' CONTENT='text/html; ChArSeT=WiNdOwS-1252'>",
+])
+func recognizesOnlyValidCaseInsensitiveHTMLMetaEncodingDeclarations(
+    meta: String
+) throws {
+    let bytes = Data("<html><head>\(meta)</head><body><article><h1>".utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/valid-meta")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test
+func ignoresMetaCharsetDeclarationsInsideHTMLCommentsAndKeepsScanning() throws {
+    let bytes = Data("""
+    <html><head>
+      <!-- <meta charset='iso-8859-1'> -->
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/commented-meta")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test(arguments: [
+    "meta:bogus",
+    "meta-bogus",
+    "metadata",
+])
+func ignoresNonExactMetaLikeTagNamesAndKeepsScanning(
+    invalidTagName: String
+) throws {
+    let bytes = Data("""
+    <html><head>
+      <\(invalidTagName) charset='iso-8859-1'>
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/meta-like")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test(arguments: [
+    #"<div data-note="<meta charset='iso-8859-1'>">ignored</div>"#,
+    #"<div data-note='<meta charset="iso-8859-1">'>ignored</div>"#,
+    #"<!bogus "<meta charset='iso-8859-1'>">"#,
+    #"<?bogus '<meta charset="iso-8859-1">'>"#,
+])
+func ignoresMetaCharsetLiteralsInsideOtherMarkupAndKeepsScanning(
+    misleadingMarkup: String
+) throws {
+    let bytes = Data("""
+    <html><head>
+      \(misleadingMarkup)
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/quoted-meta-literal")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test(arguments: [
+    "<meta http-equiv='refresh' content='text/html; charset=windows-1252'>",
+    "<meta http-equiv='content-type' content='text/html; encoding=windows-1252'>",
+])
+func ignoresMalformedOrMismatchedMetaEncodingPragmas(meta: String) throws {
+    let bytes = Data("<html><head>\(meta)</head><body><article><h1>".utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    #expect(throws: StaticWebBuildError.unreadableHTML) {
+        try StaticArticleExtractor().extract(
+            html: bytes,
+            sourceURL: URL(string: "https://fixture.invalid/bad-pragma")!
+        )
+    }
+}
+
+@Test(arguments: [
+    "<meta foo==charset=utf-16>",
+    "<meta foo===charset='utf-16'>",
+    "<meta foo=`charset=utf-16>",
+])
+func malformedMetaAttributeValuesDoNotCreateCharsetAttributes(
+    malformedMeta: String
+) throws {
+    let bytes = Data("""
+    <html><head>
+      \(malformedMeta)
+      <meta charset='windows-1252'>
+    </head><body><article><h1>
+    """.utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/malformed-attribute")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "“Hello”")
+}
+
+@Test
+func ignoresHTMLMetaCharsetAfterFirst1024Bytes() throws {
+    let bytes = Data(repeating: 0x20, count: 1_024)
+        + Data("<meta charset='windows-1252'><article><h1>".utf8)
+        + Data([0x93])
+        + Data("Hello".utf8)
+        + Data([0x94])
+        + Data("</h1></article>".utf8)
+
+    #expect(throws: StaticWebBuildError.unreadableHTML) {
+        try StaticArticleExtractor().extract(
+            html: bytes,
+            sourceURL: URL(string: "https://fixture.invalid/late-meta")!
+        )
+    }
+}
+
+@Test
+func decodesRepresentativeWindows1252ContentFromHTTPCharset() throws {
+    let bytes = Data("<html><body><article><p>Price ".utf8)
+        + Data([0x80])
+        + Data("10 ".utf8)
+        + Data([0x97])
+        + Data(" today</p></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/windows")!,
+        textEncodingName: "WINDOWS_1252"
+    )
+
+    #expect(article.blocks[0].canonicalText == "Price €10 — today")
+}
+
+@Test(arguments: [
+    "iso-8859-1", "latin1", "l1", "us-ascii", "ascii", "iso-ir-100",
+    "cp1252", "windows-1252",
+])
+func htmlHTTPCharsetAliasesUseWindows1252(label: String) throws {
+    let bytes = Data("<html><body><article><p>".utf8)
+        + Data([0x80, 0x20, 0x91])
+        + Data("quoted".utf8)
+        + Data([0x92])
+        + Data("</p></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/http-alias")!,
+        textEncodingName: label
+    )
+
+    #expect(article.blocks[0].canonicalText == "€ ‘quoted’")
+}
+
+@Test(arguments: [
+    "iso-8859-1", "latin1", "l1", "us-ascii", "ascii", "iso-ir-100",
+])
+func htmlMetaCharsetAliasesUseWindows1252(label: String) throws {
+    let bytes = Data("""
+    <html><head><meta charset='\(label)'></head><body><article><p>
+    """.utf8)
+        + Data([0x80, 0x20, 0x91])
+        + Data("quoted".utf8)
+        + Data([0x92])
+        + Data("</p></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/meta-alias")!
+    )
+
+    #expect(article.blocks[0].canonicalText == "€ ‘quoted’")
+}
+
+@Test(arguments: [
+    ("Shift_JIS", Data([0x93, 0xFA, 0x96, 0x7B]), "日本"),
+    ("EUC-JP", Data([0xC6, 0xFC, 0xCB, 0xDC]), "日本"),
+    ("GBK", Data([0xD6, 0xD0, 0xCE, 0xC4]), "中文"),
+])
+func decodesRepresentativePersistedAsianCharsets(
+    charset: String,
+    encodedText: Data,
+    expected: String
+) throws {
+    let bytes = Data("<html><body><article><p>".utf8)
+        + encodedText
+        + Data("</p></article></body></html>".utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/asian-charset")!,
+        textEncodingName: charset
+    )
+
+    #expect(article.blocks[0].canonicalText == expected)
+}
+
+@Test
+func rejectsUnsupportedMalformedHTMLBytes() throws {
+    #expect(throws: StaticWebBuildError.unreadableHTML) {
+        try StaticArticleExtractor().extract(
+            html: Data([0xFF, 0xFE, 0xFD]),
+            sourceURL: URL(string: "https://fixture.invalid/malformed")!,
+            textEncodingName: "x-unknown"
+        )
+    }
+}
+
+@Test
 func extractsRichStaticArticleSemantics() throws {
     let sourceURL = URL(string: "https://fixture.invalid/articles/rich/index.html")!
     let article = try StaticArticleExtractor().extract(

@@ -38,28 +38,217 @@ public struct PublicationCandidate: Sendable {
     }
 }
 
+package enum CheckpointPackageLimits {
+    package static let maximumFileCount = 256
+    package static let maximumDirectoryCount = 64
+    package static let maximumAggregateByteCount: Int64 =
+        16 * 1_024 * 1_024
+    package static let maximumFileByteCount: Int64 = 8 * 1_024 * 1_024
+    package static let maximumDepth = 16
+    package static let maximumRelativePathByteCount = 1_024
+}
+
+package struct CheckpointArtifactDescriptor: Hashable, Codable, Sendable {
+    package let byteCount: Int64
+    package let contentHash: String
+
+    package init(byteCount: Int64, contentHash: String) throws {
+        guard byteCount > 0,
+              byteCount <= CheckpointPackageLimits.maximumAggregateByteCount,
+              contentHash.utf8.count == 64,
+              contentHash.utf8.allSatisfy({ byte in
+                (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                    || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+              })
+        else {
+            throw CheckpointArtifactDescriptorValidationError.invalid
+        }
+        self.byteCount = byteCount
+        self.contentHash = contentHash
+    }
+
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let byteCount = try container.decode(Int64.self, forKey: .byteCount)
+        let contentHash = try container.decode(String.self, forKey: .contentHash)
+        do {
+            try self.init(
+                byteCount: byteCount,
+                contentHash: contentHash
+            )
+        } catch {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Invalid checkpoint artifact descriptor"
+            ))
+        }
+    }
+
+    private enum CheckpointArtifactDescriptorValidationError: Error {
+        case invalid
+    }
+}
+
+package struct ManagedCheckpointArtifact: Hashable, Sendable {
+    package let rawValue: UUID
+    package let descriptor: CheckpointArtifactDescriptor
+
+    package init(
+        rawValue: UUID,
+        descriptor: CheckpointArtifactDescriptor
+    ) {
+        self.rawValue = rawValue
+        self.descriptor = descriptor
+    }
+}
+
+package struct VerifiedCheckpointPackage: Sendable {
+    package let descriptor: CheckpointArtifactDescriptor
+    package let files: [String: Data]
+    package let directories: Set<String>
+
+    package init(
+        descriptor: CheckpointArtifactDescriptor,
+        files: [String: Data],
+        directories: Set<String>
+    ) {
+        self.descriptor = descriptor
+        self.files = files
+        self.directories = directories
+    }
+}
+
+package struct CheckpointArtifactReplacement: Sendable {
+    package let artifact: ManagedCheckpointArtifact
+    package let snapshot: DurableImportSnapshot
+
+    package init(
+        artifact: ManagedCheckpointArtifact,
+        snapshot: DurableImportSnapshot
+    ) {
+        self.artifact = artifact
+        self.snapshot = snapshot
+    }
+}
+
 public struct DurableImportSnapshot: Sendable {
     public let taskID: ImportTaskID
+    package let journalSequence: UInt64
+    package let originalSource: OriginalSource
+    public let queueSequence: UInt64?
     public let attempt: UInt
     public let revision: UInt64
     public let state: ImportTaskState
+    public let failure: ImportTaskFailureEnvelope?
     public let checkpoint: CheckpointEnvelope?
+    package let checkpointOrdinal: UInt64?
+    package let checkpointArtifact: ManagedCheckpointArtifact?
     public let stagedArtifact: StagedArtifact?
+    package let outcome: PublicationOutcome?
+    package let publicationIssues: [KnowledgeCore.ImportIssue]?
 
     package init(
         taskID: ImportTaskID,
+        journalSequence: UInt64,
+        originalSource: OriginalSource,
+        queueSequence: UInt64?,
         attempt: UInt,
         revision: UInt64,
         state: ImportTaskState,
+        failure: ImportTaskFailureEnvelope?,
         checkpoint: CheckpointEnvelope?,
-        stagedArtifact: StagedArtifact?
+        checkpointOrdinal: UInt64? = nil,
+        checkpointArtifact: ManagedCheckpointArtifact?,
+        stagedArtifact: StagedArtifact?,
+        outcome: PublicationOutcome?,
+        publicationIssues: [KnowledgeCore.ImportIssue]? = nil
     ) {
         self.taskID = taskID
+        self.journalSequence = journalSequence
+        self.originalSource = originalSource
+        self.queueSequence = queueSequence
         self.attempt = attempt
         self.revision = revision
         self.state = state
+        self.failure = failure
         self.checkpoint = checkpoint
+        self.checkpointOrdinal = checkpointOrdinal
+        self.checkpointArtifact = checkpointArtifact
         self.stagedArtifact = stagedArtifact
+        self.outcome = outcome
+        self.publicationIssues = publicationIssues
+    }
+
+    package func withPublicationIssues(
+        _ issues: [KnowledgeCore.ImportIssue]?
+    ) -> DurableImportSnapshot {
+        DurableImportSnapshot(
+            taskID: taskID,
+            journalSequence: journalSequence,
+            originalSource: originalSource,
+            queueSequence: queueSequence,
+            attempt: attempt,
+            revision: revision,
+            state: state,
+            failure: failure,
+            checkpoint: checkpoint,
+            checkpointOrdinal: checkpointOrdinal,
+            checkpointArtifact: checkpointArtifact,
+            stagedArtifact: stagedArtifact,
+            outcome: outcome,
+            publicationIssues: issues
+        )
+    }
+}
+
+package struct DurableQueueMutation: Sendable {
+    package let primary: DurableImportSnapshot
+    package let queueUpdates: [DurableImportSnapshot]
+
+    package init(
+        primary: DurableImportSnapshot,
+        queueUpdates: [DurableImportSnapshot]
+    ) {
+        self.primary = primary
+        self.queueUpdates = queueUpdates
+    }
+}
+
+package struct DurableQueueClaim: Sendable {
+    package let claimed: DurableImportSnapshot
+    package let queueUpdates: [DurableImportSnapshot]
+    package let previousQueueSequence: UInt64
+
+    package init(
+        claimed: DurableImportSnapshot,
+        queueUpdates: [DurableImportSnapshot],
+        previousQueueSequence: UInt64
+    ) {
+        self.claimed = claimed
+        self.queueUpdates = queueUpdates
+        self.previousQueueSequence = previousQueueSequence
+    }
+}
+
+package enum DurableQueueClaimError: Error, Equatable, Sendable {
+    case transientDatabaseContention
+}
+
+package enum RetryCheckpointDisposition: Sendable {
+    case retainVerified
+    case clear
+}
+
+package struct DurableImportAcceptance: Sendable {
+    package let workspace: ImportWorkspace
+    package let snapshots: [DurableImportSnapshot]
+
+    package init(
+        workspace: ImportWorkspace,
+        snapshots: [DurableImportSnapshot]
+    ) {
+        self.workspace = workspace
+        self.snapshots = snapshots
     }
 }
 

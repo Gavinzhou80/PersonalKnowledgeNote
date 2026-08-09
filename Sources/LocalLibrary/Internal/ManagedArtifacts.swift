@@ -2,6 +2,79 @@ import Darwin
 import Foundation
 import KnowledgeCore
 
+enum CheckpointArtifactFaultPoint: Equatable, Sendable {
+    case afterOpeningCheckpointSourceRootBeforeTraversal
+    case beforeOpeningCheckpointSourceChild
+    case afterOpeningCheckpointSourceFileBeforeRead
+    case afterPinningManagedCheckpointTaskDirectory
+    case beforeOpeningManagedCheckpointChild
+    case afterNewCopyBeforeDatabaseMutation
+    case afterCheckpointArtifactRowMutationBeforeTaskUpdate
+    case afterDatabaseCommitBeforeOldRemoval
+}
+
+struct CheckpointArtifactFaultInjector: Sendable {
+    private let injection:
+        @Sendable (CheckpointArtifactFaultPoint) throws -> Void
+
+    init(
+        _ injection: @escaping @Sendable (
+            CheckpointArtifactFaultPoint
+        ) throws -> Void
+    ) {
+        self.injection = injection
+    }
+
+    func hit(_ point: CheckpointArtifactFaultPoint) throws {
+        try injection(point)
+    }
+
+    static let none = CheckpointArtifactFaultInjector { _ in }
+}
+
+struct CheckpointArtifactPlacement: Sendable {
+    let taskID: ImportTaskID
+    let artifact: ManagedCheckpointArtifact
+    let path: ManagedArtifactPath
+
+    var relativePath: String { path.relativePath }
+
+    init(
+        taskID: ImportTaskID,
+        artifact: ManagedCheckpointArtifact,
+        path: ManagedArtifactPath
+    ) throws {
+        guard artifact.descriptor.byteCount > 0,
+              !artifact.descriptor.contentHash.isEmpty,
+              path == .checkpoint(
+                taskID: taskID,
+                artifactID: artifact.rawValue
+              )
+        else {
+            throw corruptManagedArtifactOwnership()
+        }
+        self.taskID = taskID
+        self.artifact = artifact
+        self.path = path
+    }
+
+    init(
+        taskID: ImportTaskID,
+        artifact: ManagedCheckpointArtifact,
+        relativePath: String
+    ) throws {
+        try self.init(
+            taskID: taskID,
+            artifact: artifact,
+            path: ManagedArtifactPath.parse(relativePath)
+        )
+    }
+}
+
+struct CheckpointArtifactCleanup: Sendable {
+    let placement: CheckpointArtifactPlacement
+}
+
 struct StagedArtifactPlacement: Sendable {
     let artifact: StagedArtifact
     let path: ManagedArtifactPath
@@ -110,9 +183,13 @@ struct ManagedArtifacts {
     private let root: URL
     private let stagingRoot: URL
     private let artifactsRoot: URL
+    private let checkpointFileSystem: CheckpointFileSystem
     private let quarantineRoot: URL
 
-    init(root requestedRoot: URL) throws {
+    init(
+        root requestedRoot: URL,
+        checkpointArtifactFaultInjector: CheckpointArtifactFaultInjector = .none
+    ) throws {
         let fileManager = FileManager.default
         let standardizedRoot = requestedRoot.standardizedFileURL
         try fileManager.createDirectory(
@@ -128,6 +205,10 @@ struct ManagedArtifacts {
             path: ManagedArtifactPath.Scope.artifacts.rawValue,
             directoryHint: .isDirectory
         )
+        let requestedCheckpointsRoot = resolvedRoot.appending(
+            path: ManagedArtifactPath.Scope.checkpoints.rawValue,
+            directoryHint: .isDirectory
+        )
         let requestedQuarantineRoot = resolvedRoot.appending(
             path: "Quarantine",
             directoryHint: .isDirectory
@@ -141,11 +222,16 @@ struct ManagedArtifacts {
             withIntermediateDirectories: true
         )
         try fileManager.createDirectory(
+            at: requestedCheckpointsRoot,
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
             at: requestedQuarantineRoot,
             withIntermediateDirectories: true
         )
         guard try !Self.isSymbolicLink(requestedStagingRoot),
               try !Self.isSymbolicLink(requestedArtifactsRoot),
+              try !Self.isSymbolicLink(requestedCheckpointsRoot),
               try !Self.isSymbolicLink(requestedQuarantineRoot)
         else {
             throw LocalLibraryError.artifactMissing
@@ -154,21 +240,31 @@ struct ManagedArtifacts {
             .resolvingSymlinksInPath()
         let resolvedArtifactsRoot = requestedArtifactsRoot
             .resolvingSymlinksInPath()
+        let resolvedCheckpointsRoot = requestedCheckpointsRoot
+            .resolvingSymlinksInPath()
         let resolvedQuarantineRoot = requestedQuarantineRoot
             .resolvingSymlinksInPath()
         guard resolvedStagingRoot == requestedStagingRoot.standardizedFileURL,
               resolvedArtifactsRoot
                 == requestedArtifactsRoot.standardizedFileURL,
+              resolvedCheckpointsRoot
+                == requestedCheckpointsRoot.standardizedFileURL,
               resolvedQuarantineRoot
                 == requestedQuarantineRoot.standardizedFileURL,
               resolvedStagingRoot != resolvedArtifactsRoot,
+              resolvedStagingRoot != resolvedCheckpointsRoot,
               resolvedStagingRoot != resolvedQuarantineRoot,
+              resolvedArtifactsRoot != resolvedCheckpointsRoot,
               resolvedArtifactsRoot != resolvedQuarantineRoot,
+              resolvedCheckpointsRoot != resolvedQuarantineRoot,
               Self.isStrictDescendant(
             resolvedStagingRoot,
             of: resolvedRoot
         ), Self.isStrictDescendant(
             resolvedArtifactsRoot,
+            of: resolvedRoot
+        ), Self.isStrictDescendant(
+            resolvedCheckpointsRoot,
             of: resolvedRoot
         ), Self.isStrictDescendant(
             resolvedQuarantineRoot,
@@ -180,6 +276,11 @@ struct ManagedArtifacts {
         root = resolvedRoot
         stagingRoot = resolvedStagingRoot
         artifactsRoot = resolvedArtifactsRoot
+        checkpointFileSystem = try CheckpointFileSystem(
+            libraryRoot: resolvedRoot,
+            checkpointsRoot: resolvedCheckpointsRoot,
+            faultInjector: checkpointArtifactFaultInjector
+        )
         quarantineRoot = resolvedQuarantineRoot
         try ManagedArtifactPayload.synchronizeDirectory(resolvedRoot)
     }
@@ -221,6 +322,61 @@ struct ManagedArtifacts {
             kind: .pdf,
             expectsDirectory: false,
             taskID: taskID
+        )
+    }
+
+    func copyCheckpointPackage(
+        at source: URL,
+        for taskID: ImportTaskID
+    ) throws -> CheckpointArtifactPlacement {
+        let artifactID = UUID()
+        let path = ManagedArtifactPath.checkpoint(
+            taskID: taskID,
+            artifactID: artifactID
+        )
+        let descriptor = try checkpointFileSystem.copyPackage(
+            at: source,
+            taskID: taskID,
+            artifactID: artifactID
+        )
+        return try CheckpointArtifactPlacement(
+            taskID: taskID,
+            artifact: ManagedCheckpointArtifact(
+                rawValue: artifactID,
+                descriptor: descriptor
+            ),
+            path: path
+        )
+    }
+
+    func loadCheckpointPackage(
+        _ placement: CheckpointArtifactPlacement
+    ) throws -> VerifiedCheckpointPackage {
+        try checkpointFileSystem.loadPackage(
+            taskID: placement.taskID,
+            artifactID: placement.artifact.rawValue,
+            expectedDescriptor: placement.artifact.descriptor
+        )
+    }
+
+    func removeCheckpointArtifact(
+        _ cleanup: CheckpointArtifactCleanup
+    ) throws {
+        try checkpointFileSystem.removePackage(
+            taskID: cleanup.placement.taskID,
+            artifactID: cleanup.placement.artifact.rawValue
+        )
+    }
+
+    func checkpointArtifactCount(for taskID: ImportTaskID) throws -> Int {
+        try checkpointFileSystem.packageCount(taskID: taskID)
+    }
+
+    func removeUnownedCheckpoints(
+        ownedPaths: Set<ManagedArtifactPath>
+    ) throws {
+        try checkpointFileSystem.removeUnownedPackages(
+            ownedPaths: ownedPaths
         )
     }
 
@@ -446,6 +602,12 @@ struct ManagedArtifacts {
     }
 
     func exists(_ path: ManagedArtifactPath) throws -> Bool {
+        if case .checkpoint(let taskID, let artifactID) = path {
+            return try checkpointFileSystem.packageExists(
+                taskID: taskID,
+                artifactID: artifactID
+            )
+        }
         let managedURL = try resolve(path)
         return FileManager.default.fileExists(atPath: managedURL.path)
     }
@@ -763,9 +925,15 @@ struct ManagedArtifacts {
     }
 
     private func resolve(_ path: ManagedArtifactPath) throws -> URL {
-        let scopeRoot = path.scope == .staging
-            ? stagingRoot
-            : artifactsRoot
+        let scopeRoot: URL
+        switch path.scope {
+        case .staging:
+            scopeRoot = stagingRoot
+        case .artifacts:
+            scopeRoot = artifactsRoot
+        case .checkpoints:
+            throw LocalLibraryError.artifactMissing
+        }
         let components = path.identityComponents
         try rejectSymbolicLinks(
             from: scopeRoot,
@@ -785,7 +953,8 @@ struct ManagedArtifacts {
         }
         try rejectSymbolicLinks(from: scopeRoot, components: [])
         let payload = resolved.appending(path: "payload")
-        if FileManager.default.fileExists(atPath: resolved.path) {
+        if path.scope != .checkpoints,
+           FileManager.default.fileExists(atPath: resolved.path) {
             guard try !Self.isSymbolicLink(payload),
                   payload.resolvingSymlinksInPath()
                     == payload.standardizedFileURL

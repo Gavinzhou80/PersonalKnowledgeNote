@@ -17,4 +17,12 @@ public struct ImportTaskHandle: Sendable {
     public func value() async -> ImportTerminalState {
         await owner.value(for: id)
     }
+
+    public func cancel() async throws {
+        try await owner.cancel(taskID: id)
+    }
+
+    public func retry() async throws {
+        try await owner.retry(taskID: id)
+    }
 }

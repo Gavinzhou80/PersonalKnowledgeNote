@@ -1,6 +1,9 @@
 import Foundation
-import LocalLibrary
+import KnowledgeCore
+@testable import LocalLibrary
+import Synchronization
 import TestFixtures
+import Testing
 @testable import DocumentImport
 
 func makeTemporaryDocumentImportRoot() throws -> URL {
@@ -72,6 +75,379 @@ enum FixtureWebAcquisitionError: Error {
     case unavailable
 }
 
+actor CountingWebAcquirer: WebAcquiring {
+    enum Mode: Sendable {
+        case normal
+        case failingIfCalled
+        case blocking
+    }
+
+    private let html: Data
+    private let mode: Mode
+    private var released = false
+    private(set) var callCount = 0
+
+    init(mode: Mode = .normal) throws {
+        html = try Data(contentsOf: FixtureCatalog.webArticleURL)
+        self.mode = mode
+    }
+
+    func acquire(_ url: URL) async throws -> AcquiredWebPage {
+        callCount += 1
+        switch mode {
+        case .normal:
+            return AcquiredWebPage(sourceURL: url, html: html)
+        case .failingIfCalled:
+            throw FixtureWebAcquisitionError.unavailable
+        case .blocking:
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !released {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else {
+                    throw FixtureWebAcquisitionError.unavailable
+                }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+            return AcquiredWebPage(sourceURL: url, html: html)
+        }
+    }
+
+    func release() {
+        released = true
+    }
+}
+
+actor CountingWebBuilder {
+    enum Mode: Sendable {
+        case normal
+        case failingIfCalled
+    }
+
+    private let mode: Mode
+    private(set) var callCount = 0
+
+    init(mode: Mode = .normal) {
+        self.mode = mode
+    }
+
+    func build(
+        _ page: AcquiredWebPage,
+        documentID: SourceDocumentID
+    ) async throws -> StaticWebImportProduct {
+        callCount += 1
+        guard mode == .normal else {
+            throw StaticWebBuildError.cannotWritePackage
+        }
+        return try await StaticWebDocumentBuilder().build(
+            page,
+            documentID: documentID
+        )
+    }
+}
+
+final class ImportRunnerCrashInjector: Sendable {
+    private let terminatedFlag = Atomic(false)
+    private let armedFlag: Atomic<Bool>
+    private let crashPoint: T05CrashPoint?
+
+    init(crashPoint: T05CrashPoint?, armed: Bool = true) {
+        self.crashPoint = crashPoint
+        self.armedFlag = Atomic(armed)
+    }
+
+    /// Lets a test arm the injection mid-run, so earlier tasks reach their
+    /// terminal states before the crash fires for a later task.
+    func arm() {
+        armedFlag.store(true, ordering: .sequentiallyConsistent)
+    }
+
+    func hit(_ point: T05CrashPoint) throws {
+        guard point == crashPoint else { return }
+        guard armedFlag.load(ordering: .sequentiallyConsistent) else { return }
+        terminatedFlag.store(true, ordering: .sequentiallyConsistent)
+        throw ImportTaskRunnerInterruption.injectedProcessTermination
+    }
+
+    func matchesPublicationFault(_ point: PublicationFaultPoint) -> Bool {
+        guard let crashPoint else { return false }
+        return crashPoint.publicationFaultPoint == point
+    }
+
+    func waitForInjectedTermination() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while true {
+            if terminatedFlag.load(ordering: .sequentiallyConsistent) {
+                return
+            }
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+}
+
+struct RecoveryHarness {
+    let root: URL
+    let articleURL: URL
+    let firstImporter: DocumentImport
+    let acquirer: CountingWebAcquirer
+    let builder: CountingWebBuilder
+    let crashInjector: ImportRunnerCrashInjector
+    let crashPoint: T05CrashPoint?
+
+    static func make(
+        crashPoint: T05CrashPoint? = nil
+    ) async throws -> RecoveryHarness {
+        let root = try makeTemporaryDocumentImportRoot()
+        let crashInjector = ImportRunnerCrashInjector(crashPoint: crashPoint)
+        let library = try await LocalLibrary.openForTesting(
+            at: root.appending(path: "Library"),
+            faultInjector: PublicationFaultInjector { point in
+                guard crashInjector.matchesPublicationFault(point) else {
+                    return
+                }
+                guard let crashPoint else { return }
+                try crashInjector.hit(crashPoint)
+            }
+        )
+        let acquirer = try CountingWebAcquirer(
+            mode: crashPoint == .duringCancellationCleanup
+                ? .blocking
+                : .normal
+        )
+        let builder = CountingWebBuilder()
+        let importer = DocumentImport(
+            library: library,
+            webAcquirer: acquirer,
+            webDocumentBuilder: { page, documentID in
+                try await builder.build(page, documentID: documentID)
+            },
+            importRunnerBoundaryHook: { point in
+                try crashInjector.hit(point)
+            }
+        )
+        return RecoveryHarness(
+            root: root,
+            articleURL: URL(string: "https://fixture.invalid/article")!,
+            firstImporter: importer,
+            acquirer: acquirer,
+            builder: builder,
+            crashInjector: crashInjector,
+            crashPoint: crashPoint
+        )
+    }
+
+    func reopenImporter(
+        acquirer acquirerMode: CountingWebAcquirer.Mode = .normal,
+        builder builderMode: CountingWebBuilder.Mode = .normal
+    ) async throws -> DocumentImport {
+        let library = try await LocalLibrary.open(
+            at: root.appending(path: "Library")
+        )
+        let reopenedAcquirer = try CountingWebAcquirer(mode: acquirerMode)
+        let reopenedBuilder = CountingWebBuilder(mode: builderMode)
+        return DocumentImport(
+            library: library,
+            webAcquirer: reopenedAcquirer,
+            webDocumentBuilder: { page, documentID in
+                try await reopenedBuilder.build(
+                    page,
+                    documentID: documentID
+                )
+            }
+        )
+    }
+}
+
+extension T05CrashPoint {
+    var publicationFaultPoint: PublicationFaultPoint? {
+        switch self {
+        case .afterPublicationIntent:
+            return .afterIntentCommit
+        case .afterArtifactMove:
+            return .afterArtifactMove
+        case .afterVisibilityCommit:
+            return .afterVisibilityCommit
+        case .afterAcceptance, .afterAcquiredCheckpoint,
+             .afterPreparedCheckpoint, .duringCancellationCleanup:
+            return nil
+        }
+    }
+}
+
+struct ReopenedRecoveryHarness {
+    let importer: DocumentImport
+    let library: LocalLibrary
+    let visibleDocumentCount: Int
+    let unownedStagingCount: Int
+
+    func checkpointArtifactCount(
+        _ taskID: ImportTaskID
+    ) async throws -> Int {
+        try await library.checkpointArtifactCount(taskID: taskID)
+    }
+}
+
+extension RecoveryHarness {
+    func runUntilInjectedTermination() async throws -> ImportTaskID {
+        let handle = try await firstImporter.submit(
+            .webpage(articleURL)
+        )
+        if crashPoint == .duringCancellationCleanup {
+            var remainingAttempts = 10
+            while true {
+                do {
+                    try await firstImporter.cancel(taskID: handle.id)
+                    break
+                } catch ImportTaskControlError.invalidState {
+                    remainingAttempts -= 1
+                    guard remainingAttempts > 0 else {
+                        throw DurableQueueTestError.timeout
+                    }
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+            }
+        }
+        try await crashInjector.waitForInjectedTermination()
+        return handle.id
+    }
+
+    func reopen() async throws -> ReopenedRecoveryHarness {
+        let libraryRoot = root.appending(path: "Library")
+        let library = try await LocalLibrary.open(at: libraryRoot)
+        let acquirer = try CountingWebAcquirer()
+        let builder = CountingWebBuilder()
+        let importer = DocumentImport(
+            library: library,
+            webAcquirer: acquirer,
+            webDocumentBuilder: { page, documentID in
+                try await builder.build(page, documentID: documentID)
+            }
+        )
+        let visibleDocumentCount = try managedDirectoryNames(
+            at: libraryRoot.appending(path: "Artifacts")
+        ).count
+        let retainedTaskIDs = Set(
+            try await library.retainedImports().map(\.taskID)
+        )
+        let unownedStagingCount = try managedDirectoryNames(
+            at: libraryRoot.appending(path: "Staging")
+        ).filter { name in
+            guard let uuid = UUID(uuidString: name) else {
+                return true
+            }
+            return !retainedTaskIDs.contains(ImportTaskID(uuid))
+        }.count
+        return ReopenedRecoveryHarness(
+            importer: importer,
+            library: library,
+            visibleDocumentCount: visibleDocumentCount,
+            unownedStagingCount: unownedStagingCount
+        )
+    }
+}
+
+private func managedDirectoryNames(at url: URL) throws -> [String] {
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        return []
+    }
+    return try FileManager.default.contentsOfDirectory(
+        at: url,
+        includingPropertiesForKeys: [.isDirectoryKey]
+    ).filter { entry in
+        (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?
+            .isDirectory == true
+    }.map(\.lastPathComponent)
+}
+
+extension ImportTerminalState {
+    func isExpectedFor(_ point: T05CrashPoint) -> Bool {
+        switch point {
+        case .duringCancellationCleanup:
+            return self == .cancelled
+        default:
+            return isSuccess
+        }
+    }
+}
+
+func corruptManagedCheckpointPayload(under root: URL) throws {
+    let libraryRoot = root.appending(path: "Library")
+    guard let payloadURL = FileManager.default.enumerator(
+        at: libraryRoot,
+        includingPropertiesForKeys: [.isRegularFileKey]
+    )?.compactMap({ entry -> URL? in
+        guard let url = entry as? URL,
+              url.lastPathComponent == "response.bin"
+        else {
+            return nil
+        }
+        return url
+    }).first else {
+        throw DurableQueueTestError.timeout
+    }
+    var data = try Data(contentsOf: payloadURL)
+    data.append(0x00)
+    try data.write(to: payloadURL)
+}
+
+extension ImportTerminalState {
+    var isSuccess: Bool {
+        if case .success = self {
+            return true
+        }
+        return false
+    }
+
+    var isRetryableFailure: Bool {
+        guard case .failure(let failure) = self else {
+            return false
+        }
+        return failure.recovery == .retryable
+    }
+}
+
+actor RetryableFailureGate {
+    private struct Entry {
+        let blocksTerminalDelivery: Bool
+    }
+
+    private var entries: [URL: Entry] = [:]
+    private var released = false
+    private(set) var startedTaskIDs: [ImportTaskID] = []
+
+    func mark(_ url: URL, blocksTerminalDelivery: Bool) {
+        entries[url] = Entry(blocksTerminalDelivery: blocksTerminalDelivery)
+    }
+
+    func release() {
+        released = true
+    }
+
+    func runIfMarked(_ workspace: ImportWorkspace) async throws -> Bool {
+        let snapshot = try await workspace.snapshot()
+        guard case .webpage(let url) = snapshot.originalSource,
+              let entry = entries[url]
+        else {
+            return false
+        }
+        startedTaskIDs.append(workspace.taskID)
+        if entry.blocksTerminalDelivery && !released {
+            let deadline = ContinuousClock.now + .seconds(1)
+            while !released {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else {
+                    throw DurableQueueTestError.timeout
+                }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+        }
+        throw WebAcquisitionError.networkUnavailable
+    }
+}
+
 struct ThrowingWebAcquirer: WebAcquiring {
     func acquire(_ url: URL) async throws -> AcquiredWebPage {
         throw FixtureWebAcquisitionError.unavailable
@@ -105,4 +481,580 @@ actor SelectiveWorkspaceSnapshotLoader {
         }
         return try await workspace.snapshot()
     }
+}
+
+actor SelectiveRetainedImportsLoader {
+    private let library: LocalLibrary
+    private let failingCalls: Set<Int>
+    private let successfulSnapshots: [DurableImportSnapshot]?
+    private(set) var callCount = 0
+
+    init(
+        library: LocalLibrary,
+        failingCalls: Set<Int>,
+        successfulSnapshots: [DurableImportSnapshot]? = nil
+    ) {
+        self.library = library
+        self.failingCalls = failingCalls
+        self.successfulSnapshots = successfulSnapshots
+    }
+
+    func load() async throws -> [DurableImportSnapshot] {
+        callCount += 1
+        if failingCalls.contains(callCount) {
+            throw DurableQueueTestError.injectedBootstrapFailure
+        }
+        if let successfulSnapshots { return successfulSnapshots }
+        return try await library.retainedImports()
+    }
+}
+
+enum DurableQueueTestError: Error {
+    case timeout
+    case injectedBootstrapFailure
+}
+
+actor DeterministicRunnerGate {
+    private(set) var startedIDs: [ImportTaskID] = []
+    private(set) var maximumConcurrentRuns = 0
+    private var runningIDs: Set<ImportTaskID> = []
+    private var releasedIDs: Set<ImportTaskID> = []
+
+    func run(_ workspace: ImportWorkspace) async throws {
+        let taskID = workspace.taskID
+        startedIDs.append(taskID)
+        runningIDs.insert(taskID)
+        maximumConcurrentRuns = max(maximumConcurrentRuns, runningIDs.count)
+        defer { runningIDs.remove(taskID) }
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !releasedIDs.contains(taskID) {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+
+        let snapshot = try await workspace.snapshot()
+        try await workspace.abandon(expectedRevision: snapshot.revision)
+    }
+
+    func waitUntilStarted(_ taskID: ImportTaskID) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !startedIDs.contains(taskID) {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func waitUntilStopped(_ taskID: ImportTaskID) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while runningIDs.contains(taskID) {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func release(_ taskID: ImportTaskID) {
+        releasedIDs.insert(taskID)
+    }
+
+    func isStillRunning(_ taskID: ImportTaskID) -> Bool {
+        runningIDs.contains(taskID)
+    }
+}
+
+struct DurableQueueHarness {
+    let root: URL
+    let library: LocalLibrary
+    let importer: DocumentImport
+    let runner: DeterministicRunnerGate
+    let failureGate: RetryableFailureGate
+
+    static func make(
+        preacceptedURLs: [URL] = []
+    ) async throws -> DurableQueueHarness {
+        let root = try makeTemporaryDocumentImportRoot()
+        let library = try await LocalLibrary.open(
+            at: root.appending(path: "Library")
+        )
+        for url in preacceptedURLs {
+            _ = try await library.accept(.webpage(url))
+        }
+        let runner = DeterministicRunnerGate()
+        let failureGate = RetryableFailureGate()
+        let importer = DocumentImport(
+            library: library,
+            webAcquirer: ThrowingWebAcquirer(),
+            importRunner: { workspace in
+                if try await failureGate.runIfMarked(workspace) {
+                    return
+                }
+                try await runner.run(workspace)
+            }
+        )
+        return DurableQueueHarness(
+            root: root,
+            library: library,
+            importer: importer,
+            runner: runner,
+            failureGate: failureGate
+        )
+    }
+
+    func url(_ path: String) -> URL {
+        URL(string: "https://fixture.invalid\(path)")!
+    }
+
+    func submitRetryableFailure(
+        blockTerminalDelivery: Bool = false
+    ) async throws -> ImportTaskHandle {
+        let target = url("/retryable-failure-\(UUID().uuidString)")
+        await failureGate.mark(
+            target,
+            blocksTerminalDelivery: blockTerminalDelivery
+        )
+        return try await importer.submit(.webpage(target))
+    }
+
+    func releaseFailure() async {
+        await failureGate.release()
+    }
+}
+
+func latestSnapshot(
+    _ handle: ImportTaskHandle
+) async throws -> ImportTaskSnapshot {
+    var iterator = handle.updates().makeAsyncIterator()
+    return try #require(await iterator.next())
+}
+
+func currentQueuedPosition(
+    _ handle: ImportTaskHandle
+) async throws -> Int {
+    let snapshot = try await latestSnapshot(handle)
+    guard case .queued(let position) = snapshot.state else {
+        Issue.record("Expected queued task, got \(snapshot.state)")
+        throw DurableQueueTestError.timeout
+    }
+    return position
+}
+
+actor BootstrapLoadProbe {
+    private let library: LocalLibrary
+    private var remainingFailures: Int
+    private(set) var callCount = 0
+
+    init(library: LocalLibrary, failures: Int = 0) {
+        self.library = library
+        remainingFailures = failures
+    }
+
+    func load() async throws -> [DurableImportSnapshot] {
+        callCount += 1
+        if remainingFailures > 0 {
+            remainingFailures -= 1
+            throw DurableQueueTestError.injectedBootstrapFailure
+        }
+        return try await library.retainedImports()
+    }
+
+    func waitForCallCount(_ expected: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount < expected {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+}
+
+actor SuspendedBootstrapLoader {
+    private let library: LocalLibrary
+    private var released = false
+    private(set) var callCount = 0
+
+    init(library: LocalLibrary) {
+        self.library = library
+    }
+
+    func load() async throws -> [DurableImportSnapshot] {
+        callCount += 1
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !released {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        return try await library.retainedImports()
+    }
+
+    func waitUntilCalled() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount == 0 {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func release() {
+        released = true
+    }
+}
+
+actor CountingClaimProbe {
+    private let library: LocalLibrary
+    private(set) var callCount = 0
+
+    init(library: LocalLibrary) {
+        self.library = library
+    }
+
+    func claim() async throws -> DurableQueueClaim? {
+        callCount += 1
+        return try await library.claimNextRunnable()
+    }
+}
+
+actor TaskListEmissionProbe {
+    private(set) var emissions: [[ImportTaskSnapshot]] = []
+
+    func record(_ snapshots: [ImportTaskSnapshot]) {
+        emissions.append(snapshots)
+    }
+
+    func waitForEmissionCount(_ expected: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while emissions.count < expected {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func verifyEmissionCountRemains(
+        _ expected: Int,
+        for duration: Duration
+    ) async throws {
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard emissions.count == expected else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
+actor TaskSnapshotEmissionProbe {
+    private(set) var emissions: [ImportTaskSnapshot] = []
+
+    func record(_ snapshot: ImportTaskSnapshot) {
+        emissions.append(snapshot)
+    }
+
+    func waitForEmissionCount(_ expected: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while emissions.count < expected {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func verifyEmissionCountRemains(
+        _ expected: Int,
+        for duration: Duration
+    ) async throws {
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard emissions.count == expected else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
+actor TransientClaimProbe {
+    private let library: LocalLibrary
+    private var remainingFailures: Int
+    private(set) var callCount = 0
+
+    init(library: LocalLibrary, failures: Int = 1) {
+        self.library = library
+        remainingFailures = failures
+    }
+
+    func claim() async throws -> DurableQueueClaim? {
+        callCount += 1
+        if remainingFailures > 0 {
+            remainingFailures -= 1
+            throw DurableQueueClaimError.transientDatabaseContention
+        }
+        return try await library.claimNextRunnable()
+    }
+}
+
+actor PersistentContentionClaimProbe {
+    private let library: LocalLibrary
+    private var contentionEnabled = true
+    private(set) var callCount = 0
+
+    init(library: LocalLibrary) {
+        self.library = library
+    }
+
+    func claim() async throws -> DurableQueueClaim? {
+        callCount += 1
+        if contentionEnabled {
+            throw DurableQueueClaimError.transientDatabaseContention
+        }
+        return try await library.claimNextRunnable()
+    }
+
+    func waitForCallCount(_ expected: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount < expected {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func verifyCallCountRemains(
+        _ expected: Int,
+        for duration: Duration
+    ) async throws {
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard callCount == expected else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func allowClaims() {
+        contentionEnabled = false
+    }
+}
+
+actor NonTransientClaimProbe {
+    private(set) var callCount = 0
+
+    func claim() throws -> DurableQueueClaim? {
+        callCount += 1
+        throw LocalLibraryError.unavailable
+    }
+
+    func waitUntilCalled() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount == 0 {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func verifyCallCountRemains(
+        _ expected: Int,
+        for duration: Duration
+    ) async throws {
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard callCount == expected else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
+actor RootRemovalClaimProbe {
+    private let library: LocalLibrary
+    private var secondClaimReleased = false
+    private var secondClaimCompleted = false
+    private(set) var callCount = 0
+
+    init(library: LocalLibrary) {
+        self.library = library
+    }
+
+    func claim() async throws -> DurableQueueClaim? {
+        callCount += 1
+        guard callCount == 2 else {
+            return try await library.claimNextRunnable()
+        }
+        defer { secondClaimCompleted = true }
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !secondClaimReleased {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        return try await library.claimNextRunnable()
+    }
+
+    func waitUntilSecondClaimRequested() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount < 2 {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func releaseSecondClaim() {
+        secondClaimReleased = true
+    }
+
+    func waitUntilSecondClaimCompleted() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !secondClaimCompleted {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func verifyCallCountRemains(
+        _ expected: Int,
+        for duration: Duration
+    ) async throws {
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            guard callCount == expected else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
+actor OneShotClaimProbe {
+    private let claimValue: DurableQueueClaim
+    private(set) var callCount = 0
+
+    init(_ claim: DurableQueueClaim) {
+        claimValue = claim
+    }
+
+    func claim() -> DurableQueueClaim? {
+        callCount += 1
+        return callCount == 1 ? claimValue : nil
+    }
+
+    func waitUntilCalled() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while callCount == 0 {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+}
+
+actor ControlledAcceptanceProbe {
+    private let library: LocalLibrary
+    private var callCount = 0
+    private var firstReleased = false
+    private(set) var committedTaskIDs: [ImportTaskID] = []
+
+    init(library: LocalLibrary) {
+        self.library = library
+    }
+
+    func accept(
+        _ source: OriginalSource
+    ) async throws -> DurableImportAcceptance {
+        let callIndex = callCount
+        callCount += 1
+        let acceptance = try await library.acceptWithAuthoritativeSnapshots(
+            source
+        )
+        committedTaskIDs.append(acceptance.workspace.taskID)
+        if callIndex == 0 {
+            let deadline = ContinuousClock.now + .seconds(1)
+            while !firstReleased {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else {
+                    throw DurableQueueTestError.timeout
+                }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+        }
+        return acceptance
+    }
+
+    func waitUntilFirstCommitted() async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while committedTaskIDs.isEmpty {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func releaseFirst() {
+        firstReleased = true
+    }
+}
+
+func waitUntilDurableState(
+    _ expected: KnowledgeCore.ImportTaskState,
+    taskID: ImportTaskID,
+    library: LocalLibrary,
+    minimumRevision: UInt64 = 0
+) async throws -> DurableImportSnapshot {
+    let deadline = ContinuousClock.now + .seconds(1)
+    while ContinuousClock.now < deadline {
+        try Task.checkCancellation()
+        if let snapshot = try await library.retainedImports().first(where: {
+            $0.taskID == taskID
+                && $0.state == expected
+                && $0.revision >= minimumRevision
+        }) {
+            return snapshot
+        }
+        try await Task.sleep(for: .milliseconds(2))
+    }
+    throw DurableQueueTestError.timeout
 }

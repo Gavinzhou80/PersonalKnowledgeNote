@@ -15,6 +15,11 @@ struct ImportTaskRecord:
     var attempt: Int64
     var revision: Int64
     var state: String
+    var journalSequence: Int64?
+    var queueSequence: Int64?
+    var failureCodecVersion: Int64?
+    var failurePayload: Data?
+    var cancellationRequested: Bool
     var checkpointOrdinal: Int64?
     var checkpointCodecVersion: Int64?
     var checkpointPayload: Data?
@@ -28,6 +33,11 @@ struct ImportTaskRecord:
         case attempt
         case revision
         case state
+        case journalSequence = "journal_sequence"
+        case queueSequence = "queue_sequence"
+        case failureCodecVersion = "failure_codec_version"
+        case failurePayload = "failure_payload"
+        case cancellationRequested = "cancellation_requested"
         case checkpointOrdinal = "checkpoint_ordinal"
         case checkpointCodecVersion = "checkpoint_codec_version"
         case checkpointPayload = "checkpoint_payload"
@@ -42,6 +52,26 @@ struct StagedArtifactRecord:
     PersistableRecord
 {
     static let databaseTableName = "staged_artifacts"
+
+    var artifactID: String
+    var taskID: String
+    var descriptorJSON: Data
+    var relativePath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case artifactID = "artifact_id"
+        case taskID = "task_id"
+        case descriptorJSON = "descriptor_json"
+        case relativePath = "relative_path"
+    }
+}
+
+struct CheckpointArtifactRecord:
+    Codable,
+    FetchableRecord,
+    PersistableRecord
+{
+    static let databaseTableName = "checkpoint_artifacts"
 
     var artifactID: String
     var taskID: String
@@ -213,32 +243,121 @@ enum DomainJSON {
     }
 }
 
+extension ImportTaskState {
+    var isValidDurableState: Bool {
+        switch self {
+        case .queued, .running, .cancelling, .failed, .cancelled,
+             .publicationPending, .completed, .abandoned:
+            return true
+        case .accepted, .working:
+            return false
+        }
+    }
+
+    var requiresCancellationRequested: Bool {
+        switch self {
+        case .cancelling, .cancelled:
+            return true
+        case .accepted, .working, .queued, .running, .failed,
+             .publicationPending, .completed, .abandoned:
+            return false
+        }
+    }
+}
+
 extension ImportTaskRecord {
     func snapshot(
-        stagedArtifact: StagedArtifactRecord?
+        stagedArtifact: StagedArtifactRecord?,
+        checkpointArtifact: CheckpointArtifactRecord? = nil
     ) throws -> DurableImportSnapshot {
         guard let rawTaskID = UUID(uuidString: taskID),
+              let rawJournalSequence = journalSequence,
+              let decodedJournalSequence = UInt64(exactly: rawJournalSequence),
+              decodedJournalSequence > 0,
               let decodedAttempt = UInt(exactly: attempt),
               decodedAttempt > 0,
               let decodedRevision = UInt64(exactly: revision),
-              let decodedState = ImportTaskState(rawValue: state)
+              let decodedState = ImportTaskState(rawValue: state),
+              decodedState.isValidDurableState,
+              cancellationRequested
+                == decodedState.requiresCancellationRequested
         else {
             throw corruptLibrary()
         }
 
-        _ = try SourceColumns.decode(kind: sourceKind, value: sourceValue)
+        let originalSource = try SourceColumns.decode(
+            kind: sourceKind,
+            value: sourceValue
+        )
+        let decodedQueueSequence = try decodeQueueSequence(
+            for: decodedState
+        )
+        let failure = try decodeFailure(for: decodedState)
         let checkpoint = try decodeCheckpoint()
+        let decodedCheckpointOrdinal = try decodeCheckpointOrdinal(
+            hasCheckpoint: checkpoint != nil
+        )
+        let managedCheckpointArtifact = try decodeCheckpointArtifact(
+            checkpointArtifact,
+            hasCheckpoint: checkpoint != nil
+        )
         let artifact = try decodeStagedArtifact(stagedArtifact)
         try validateOutcome(for: decodedState)
+        let outcome = try storedOutcome()
 
         return DurableImportSnapshot(
             taskID: ImportTaskID(rawTaskID),
+            journalSequence: decodedJournalSequence,
+            originalSource: originalSource,
+            queueSequence: decodedQueueSequence,
             attempt: decodedAttempt,
             revision: decodedRevision,
             state: decodedState,
+            failure: failure,
             checkpoint: checkpoint,
-            stagedArtifact: artifact
+            checkpointOrdinal: decodedCheckpointOrdinal,
+            checkpointArtifact: managedCheckpointArtifact,
+            stagedArtifact: artifact,
+            outcome: outcome
         )
+    }
+
+    private func decodeQueueSequence(
+        for state: ImportTaskState
+    ) throws -> UInt64? {
+        switch (state, queueSequence) {
+        case (.queued, let rawSequence?):
+            guard let sequence = UInt64(exactly: rawSequence), sequence > 0
+            else {
+                throw corruptLibrary()
+            }
+            return sequence
+        case (.queued, nil), (_, .some):
+            throw corruptLibrary()
+        case (_, nil):
+            return nil
+        }
+    }
+
+    private func decodeFailure(
+        for state: ImportTaskState
+    ) throws -> ImportTaskFailureEnvelope? {
+        switch (state, failureCodecVersion, failurePayload) {
+        case (.failed, let rawVersion?, let payload?):
+            guard let version = UInt16(exactly: rawVersion),
+                  payload.count <= 1_048_576
+            else {
+                throw corruptLibrary()
+            }
+            return ImportTaskFailureEnvelope(
+                codecVersion: version,
+                payload: payload
+            )
+        case (.failed, _, _), (_, .some, _), (_, _, .some):
+            throw corruptLibrary()
+        case (_, nil, nil):
+            return nil
+        }
     }
 
     private func decodeCheckpoint() throws -> CheckpointEnvelope? {
@@ -263,6 +382,23 @@ extension ImportTaskRecord {
         default:
             throw corruptLibrary()
         }
+    }
+
+    private func decodeCheckpointOrdinal(
+        hasCheckpoint: Bool
+    ) throws -> UInt64? {
+        guard hasCheckpoint else {
+            guard checkpointOrdinal == nil else {
+                throw corruptLibrary()
+            }
+            return nil
+        }
+        guard let rawOrdinal = checkpointOrdinal,
+              let ordinal = UInt64(exactly: rawOrdinal)
+        else {
+            throw corruptLibrary()
+        }
+        return ordinal
     }
 
     private func decodeStagedArtifact(
@@ -290,6 +426,37 @@ extension ImportTaskRecord {
         }
     }
 
+    private func decodeCheckpointArtifact(
+        _ record: CheckpointArtifactRecord?,
+        hasCheckpoint: Bool
+    ) throws -> ManagedCheckpointArtifact? {
+        guard let record else {
+            return nil
+        }
+        guard hasCheckpoint,
+              record.taskID == taskID,
+              let rawTaskID = UUID(uuidString: taskID),
+              rawTaskID.uuidString == taskID,
+              let rawArtifactID = UUID(uuidString: record.artifactID),
+              rawArtifactID.uuidString == record.artifactID,
+              try ManagedArtifactPath.parse(record.relativePath)
+                == .checkpoint(
+                    taskID: ImportTaskID(rawTaskID),
+                    artifactID: rawArtifactID
+                )
+        else {
+            throw corruptLibrary()
+        }
+        let descriptor = try DomainJSON.decode(
+            CheckpointArtifactDescriptor.self,
+            from: record.descriptorJSON
+        )
+        return ManagedCheckpointArtifact(
+            rawValue: rawArtifactID,
+            descriptor: descriptor
+        )
+    }
+
     private func validateOutcome(for state: ImportTaskState) throws {
         switch (state, outcomeJSON) {
         case (.completed, let data?):
@@ -302,7 +469,9 @@ extension ImportTaskRecord {
     }
 
     func storedOutcome() throws -> PublicationOutcome? {
-        guard let state = ImportTaskState(rawValue: state) else {
+        guard let state = ImportTaskState(rawValue: state),
+              state.isValidDurableState
+        else {
             throw corruptLibrary()
         }
         switch (state, outcomeJSON) {

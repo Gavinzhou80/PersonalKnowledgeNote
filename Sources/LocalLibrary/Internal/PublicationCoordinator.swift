@@ -9,9 +9,12 @@ struct PublicationCoordinator: Sendable {
         taskID: ImportTaskID,
         candidate: PublicationCandidate,
         expectedRevision: UInt64
-    ) throws -> PublicationOutcome {
+    ) throws -> PublicationCompletion {
         if let outcome = try database.storedOutcome(taskID: taskID) {
-            return outcome
+            return PublicationCompletion(
+                outcome: outcome,
+                checkpointCleanup: nil
+            )
         }
 
         let stagedPlacement = try database.preflightPublication(
@@ -39,7 +42,10 @@ struct PublicationCoordinator: Sendable {
             )
             try faultInjector.hit(.beforeCommittedStagingCleanup)
             try? managedArtifacts.remove(completion.stagedPlacement)
-            return completion.outcome
+            return PublicationCompletion(
+                outcome: completion.outcome,
+                checkpointCleanup: completion.checkpointCleanup
+            )
         case .new(let intent):
             try faultInjector.hit(.afterIntentCommit)
             try managedArtifacts.moveToFinalAtomically(intent)
@@ -47,12 +53,12 @@ struct PublicationCoordinator: Sendable {
             let verifiedPlacement = try managedArtifacts
                 .verifyFinalPublication(intent)
             try faultInjector.hit(.beforeVisibilityCommit)
-            let outcome = try database.finalizePublication(
+            let completion = try database.finalizePublication(
                 candidate: candidate,
                 verifiedPlacement: verifiedPlacement
             )
             try faultInjector.hit(.afterVisibilityCommit)
-            return outcome
+            return completion
         }
     }
 }

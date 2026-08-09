@@ -147,7 +147,7 @@ func provenanceFailureRollsBackDuplicateCompletion(
     )
     let outcome = try await retryWorkspace.finish(
         failed.candidate,
-        expectedRevision: failed.expectedRevision
+        expectedRevision: try await retryWorkspace.snapshot().revision
     )
 
     #expect(
@@ -484,7 +484,7 @@ private func failDuplicateProvenanceTransaction(
     }
 
     let afterFailure = try await fixture.duplicateWorkspace.snapshot()
-    #expect(afterFailure.state == .working)
+    #expect(afterFailure.state == .running)
     #expect(afterFailure.revision == fixture.duplicateRevision)
     #expect(afterFailure.stagedArtifact == fixture.duplicateCandidate.artifact)
     #expect(

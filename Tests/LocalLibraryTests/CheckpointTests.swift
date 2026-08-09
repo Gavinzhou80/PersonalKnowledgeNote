@@ -24,9 +24,9 @@ func checkpointSurvivesReopenAndAdvancesRevision() async throws {
     )
     let snapshot = try await recovered.snapshot()
 
-    #expect(snapshot.revision == accepted.initialRevision + 1)
+    #expect(snapshot.revision == accepted.initialRevision + 2)
     #expect(snapshot.checkpoint == envelope)
-    #expect(snapshot.state == .working)
+    #expect(snapshot.state == .queued)
     do {
         _ = try await recovered.checkpoint(
             CheckpointUpdate(
@@ -321,6 +321,9 @@ func checkpointRejectsPublicationPendingWithoutMutation() async throws {
     let libraryRoot = root.appending(path: "Library")
     let staged = try await stageWebArtifactInReleasedScope(at: root)
     let library = try await LocalLibrary.open(at: libraryRoot)
+    let workspace = try #require(
+        try await library.importWorkspace(id: staged.taskID)
+    )
     try LocalLibraryTestDriver.prepareHiddenPublication(
         at: libraryRoot,
         taskID: staged.taskID,
@@ -334,10 +337,7 @@ func checkpointRejectsPublicationPendingWithoutMutation() async throws {
                 )
             )
         ),
-        expectedRevision: staged.revision
-    )
-    let workspace = try #require(
-        try await library.importWorkspace(id: staged.taskID)
+        expectedRevision: try await workspace.snapshot().revision
     )
     let beforeCheckpoint = try await workspace.snapshot()
 

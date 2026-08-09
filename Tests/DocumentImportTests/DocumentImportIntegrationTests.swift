@@ -68,7 +68,7 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     #expect(queuedList.count == 1)
     #expect(queued.id == handle.id)
     #expect(queued.source == .webpage(sourceURL))
-    #expect(queued.state == .queued(position: 0))
+    #expect(queued.state == .queued(position: 1))
 
     let workspace = try #require(
         try await library.importWorkspace(id: handle.id)
@@ -83,6 +83,16 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
         try await library.sourceDocument(id: fixedDocumentID) == nil
     )
 
+    let claimedList = try #require(await taskLists.next())
+    let claimed = try #require(claimedList.first)
+    #expect(
+        claimed.state == .running(ImportProgress(
+            activity: .acquiringOriginalSource,
+            completedUnitCount: 0,
+            totalUnitCount: nil
+        ))
+    )
+
     let acquiringList = try #require(await taskLists.next())
     let acquiring = try #require(acquiringList.first)
     #expect(acquiringList.count == 1)
@@ -95,7 +105,7 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     )
     let durableAcquiring = try await workspace.snapshot()
     #expect(durableAcquiring.revision == acquiring.revision)
-    #expect(durableAcquiring.state == .working)
+    #expect(durableAcquiring.state == .running)
 
     var handleUpdates = handle.updates().makeAsyncIterator()
     let authoritative = try #require(await handleUpdates.next())
@@ -136,13 +146,14 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     #expect(await handleUpdates.next() == completed)
     #expect(await handleUpdates.next() == nil)
     #expect(
-        [queued, acquiring, constructing, publishing, completed]
+        [queued, claimed, acquiring, constructing, publishing, completed]
             .map(\.revision) ==
-            [queued, acquiring, constructing, publishing, completed]
+            [queued, claimed, acquiring, constructing, publishing, completed]
             .map(\.revision)
             .sorted()
     )
-    #expect(queued.revision < acquiring.revision)
+    #expect(queued.revision < claimed.revision)
+    #expect(claimed.revision < acquiring.revision)
     #expect(acquiring.revision < constructing.revision)
     #expect(constructing.revision < publishing.revision)
     #expect(publishing.revision < completed.revision)
@@ -272,9 +283,11 @@ func genericPostAcceptanceFailureFinishesAndAbandonsTask() async throws {
     #expect(failure.code == .localLibraryUnavailable)
     #expect(failure.recovery == .requiresUserAction)
     #expect(finalSnapshot?.state == .failed(failure))
-    #expect(
-        try await library.importWorkspace(id: handle.id) == nil
+    let snapshots = try await library.retainedImports()
+    let durable = try #require(
+        snapshots.first { $0.taskID == handle.id }
     )
+    #expect(durable.state == .failed)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -307,9 +320,11 @@ func acquisitionFailureIsTerminalTaskDataAfterAcceptance() async throws {
     #expect(failure.code == .networkUnavailable)
     #expect(failure.recovery == .retryable)
     #expect(finalSnapshot?.state == .failed(failure))
-    #expect(
-        try await library.importWorkspace(id: handle.id) == nil
+    let snapshots = try await library.retainedImports()
+    let durable = try #require(
+        snapshots.first { $0.taskID == handle.id }
     )
+    #expect(durable.state == .failed)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -417,7 +432,7 @@ func completedSnapshotFailureStillPublishesSuccessfulTerminal() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
-func initialSnapshotFailureAbandonsAcceptedTask() async throws {
+func initialSnapshotFailureDoesNotAbandonAcceptedTaskBeforeRunnerOwnsIt() async throws {
     let root = try makeTemporaryDocumentImportRoot()
     defer { removeTemporaryDocumentImportRoot(root) }
     let library = try await LocalLibrary.open(
@@ -437,12 +452,15 @@ func initialSnapshotFailureAbandonsAcceptedTask() async throws {
         URL(string: "https://fixture.invalid/initial-snapshot-failure")
     )
 
-    do {
-        _ = try await documentImport.submit(.webpage(sourceURL))
-        Issue.record("Expected initial snapshot failure")
-    } catch let error as ImportSubmissionError {
-        #expect(error == .cannotPersistImportTask)
+    let handle = try await documentImport.submit(.webpage(sourceURL))
+    guard case .failure = await handle.value() else {
+        Issue.record("Expected runner-owned terminal failure")
+        return
     }
 
-    #expect(try await library.recoverableImports().isEmpty)
+    let snapshots = try await library.retainedImports()
+    let durable = try #require(
+        snapshots.first { $0.taskID == handle.id }
+    )
+    #expect(durable.state == .failed)
 }

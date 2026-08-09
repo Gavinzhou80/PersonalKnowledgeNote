@@ -64,11 +64,16 @@ struct RealStaticWebImportIntegrationTests {
         let terminal = await handle.value()
         let documentID = try #require(publishedDocumentID(terminal))
         #expect(terminal == .success(.published(documentID: documentID, issues: [])))
-        #expect(snapshots.compactMap(\.activity) == [
-            .acquiringOriginalSource,
-            .constructingSourceDocument,
-            .publishing,
-        ])
+        let activities = snapshots.compactMap(\.activity)
+        #expect(activities.first == .acquiringOriginalSource)
+        #expect(
+            activities.drop(while: {
+                $0 == .acquiringOriginalSource
+            }) == [
+                .constructingSourceDocument,
+                .publishing,
+            ]
+        )
         #expect(snapshots.last?.state == .completed(
             .published(documentID: documentID, issues: [])
         ))

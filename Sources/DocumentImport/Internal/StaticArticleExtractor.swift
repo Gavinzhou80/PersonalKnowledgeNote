@@ -9,18 +9,28 @@ struct EvidenceExtractionMetrics: Sendable {
 }
 
 struct StaticArticleExtractor: Sendable {
-    func extract(html: Data, sourceURL: URL) throws -> ExtractedWebArticle {
-        try extractWithMetrics(html: html, sourceURL: sourceURL).article
+    func extract(
+        html: Data,
+        sourceURL: URL,
+        textEncodingName: String? = nil
+    ) throws -> ExtractedWebArticle {
+        try extractWithMetrics(
+            html: html,
+            sourceURL: sourceURL,
+            textEncodingName: textEncodingName
+        ).article
     }
 
     func extractWithMetrics(
         html: Data,
-        sourceURL: URL
+        sourceURL: URL,
+        textEncodingName: String? = nil
     ) throws -> (article: ExtractedWebArticle, metrics: EvidenceExtractionMetrics) {
         var metrics = EvidenceExtractionMetrics()
         let article = try extractArticle(
             html: html,
             sourceURL: sourceURL,
+            textEncodingName: textEncodingName,
             metrics: &metrics
         )
         return (article, metrics)
@@ -29,9 +39,13 @@ struct StaticArticleExtractor: Sendable {
     private func extractArticle(
         html: Data,
         sourceURL: URL,
+        textEncodingName: String?,
         metrics: inout EvidenceExtractionMetrics
     ) throws -> ExtractedWebArticle {
-        guard let source = String(data: html, encoding: .utf8) else {
+        guard let source = decodeHTML(
+            html,
+            persistedCharset: textEncodingName
+        ) else {
             throw StaticWebBuildError.unreadableHTML
         }
         let document: Document
@@ -101,6 +115,297 @@ struct StaticArticleExtractor: Sendable {
             rootSelector: rootSelector,
             imageCandidates: images
         )
+    }
+
+    private func decodeHTML(
+        _ data: Data,
+        persistedCharset: String?
+    ) -> String? {
+        if let encoding = htmlStringEncoding(for: persistedCharset),
+           let decoded = String(data: data, encoding: encoding) {
+            return decoded
+        }
+        if let decoded = String(data: data, encoding: .utf8) {
+            return decoded
+        }
+        for charset in html5MetaCharsets(in: data) {
+            guard let encoding = htmlStringEncoding(for: charset),
+                  let decoded = String(data: data, encoding: encoding)
+            else {
+                continue
+            }
+            return decoded
+        }
+        return nil
+    }
+
+    private func html5MetaCharsets(in data: Data) -> [String] {
+        var charsets: [String] = []
+        for tag in html5MetaStartTags(in: data) {
+            let attributes = metaAttributes(in: tag)
+            if let charset = attributes["charset"] {
+                charsets.append(charset)
+                continue
+            }
+            guard attributes["http-equiv"]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() == "content-type",
+                  let content = attributes["content"],
+                  let charset = pragmaCharset(in: content)
+            else {
+                continue
+            }
+            charsets.append(charset)
+        }
+        return charsets
+    }
+
+    private func html5MetaStartTags(in data: Data) -> [[UInt8]] {
+        let bytes = Array(data.prefix(1_024))
+        var tags: [[UInt8]] = []
+        var index = 0
+        while index < bytes.count {
+            guard bytes[index] == UInt8(ascii: "<") else {
+                index += 1
+                continue
+            }
+            if bytesMatch("<!--", in: bytes, at: index) {
+                guard let commentEnd = firstIndex(
+                    of: "-->",
+                    in: bytes,
+                    startingAt: index + 4
+                ) else {
+                    break
+                }
+                index = commentEnd + 3
+                continue
+            }
+            let nameStart = index + 1
+            let delimiterIndex = nameStart + 4
+            if bytesMatchIgnoringASCIICase(
+                "meta",
+                in: bytes,
+                at: nameStart
+            ), delimiterIndex < bytes.count,
+               isHTMLTagNameDelimiter(bytes[delimiterIndex]) {
+                guard let tagEnd = htmlTagEnd(
+                    in: bytes,
+                    startingAt: delimiterIndex
+                ) else {
+                    break
+                }
+                let asciiBytes = bytes[index...tagEnd].map { byte in
+                    byte < 0x80 ? byte : UInt8(ascii: " ")
+                }
+                tags.append(asciiBytes)
+                index = tagEnd + 1
+                continue
+            }
+            guard nameStart < bytes.count,
+                  isHTMLMarkupStartByte(bytes[nameStart])
+            else {
+                index += 1
+                continue
+            }
+            guard let tagEnd = htmlTagEnd(
+                in: bytes,
+                startingAt: nameStart + 1
+            ) else {
+                break
+            }
+            index = tagEnd + 1
+        }
+        return tags
+    }
+
+    private func htmlTagEnd(
+        in bytes: [UInt8],
+        startingAt start: Int
+    ) -> Int? {
+        var quote: UInt8?
+        var index = start
+        while index < bytes.count {
+            let byte = bytes[index]
+            if let activeQuote = quote {
+                if byte == activeQuote {
+                    quote = nil
+                }
+            } else if byte == UInt8(ascii: "\"")
+                        || byte == UInt8(ascii: "'") {
+                quote = byte
+            } else if byte == UInt8(ascii: ">") {
+                return index
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    private func isHTMLTagNameDelimiter(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: "/")
+            || byte == UInt8(ascii: ">")
+            || [0x09, 0x0A, 0x0C, 0x0D, 0x20].contains(byte)
+    }
+
+    private func isHTMLMarkupStartByte(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: "!")
+            || byte == UInt8(ascii: "?")
+            || byte == UInt8(ascii: "/")
+            || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+            || (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte)
+    }
+
+    private func bytesMatch(
+        _ literal: StaticString,
+        in bytes: [UInt8],
+        at index: Int
+    ) -> Bool {
+        let expected = Array(String(describing: literal).utf8)
+        guard index + expected.count <= bytes.count else { return false }
+        return bytes[index..<(index + expected.count)].elementsEqual(expected)
+    }
+
+    private func bytesMatchIgnoringASCIICase(
+        _ literal: StaticString,
+        in bytes: [UInt8],
+        at index: Int
+    ) -> Bool {
+        let expected = Array(String(describing: literal).utf8)
+        guard index + expected.count <= bytes.count else { return false }
+        return zip(bytes[index..<(index + expected.count)], expected)
+            .allSatisfy { asciiLowercased($0.0) == asciiLowercased($0.1) }
+    }
+
+    private func firstIndex(
+        of literal: StaticString,
+        in bytes: [UInt8],
+        startingAt start: Int
+    ) -> Int? {
+        var index = start
+        while index < bytes.count {
+            if bytesMatch(literal, in: bytes, at: index) {
+                return index
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    private func asciiLowercased(_ byte: UInt8) -> UInt8 {
+        guard (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+        else {
+            return byte
+        }
+        return byte + (UInt8(ascii: "a") - UInt8(ascii: "A"))
+    }
+
+    private func metaAttributes(in tag: [UInt8]) -> [String: String] {
+        var attributes: [String: String] = [:]
+        var index = 5
+        while index < tag.count {
+            while index < tag.count, isHTMLWhitespace(tag[index]) {
+                index += 1
+            }
+            guard index < tag.count,
+                  tag[index] != UInt8(ascii: ">")
+            else {
+                break
+            }
+            if tag[index] == UInt8(ascii: "/") {
+                index += 1
+                continue
+            }
+
+            let nameStart = index
+            while index < tag.count,
+                  !isHTMLWhitespace(tag[index]),
+                  tag[index] != UInt8(ascii: "/"),
+                  tag[index] != UInt8(ascii: ">"),
+                  tag[index] != UInt8(ascii: "=") {
+                index += 1
+            }
+            guard index > nameStart else {
+                index += 1
+                while index < tag.count,
+                      !isHTMLWhitespace(tag[index]),
+                      tag[index] != UInt8(ascii: ">") {
+                    index += 1
+                }
+                continue
+            }
+
+            let name = String(
+                decoding: tag[nameStart..<index].map(asciiLowercased),
+                as: UTF8.self
+            )
+            while index < tag.count, isHTMLWhitespace(tag[index]) {
+                index += 1
+            }
+
+            var value = ""
+            if index < tag.count, tag[index] == UInt8(ascii: "=") {
+                index += 1
+                while index < tag.count, isHTMLWhitespace(tag[index]) {
+                    index += 1
+                }
+                if index < tag.count,
+                   tag[index] == UInt8(ascii: "\"")
+                    || tag[index] == UInt8(ascii: "'") {
+                    let quote = tag[index]
+                    index += 1
+                    let valueStart = index
+                    while index < tag.count, tag[index] != quote {
+                        index += 1
+                    }
+                    value = String(
+                        decoding: tag[valueStart..<index],
+                        as: UTF8.self
+                    )
+                    if index < tag.count {
+                        index += 1
+                    }
+                } else {
+                    let valueStart = index
+                    while index < tag.count,
+                          !isHTMLWhitespace(tag[index]),
+                          tag[index] != UInt8(ascii: ">") {
+                        index += 1
+                    }
+                    value = String(
+                        decoding: tag[valueStart..<index],
+                        as: UTF8.self
+                    )
+                }
+            }
+            if attributes[name] == nil {
+                attributes[name] = value
+            }
+        }
+        return attributes
+    }
+
+    private func isHTMLWhitespace(_ byte: UInt8) -> Bool {
+        [0x09, 0x0A, 0x0C, 0x0D, 0x20].contains(byte)
+    }
+
+    private func pragmaCharset(in content: String) -> String? {
+        for parameter in content.split(separator: ";", omittingEmptySubsequences: false) {
+            let parts = parameter.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            )
+            guard parts.count == 2,
+                  parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() == "charset"
+            else {
+                continue
+            }
+            return parts[1]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        }
+        return nil
     }
 
     private func readableRoot(in document: Document) throws -> Element? {

@@ -62,6 +62,98 @@ enum SchemaMigrations {
             }
         }
 
+        migrator.registerMigration("v2_durable_import_queue") { db in
+            try db.alter(table: "import_tasks") { table in
+                table.add(column: "journal_sequence", .integer)
+                table.add(column: "queue_sequence", .integer)
+                table.add(column: "failure_codec_version", .integer)
+                table.add(column: "failure_payload", .blob)
+                table.add(column: "cancellation_requested", .boolean)
+                    .notNull()
+                    .defaults(to: false)
+            }
+
+            try db.execute(
+                sql: """
+                    UPDATE import_tasks
+                    SET state = 'queued'
+                    WHERE state IN ('accepted', 'working')
+                    """
+            )
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT task_id
+                    FROM import_tasks
+                    ORDER BY rowid
+                    """
+            )
+            for (offset, row) in rows.enumerated() {
+                let taskID = try row.decode(
+                    String.self,
+                    forColumn: "task_id"
+                )
+                let sequence = Int64(offset) + 1
+                try db.execute(
+                    sql: """
+                        UPDATE import_tasks
+                        SET journal_sequence = ?,
+                            queue_sequence = CASE
+                                WHEN state = 'queued' THEN ?
+                                ELSE NULL
+                            END
+                        WHERE task_id = ?
+                        """,
+                    arguments: [
+                        sequence,
+                        sequence,
+                        taskID,
+                    ]
+                )
+            }
+
+            try db.create(
+                index: "import_tasks_journal_sequence",
+                on: "import_tasks",
+                columns: ["journal_sequence"],
+                unique: true
+            )
+            try db.execute(
+                sql: """
+                    CREATE UNIQUE INDEX import_tasks_active_queue
+                    ON import_tasks(queue_sequence)
+                    WHERE queue_sequence IS NOT NULL
+                    """
+            )
+            try db.execute(
+                sql: """
+                    CREATE TABLE import_queue_clock (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0)
+                    )
+                    """
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO import_queue_clock(singleton, last_sequence)
+                    VALUES (1, ?)
+                    """,
+                arguments: [rows.count]
+            )
+        }
+
+        migrator.registerMigration("v3_import_checkpoint_artifacts") { db in
+            try db.create(table: "checkpoint_artifacts") { table in
+                table.column("artifact_id", .text).primaryKey()
+                table.column("task_id", .text)
+                    .notNull()
+                    .unique()
+                    .references("import_tasks", onDelete: .cascade)
+                table.column("descriptor_json", .blob).notNull()
+                table.column("relative_path", .text).notNull()
+            }
+        }
+
         try migrator.migrate(database)
     }
 }

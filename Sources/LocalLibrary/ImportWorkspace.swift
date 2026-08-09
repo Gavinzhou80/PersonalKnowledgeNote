@@ -1,3 +1,4 @@
+import Foundation
 import KnowledgeCore
 
 public actor ImportWorkspace {
@@ -30,6 +31,35 @@ public actor ImportWorkspace {
         try await library.checkpoint(taskID: taskID, update: update)
     }
 
+    package func replaceCheckpointArtifact(
+        packageURL: URL,
+        update: CheckpointUpdate
+    ) async throws -> CheckpointArtifactReplacement {
+        try await library.replaceCheckpointArtifact(
+            packageURL: packageURL,
+            taskID: taskID,
+            update: update
+        )
+    }
+
+    package func loadCheckpointArtifact(
+        _ artifact: ManagedCheckpointArtifact
+    ) async throws -> VerifiedCheckpointPackage {
+        try await library.loadCheckpointArtifact(
+            artifact,
+            taskID: taskID
+        )
+    }
+
+    package func removeCheckpointArtifact(
+        expectedRevision: UInt64
+    ) async throws -> DurableImportSnapshot {
+        try await library.removeCheckpointArtifact(
+            taskID: taskID,
+            expectedRevision: expectedRevision
+        )
+    }
+
     public func finish(
         _ candidate: PublicationCandidate,
         expectedRevision: UInt64
@@ -48,6 +78,28 @@ public actor ImportWorkspace {
         )
     }
 
+    package func recordFailure(
+        expectedRevision: UInt64,
+        failure: ImportTaskFailureEnvelope,
+        retainCheckpoint: Bool
+    ) async throws -> DurableQueueMutation {
+        try await library.recordFailure(
+            taskID: taskID,
+            expectedRevision: expectedRevision,
+            failure: failure,
+            retainCheckpoint: retainCheckpoint
+        )
+    }
+
+    package func finishCancellation(
+        expectedRevision: UInt64
+    ) async throws -> DurableImportSnapshot {
+        try await library.finishCancellation(
+            taskID: taskID,
+            expectedRevision: expectedRevision
+        )
+    }
+
     package func verifyManagedArtifact(
         _ artifact: StagedArtifact
     ) async throws -> SourceArtifactDescriptor {
@@ -59,5 +111,9 @@ public actor ImportWorkspace {
 
     package func stagedArtifactCount() async throws -> Int {
         try await library.stagedArtifactCount(taskID: taskID)
+    }
+
+    package func checkpointArtifactCount() async throws -> Int {
+        try await library.checkpointArtifactCount(taskID: taskID)
     }
 }
