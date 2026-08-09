@@ -147,14 +147,23 @@ actor CountingWebBuilder {
 
 final class ImportRunnerCrashInjector: Sendable {
     private let terminatedFlag = Atomic(false)
+    private let armedFlag: Atomic<Bool>
     private let crashPoint: T05CrashPoint?
 
-    init(crashPoint: T05CrashPoint?) {
+    init(crashPoint: T05CrashPoint?, armed: Bool = true) {
         self.crashPoint = crashPoint
+        self.armedFlag = Atomic(armed)
+    }
+
+    /// Lets a test arm the injection mid-run, so earlier tasks reach their
+    /// terminal states before the crash fires for a later task.
+    func arm() {
+        armedFlag.store(true, ordering: .sequentiallyConsistent)
     }
 
     func hit(_ point: T05CrashPoint) throws {
         guard point == crashPoint else { return }
+        guard armedFlag.load(ordering: .sequentiallyConsistent) else { return }
         terminatedFlag.store(true, ordering: .sequentiallyConsistent)
         throw ImportTaskRunnerInterruption.injectedProcessTermination
     }

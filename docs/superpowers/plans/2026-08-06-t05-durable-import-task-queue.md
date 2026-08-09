@@ -1777,7 +1777,7 @@ git commit -m "feat: expose import task store adapter"
 - Review every T05-owned source, migration, fixture, test, design, and plan file.
 - Preserve the user-owned dirty paths.
 
-- [ ] **Step 1: Add final public-path lifecycle coverage**
+- [x] **Step 1: Add final public-path lifecycle coverage**
 
 Create or extend a public integration test that:
 
