@@ -16,6 +16,12 @@ targets:
     dependencies:
       - package: PersonalKnowledgeNotePackage
         product: AppSupport
+      - package: PersonalKnowledgeNotePackage
+        product: DocumentImport
+      - package: PersonalKnowledgeNotePackage
+        product: KnowledgeCore
+      - package: PersonalKnowledgeNotePackage
+        product: LocalLibrary
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gavinzhou.PersonalKnowledgeNote

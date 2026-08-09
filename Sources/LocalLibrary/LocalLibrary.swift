@@ -299,6 +299,31 @@ public actor LocalLibrary {
         }
     }
 
+    public func publishedDocumentSummaries()
+        async throws -> [SourceDocumentSummary]
+    {
+        try withLocalLibraryErrorTranslation {
+            try database.publishedDocumentSummaries()
+        }
+    }
+
+    public func artifactResource(
+        documentID: SourceDocumentID,
+        relativePath: String
+    ) async throws -> ArtifactResource? {
+        try withLocalLibraryErrorTranslation {
+            guard try database.visibleSourceDocument(id: documentID)
+                != nil
+            else {
+                return nil
+            }
+            return try managedArtifacts.finalArtifactResource(
+                documentID: documentID,
+                relativePath: relativePath
+            )
+        }
+    }
+
     package func snapshot(
         taskID: ImportTaskID
     ) throws -> DurableImportSnapshot {

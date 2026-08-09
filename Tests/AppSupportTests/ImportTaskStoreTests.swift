@@ -4,6 +4,7 @@ import Foundation
 import KnowledgeCore
 import LocalLibrary
 import Testing
+import TestFixtures
 
 @testable import DocumentImport
 
@@ -251,5 +252,46 @@ func startSurfacesAvailabilityErrorWhenBootstrapFails() async throws {
     await store.start()
 
     #expect(store.availabilityError == .localLibraryUnavailable)
+    #expect(store.tasks.isEmpty)
+}
+
+/// Serves the fixture article so the default runner drives an import to
+/// publication.
+private struct CompletingFixtureAcquirer: WebAcquiring {
+    func acquire(_ url: URL) async throws -> AcquiredWebPage {
+        let html = try Data(contentsOf: FixtureCatalog.webArticleURL)
+        return AcquiredWebPage(sourceURL: url, html: html)
+    }
+}
+
+@MainActor
+@Test
+func storeSurfacesCompletedTaskIDsAfterPublication() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "ImportTaskStoreCompletion-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let library = try await LocalLibrary.open(at: root)
+    let importer = DocumentImport(
+        library: library,
+        webAcquirer: CompletingFixtureAcquirer()
+    )
+    let store = ImportTaskStore(importer: importer)
+    await store.start()
+    await store.submit(
+        .webpage(URL(string: "https://store.example/article")!)
+    )
+
+    let deadline = ContinuousClock.now + .seconds(5)
+    while store.completedTaskIDs.isEmpty {
+        guard ContinuousClock.now < deadline else {
+            break
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    // The completion signal survives the unfinished-only display
+    // filter, so views can refresh when a document publishes.
+    #expect(store.completedTaskIDs.count == 1)
     #expect(store.tasks.isEmpty)
 }
