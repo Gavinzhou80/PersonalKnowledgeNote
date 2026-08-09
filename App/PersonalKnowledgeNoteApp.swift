@@ -8,7 +8,11 @@ import SwiftUI
 @main
 struct PersonalKnowledgeNoteApp: App {
     var body: some Scene {
-        WindowGroup("Reading Workbench") {
+        // Single-window semantics: the composition root opens the
+        // library and import engine once per process; a WindowGroup
+        // would re-open both for every new window and race the
+        // durable import queue.
+        Window("Reading Workbench", id: "reading-workbench") {
             ReadingWorkbenchRootView()
         }
         .defaultSize(width: 1100, height: 720)

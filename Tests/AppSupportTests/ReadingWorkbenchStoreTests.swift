@@ -9,6 +9,11 @@ private actor InMemoryReadingLibrary: ReadingLibraryPort {
     private var documentsByID: [SourceDocumentID: LocatedSourceDocument]
         = [:]
     private(set) var submittedSources: [OriginalSource] = []
+    private var requestedIDs: Set<SourceDocumentID> = []
+    private var gatedIDs: Set<SourceDocumentID> = []
+    private var pendingDocuments:
+        [SourceDocumentID: CheckedContinuation<LocatedSourceDocument?, Never>]
+        = [:]
 
     func setSummaries(_ summaries: [SourceDocumentSummary]) {
         summariesToReturn = summaries
@@ -16,6 +21,21 @@ private actor InMemoryReadingLibrary: ReadingLibraryPort {
 
     func setDocument(_ document: LocatedSourceDocument) {
         documentsByID[document.document.content.documentID] = document
+    }
+
+    /// Holds the next lookup of this ID until released, so tests can
+    /// interleave a selection change with an in-flight lookup.
+    func gateDocument(_ id: SourceDocumentID) {
+        gatedIDs.insert(id)
+    }
+
+    func releaseDocument(_ id: SourceDocumentID) {
+        pendingDocuments.removeValue(forKey: id)?
+            .resume(returning: documentsByID[id])
+    }
+
+    func hasRequested(_ id: SourceDocumentID) -> Bool {
+        requestedIDs.contains(id)
     }
 
     func publishedDocumentSummaries() async throws
@@ -27,7 +47,13 @@ private actor InMemoryReadingLibrary: ReadingLibraryPort {
     func sourceDocument(
         id: SourceDocumentID
     ) async throws -> LocatedSourceDocument? {
-        documentsByID[id]
+        requestedIDs.insert(id)
+        guard gatedIDs.remove(id) != nil else {
+            return documentsByID[id]
+        }
+        return await withCheckedContinuation { continuation in
+            pendingDocuments[id] = continuation
+        }
     }
 
     func artifactResource(
@@ -178,6 +204,35 @@ func selectingDocumentWithoutHeadingsYieldsEmptyOutline() async throws {
     await store.select(content.documentID)
 
     #expect(store.selectedDocumentID == content.documentID)
+    #expect(store.outline.isEmpty)
+}
+
+@MainActor
+@Test
+func staleSelectDoesNotOverwriteNewerSelection() async throws {
+    let library = InMemoryReadingLibrary()
+    let staleContent = makeOutlineFixtureContent()
+    let freshContent = makePlainFixtureContent()
+    await library.setDocument(makeLocatedDocument(content: staleContent))
+    await library.setDocument(makeLocatedDocument(content: freshContent))
+    await library.gateDocument(staleContent.documentID)
+    let store = ReadingWorkbenchStore(library: library)
+
+    let staleSelection = Task { @MainActor in
+        await store.select(staleContent.documentID)
+    }
+    while await !library.hasRequested(staleContent.documentID) {
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+
+    // The user moves on before the stale lookup resolves.
+    await store.select(freshContent.documentID)
+    #expect(store.outline.isEmpty)
+
+    await library.releaseDocument(staleContent.documentID)
+    await staleSelection.value
+
+    #expect(store.selectedDocumentID == freshContent.documentID)
     #expect(store.outline.isEmpty)
 }
 

@@ -144,7 +144,7 @@ public final class ReadingWorkbenchStore {
         }
         guard let located = try? await library.sourceDocument(
             id: documentID
-        ) else {
+        ), selectedDocumentID == documentID else {
             return
         }
         outline = Self.outlineProjection(of: located.document.content)
