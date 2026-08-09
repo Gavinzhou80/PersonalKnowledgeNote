@@ -88,11 +88,14 @@ final class WebKitRunLoopHost: @unchecked Sendable {
     }
 }
 
-/// Navigation decisions and load callbacks arrive on the session's own
-/// run-loop thread. Every delegate method pins its Objective-C selector so
-/// dispatch matches the WKNavigationDelegate requirements exactly; Swift 6
-/// selector inference for labeled parameters like `didFinish navigation:`
-/// does not match WebKit's `webView:didFinishNavigation:`.
+/// Navigation decisions and load callbacks arrive through Objective-C
+/// dispatch. The navigation-policy and authentication requirements are
+/// implemented as the SDK's async variants: the completion-handler variants
+/// share their Objective-C selectors with those async requirements, so
+/// pinning the handler-based selectors while conforming is a compile-time
+/// conflict. The remaining callbacks pin their selectors explicitly because
+/// Swift's selector inference for labels like `didFinish navigation:` does
+/// not match WebKit's `webView:didFinishNavigation:`.
 private final class IsolatedRenderSession: NSObject, WKNavigationDelegate,
                                           @unchecked Sendable
 {
@@ -195,45 +198,37 @@ private final class IsolatedRenderSession: NSObject, WKNavigationDelegate,
         finish(.failure(WebAcquisitionError.requestTimedOut))
     }
 
-    @objc func webView(
+    func webView(
         _ webView: WKWebView,
-        decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-    ) {
+        decidePolicyFor navigationAction: WKNavigationAction
+    ) async -> WKNavigationActionPolicy {
         guard navigationAction.targetFrame?.isMainFrame == true else {
-            decisionHandler(.cancel)
-            return
+            return .cancel
         }
         guard let scheme = navigationAction.request.url?.scheme?
                 .lowercased(),
               scheme == "http" || scheme == "https"
         else {
-            decisionHandler(.cancel)
             policyFailure(.invalidHTTPResponse)
-            return
+            return .cancel
         }
         // macOS exposes no redirect flag on WKNavigationAction; every
         // main-frame navigation decision beyond the initial load is a
         // redirect hop, bounded by the same cap.
         mainFrameNavigationCount += 1
         guard mainFrameNavigationCount <= maximumRedirectCount + 1 else {
-            decisionHandler(.cancel)
             policyFailure(.invalidHTTPResponse)
-            return
+            return .cancel
         }
-        decisionHandler(.allow)
+        return .allow
     }
 
-    @objc func webView(
+    func webView(
         _ webView: WKWebView,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (
-            URLSession.AuthChallengeDisposition,
-            URLCredential?
-        ) -> Void
-    ) {
+        respondTo challenge: URLAuthenticationChallenge
+    ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         sawAuthenticationChallenge = true
-        completionHandler(.cancelAuthenticationChallenge, nil)
+        return (.cancelAuthenticationChallenge, nil)
     }
 
     @objc(webView:didFinishNavigation:)
@@ -241,8 +236,21 @@ private final class IsolatedRenderSession: NSObject, WKNavigationDelegate,
         _ webView: WKWebView,
         didFinish navigation: WKNavigation!
     ) {
+        // Reschedule a bounded grace timer for DOM serialization: if the
+        // web content process stalls inside evaluateJavaScript, the load
+        // timer is gone and nothing else would ever resolve the session.
         timer?.invalidate()
-        timer = nil
+        let timeoutSeconds = Double(
+            pageLoadTimeout.components.seconds
+        ) + Double(pageLoadTimeout.components.attoseconds) / 1e18
+        let graceTimer = Timer(
+            timeInterval: max(timeoutSeconds, 0.05),
+            repeats: false
+        ) { [weak self] _ in
+            self?.handleTimeout()
+        }
+        RunLoop.current.add(graceTimer, forMode: .default)
+        timer = graceTimer
         webView.evaluateJavaScript("document.documentElement.outerHTML") {
             [weak self] value, error in
             guard let self else { return }

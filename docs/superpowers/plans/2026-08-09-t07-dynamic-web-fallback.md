@@ -474,9 +474,11 @@ git diff --name-only origin/main...HEAD
 
 Expected: no whitespace errors; diff limited to this plan plus the T07-owned source, fixture, and test files.
 
-- [ ] **Step 4: Final code review**
+- [x] **Step 4: Final code review**
 
 Use `superpowers:requesting-code-review` against the master plan Task 7 definition and `origin/main...HEAD`. Fix every Critical and Important finding with a failing regression test first.
+
+> Review outcome: no Critical findings. One Important finding fixed: the navigation-policy and authentication callbacks were migrated to the SDK's async delegate variants (the completion-handler variants share their Objective-C selectors with those async requirements in the current SDK, so selector pinning conflicted); a bounded grace timer now covers DOM serialization after `didFinish`. Standalone diagnostics were extended to prove real WKWebView dispatch of the pinned selectors for redirect follow, redirect-overflow cancellation, and basic rendering; the 401 probe showed WKWebView delivers that case as a finished empty load rather than an authentication challenge, which still degrades safely to the typed `webpageHasNoReadableArticle` failure with a script-free artifact.
 
 - [ ] **Step 5: Push and merge**
 
