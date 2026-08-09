@@ -8,7 +8,7 @@ import WebKit
 /// seam; refuses every other request.
 @MainActor
 final class ArtifactSchemeHandler: NSObject, WKURLSchemeHandler {
-    static let scheme = "pkn-reading"
+    static let scheme = ReadingArtifactRequest.scheme
 
     private let library: any ReadingLibraryPort
     // Deliveries to a stopped scheme task raise an uncatchable
@@ -74,27 +74,12 @@ final class ArtifactSchemeHandler: NSObject, WKURLSchemeHandler {
     private func resource(
         for url: URL
     ) async -> ArtifactResource? {
-        guard let components = URLComponents(
-            url: url,
-            resolvingAgainstBaseURL: false
-        ), components.scheme == Self.scheme,
-            components.host == "document",
-            let documentIDRaw = components.path
-            .split(separator: "/")
-            .first,
-            let documentUUID = UUID(uuidString: String(documentIDRaw))
-        else {
-            return nil
-        }
-        let remainder = components.path.dropFirst(
-            documentIDRaw.count + 1
-        )
-        guard !remainder.isEmpty else {
+        guard let request = ReadingArtifactRequest.parse(url) else {
             return nil
         }
         return try? await library.artifactResource(
-            documentID: SourceDocumentID(documentUUID),
-            relativePath: String(remainder)
+            documentID: request.documentID,
+            relativePath: request.relativePath
         )
     }
 }

@@ -13,7 +13,6 @@ struct ReadingWorkbenchView: View {
     @State private var selectedDocumentID: SourceDocumentID?
     @State private var importField = ""
     @State private var scrollRequest: ReadingScrollRequest?
-    @State private var completedTaskIDs: Set<ImportTaskID> = []
     @SceneStorage("reading.inspectorVisible")
     private var inspectorVisible = true
     @SceneStorage("reading.columnVisibility")
@@ -58,11 +57,11 @@ struct ReadingWorkbenchView: View {
         .onChange(of: selectedDocumentID) { _, newValue in
             Task { await store.select(newValue) }
         }
-        .onChange(of: importTasks.tasks) { _, _ in
-            refreshOnPublicationCompletion()
-        }
-        .onAppear {
-            completedTaskIDs = completedIDs(in: importTasks.tasks)
+        .onChange(of: importTasks.completedTaskIDs) { oldValue, newValue in
+            guard !newValue.subtracting(oldValue).isEmpty else {
+                return
+            }
+            Task { await store.loadDocumentList() }
         }
     }
 
@@ -126,6 +125,10 @@ struct ReadingWorkbenchView: View {
                 loadURL: loadURL,
                 scrollRequest: scrollRequest
             )
+            // Keying by the load URL keeps one WKWebView alive per
+            // document; a rebuilt representable would race its initial
+            // load against the in-flight one (frame load error 102).
+            .id(loadURL)
         } else {
             ContentUnavailableView(
                 "No Document Selected",
@@ -171,28 +174,5 @@ struct ReadingWorkbenchView: View {
                 importField = ""
             }
         }
-    }
-
-    /// Refreshes the reading list when a task reaches completion, so a
-    /// newly published document appears without a relaunch.
-    private func refreshOnPublicationCompletion() {
-        let latest = completedIDs(in: importTasks.tasks)
-        let newCompletions = latest.subtracting(completedTaskIDs)
-        completedTaskIDs = latest
-        guard !newCompletions.isEmpty else {
-            return
-        }
-        Task { await store.loadDocumentList() }
-    }
-
-    private func completedIDs(
-        in tasks: [ImportTaskSnapshot]
-    ) -> Set<ImportTaskID> {
-        Set(tasks.compactMap { task in
-            if case .completed = task.state {
-                return task.id
-            }
-            return nil
-        })
     }
 }

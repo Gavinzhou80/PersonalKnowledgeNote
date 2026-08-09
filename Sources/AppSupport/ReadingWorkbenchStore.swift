@@ -41,6 +41,51 @@ public enum ReadingImportState: Hashable, Sendable {
     case libraryUnavailable
 }
 
+/// Parsed form of a `pkn-reading://document/<id>/<path>` request, the
+/// URL shape the artifact scheme handler serves.
+public struct ReadingArtifactRequest: Hashable, Sendable {
+    public static let scheme = "pkn-reading"
+    private static let documentHost = "document"
+
+    public let documentID: SourceDocumentID
+    public let relativePath: String
+
+    init(documentID: SourceDocumentID, relativePath: String) {
+        self.documentID = documentID
+        self.relativePath = relativePath
+    }
+
+    /// Returns nil for any URL that is not a well-formed artifact
+    /// request: wrong scheme or host, unparsable document ID, or a
+    /// missing resource path.
+    public static func parse(_ url: URL) -> ReadingArtifactRequest? {
+        guard let components = URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+        ), components.scheme == scheme,
+            components.host == documentHost
+        else {
+            return nil
+        }
+        let segments = components.path
+            .split(separator: "/")
+            .map(String.init)
+        guard segments.count >= 2,
+              let uuid = UUID(uuidString: segments[0])
+        else {
+            return nil
+        }
+        let relativePath = segments.dropFirst().joined(separator: "/")
+        guard !relativePath.isEmpty else {
+            return nil
+        }
+        return ReadingArtifactRequest(
+            documentID: SourceDocumentID(uuid),
+            relativePath: relativePath
+        )
+    }
+}
+
 public enum ReadingNavigationDisposition: Hashable, Sendable {
     case allow
     case cancel
@@ -111,7 +156,7 @@ public final class ReadingWorkbenchStore {
             return nil
         }
         return URL(
-            string: "pkn-reading://document/\(selectedDocumentID.rawValue.uuidString)/index.html"
+            string: "\(ReadingArtifactRequest.scheme)://document/\(selectedDocumentID.rawValue.uuidString)/index.html"
         )
     }
 

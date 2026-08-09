@@ -44,6 +44,7 @@ struct ArtifactWebView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         context.coordinator.currentDocument = loadURL
         if let loadURL {
+            context.coordinator.requestedURL = loadURL
             webView.load(URLRequest(url: loadURL))
         }
         return webView
@@ -51,7 +52,14 @@ struct ArtifactWebView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.currentDocument = loadURL
-        if let loadURL, webView.url != loadURL {
+        // Compare against the URL we already asked WebKit to load, not
+        // `webView.url`: during the first update the provisional load
+        // has not committed yet, and re-issuing the load interrupts
+        // the in-flight main resource (frame load error 102).
+        if let loadURL,
+           context.coordinator.requestedURL != loadURL,
+           webView.url != loadURL {
+            context.coordinator.requestedURL = loadURL
             webView.load(URLRequest(url: loadURL))
         }
         if let scrollRequest,
@@ -86,6 +94,7 @@ struct ArtifactWebView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         var currentDocument: URL?
+        var requestedURL: URL?
         var lastScrollID: UUID?
 
         func webView(
@@ -95,10 +104,11 @@ struct ArtifactWebView: NSViewRepresentable {
             guard let url = navigationAction.request.url else {
                 return .cancel
             }
-            switch ReadingNavigationPolicy.disposition(
+            let disposition = ReadingNavigationPolicy.disposition(
                 for: url,
                 currentDocument: currentDocument
-            ) {
+            )
+            switch disposition {
             case .allow:
                 return .allow
             case .cancel:

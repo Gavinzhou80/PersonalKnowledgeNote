@@ -14,11 +14,17 @@ public final class ImportTaskStore {
     public private(set) var tasks: [ImportTaskSnapshot] = []
     public private(set) var controlError: ImportTaskControlError?
     public private(set) var availabilityError: DocumentImportAvailabilityError?
+    /// IDs of tasks that reached completion. The display list filters
+    /// finished tasks out, so this signal lets views react to
+    /// publications (e.g. refreshing the reading list).
+    public private(set) var completedTaskIDs: Set<ImportTaskID> = []
 
     private let importer: DocumentImport
     // Written on the main actor; `nonisolated(unsafe)` allows deinit to
     // cancel observation, which is safe because `Task.cancel()` is.
     nonisolated(unsafe) private var observationTask: Task<Void, Never>?
+    nonisolated(unsafe) private var completionObservationTask:
+        Task<Void, Never>?
 
     public init(importer: DocumentImport) {
         self.importer = importer
@@ -26,6 +32,7 @@ public final class ImportTaskStore {
 
     deinit {
         observationTask?.cancel()
+        completionObservationTask?.cancel()
     }
 
     /// Boots the importer and observes unfinished tasks.
@@ -48,6 +55,8 @@ public final class ImportTaskStore {
     public func stopObserving() {
         observationTask?.cancel()
         observationTask = nil
+        completionObservationTask?.cancel()
+        completionObservationTask = nil
     }
 
     public func submit(_ source: OriginalSource) async {
@@ -96,6 +105,22 @@ public final class ImportTaskStore {
             for await snapshots in stream {
                 guard let self else { return }
                 self.tasks = snapshots
+            }
+        }
+        let completionStream = importer.observeTasks(.all)
+        completionObservationTask = Task { [weak self] in
+            for await snapshots in completionStream {
+                guard let self else { return }
+                self.completedTaskIDs = Set(
+                    snapshots
+                        .filter { snapshot in
+                            if case .completed = snapshot.state {
+                                return true
+                            }
+                            return false
+                        }
+                        .map(\.id)
+                )
             }
         }
     }
