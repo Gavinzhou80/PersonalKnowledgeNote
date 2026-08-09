@@ -1792,7 +1792,7 @@ Create or extend a public integration test that:
 9. reaches published, cancelled, failed, retried, and Already Imported outcomes through public APIs;
 10. verifies AppSupport sees no internal stage or checkpoint type.
 
-- [ ] **Step 2: Run branch and whitespace checks**
+- [x] **Step 2: Run branch and whitespace checks**
 
 Run:
 
@@ -1804,7 +1804,7 @@ git status --short --branch
 
 Expected: no committed whitespace errors; diff contains only T05 design, plan, source, migrations, and tests; user-owned dirty paths remain uncommitted.
 
-- [ ] **Step 3: Run focused Debug suites**
+- [x] **Step 3: Run focused Debug suites**
 
 Run:
 
@@ -1819,7 +1819,7 @@ swift test --filter ImportTaskStoreTests
 
 Expected: PASS.
 
-- [ ] **Step 4: Run full Debug tests**
+- [x] **Step 4: Run full Debug tests**
 
 Run:
 
@@ -1829,7 +1829,7 @@ swift test
 
 Expected: all tests pass with zero failures.
 
-- [ ] **Step 5: Run Debug package build**
+- [x] **Step 5: Run Debug package build**
 
 Run:
 
@@ -1839,7 +1839,7 @@ swift build
 
 Expected: Debug build succeeds.
 
-- [ ] **Step 6: Run Debug macOS app build**
+- [x] **Step 6: Run Debug macOS app build**
 
 Run:
 
@@ -1855,15 +1855,15 @@ xcodebuild \
 
 Expected: `** BUILD SUCCEEDED **`.
 
-- [ ] **Step 7: Request final code review**
+- [x] **Step 7: Request final code review**
 
 Use `superpowers:requesting-code-review` against Issue #6, the approved T05 design, this plan, and `origin/main...HEAD`. Fix every Critical and Important finding with a failing regression test first. Repeat review until approved.
 
-- [ ] **Step 8: Confirm Debug-only verification**
+- [x] **Step 8: Confirm Debug-only verification**
 
 The completion report must list only the Debug commands above. Confirm no Release test or build command was run and no automated test contacted a public network.
 
-- [ ] **Step 9: Push the feature branch**
+- [x] **Step 9: Push the feature branch**
 
 Run:
 

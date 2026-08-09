@@ -1096,10 +1096,11 @@ final class LibraryDatabase: Sendable {
             task.revision += 1
             try task.update(db)
 
+            // Refetch associations: removing the staged artifact and the
+            // checkpoint record invalidates the pre-mutation batch.
             let bundles = try publicationStateBundles(
                 for: [task],
-                in: db,
-                associations: &associations
+                in: db
             )
             guard let snapshot = bundles.first?.snapshot else {
                 throw corruptLibraryError()
@@ -1177,10 +1178,11 @@ final class LibraryDatabase: Sendable {
             task.revision += 1
             try task.update(db)
 
+            // Refetch associations: a `.clear` disposition deletes the
+            // checkpoint record, invalidating the pre-mutation batch.
             let bundles = try publicationStateBundles(
                 for: [task],
-                in: db,
-                associations: &associations
+                in: db
             )
             guard let snapshot = bundles.first?.snapshot else {
                 throw corruptLibraryError()

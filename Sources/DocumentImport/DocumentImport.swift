@@ -296,14 +296,15 @@ public actor DocumentImport {
 
         let mutation: DurableQueueMutation
         do {
-            mutation = try await library.requestCancellation(
+            mutation = try await requestCancellationOnce(
                 taskID: taskID,
                 expectedRevision: current.revision
             )
         } catch let error as LocalLibraryError {
-            throw Self.cancelControlError(
+            throw await cancelControlError(
                 for: error,
-                currentState: current.state
+                currentState: current.state,
+                taskID: taskID
             )
         } catch {
             throw ImportTaskControlError.invalidState
@@ -376,16 +377,47 @@ public actor DocumentImport {
         requestSchedulerWake()
     }
 
-    private static func cancelControlError(
+    /// Requests cancellation, tolerating one stale revision: the in-memory
+    /// registry can lag the durable revision while checkpoint writes are in
+    /// flight, so refresh from the durable snapshot before reporting failure.
+    private func requestCancellationOnce(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) async throws -> DurableQueueMutation {
+        do {
+            return try await library.requestCancellation(
+                taskID: taskID,
+                expectedRevision: expectedRevision
+            )
+        } catch let error as LocalLibraryError {
+            guard case .staleRevision = error else {
+                throw error
+            }
+            let durable = try await library.snapshot(taskID: taskID)
+            return try await library.requestCancellation(
+                taskID: taskID,
+                expectedRevision: durable.revision
+            )
+        }
+    }
+
+    private func cancelControlError(
         for error: LocalLibraryError,
-        currentState: ImportTaskState
-    ) -> ImportTaskControlError {
+        currentState: ImportTaskState,
+        taskID: ImportTaskID
+    ) async -> ImportTaskControlError {
         switch error {
         case .unavailable:
             return .invalidState
-        case .staleRevision:
-            return .invalidState
-        case .invalidTaskState:
+        case .staleRevision,
+             .invalidTaskState:
+            // The in-memory registry snapshot can lag behind the durable
+            // state when publication races with cancellation; classify the
+            // terminal case from the durable snapshot before reporting.
+            if let durable = try? await library.snapshot(taskID: taskID),
+               case .completed = durable.state {
+                return .tooLate
+            }
             if case .completed = currentState {
                 return .tooLate
             }
@@ -417,24 +449,32 @@ public actor DocumentImport {
         }
     }
 
+    private static func persistedFailure(
+        from envelope: ImportTaskFailureEnvelope?
+    ) -> PersistedImportFailure? {
+        guard let envelope, envelope.codecVersion == 1 else {
+            return nil
+        }
+        return try? JSONDecoder().decode(
+            PersistedImportFailure.self,
+            from: envelope.payload
+        )
+    }
+
     private static func isRetryable(
         _ envelope: ImportTaskFailureEnvelope?
     ) -> Bool {
-        guard let envelope,
-              envelope.codecVersion == 1,
-              let persisted = try? JSONDecoder().decode(
-                  PersistedImportFailure.self,
-                  from: envelope.payload
-              )
-        else {
-            return false
-        }
-        return persisted.recovery == .retryable
+        persistedFailure(from: envelope)?.recovery == .retryable
     }
 
     private static func retryDisposition(
         for durable: DurableImportSnapshot
     ) -> RetryCheckpointDisposition {
+        // A failure caused by an invalid checkpoint must never be reused:
+        // retaining it would make a user retry fail deterministically.
+        if persistedFailure(from: durable.failure)?.code == .checkpointInvalid {
+            return .clear
+        }
         guard let checkpoint = durable.checkpoint,
               checkpoint.codecVersion == 1,
               durable.checkpointArtifact != nil,

@@ -143,3 +143,33 @@ func restartWithCorruptAcquiredCheckpointFailsRetryably() async throws {
     #expect(failure.code == .checkpointInvalid)
     #expect(failure.recovery == .retryable)
 }
+
+@Test
+func retryAfterCorruptCheckpointClearsItAndReacquires() async throws {
+    let harness = try await RecoveryHarness.make(
+        crashPoint: .afterAcquiredCheckpoint
+    )
+    defer { removeTemporaryDocumentImportRoot(harness.root) }
+    let handle = try await harness.firstImporter.submit(
+        .webpage(harness.articleURL)
+    )
+    try await harness.crashInjector.waitForInjectedTermination()
+
+    try corruptManagedCheckpointPayload(under: harness.root)
+
+    let reopened = try await harness.reopenImporter()
+    let recovered = try #require(try await reopened.task(id: handle.id))
+    let terminal = await recovered.value()
+    guard case .failure(let failure) = terminal else {
+        Issue.record("Expected retryable failure, got \(terminal)")
+        return
+    }
+    #expect(failure.code == .checkpointInvalid)
+
+    // A user retry must clear the invalid checkpoint and begin a fresh
+    // acquisition instead of deterministically reloading the corrupt bytes.
+    try await reopened.retry(taskID: handle.id)
+    let retried = try #require(try await reopened.task(id: handle.id))
+    let retriedTerminal = await retried.value()
+    #expect(retriedTerminal.isSuccess)
+}

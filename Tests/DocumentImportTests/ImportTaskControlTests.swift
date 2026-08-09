@@ -205,3 +205,84 @@ func taskLookupReturnsNilForUnknownID() async throws {
     let missing = try await harness.importer.task(id: ImportTaskID())
     #expect(missing == nil)
 }
+
+private actor BlockingBuilderGate {
+    private var released = false
+
+    func blockUntilReleased() async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !released {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw DurableQueueTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func release() {
+        released = true
+    }
+}
+
+@Test(.timeLimit(.minutes(2)))
+func cancelRunningTaskAfterCheckpointClearsItAndTerminatesCancelled()
+    async throws {
+    let root = try makeTemporaryDocumentImportRoot()
+    defer { removeTemporaryDocumentImportRoot(root) }
+    let library = try await LocalLibrary.open(
+        at: root.appending(path: "Library")
+    )
+    let builderGate = BlockingBuilderGate()
+    let documentImport = DocumentImport(
+        library: library,
+        webAcquirer: try CountingWebAcquirer(),
+        webDocumentBuilder: { page, documentID in
+            try await builderGate.blockUntilReleased()
+            return try await StaticWebDocumentBuilder().build(
+                page,
+                documentID: documentID
+            )
+        }
+    )
+    let sourceURL = try #require(
+        URL(string: "https://fixture.invalid/cancel-after-checkpoint")
+    )
+    let handle = try await documentImport.submit(.webpage(sourceURL))
+
+    // Hold the runner inside the builder after the acquired checkpoint has
+    // been persisted, so cancellation must clean the checkpoint up.
+    let checkpointed = try await waitUntilDurableCheckpoint(
+        taskID: handle.id,
+        library: library
+    )
+    #expect(checkpointed.checkpoint != nil)
+
+    try await handle.cancel()
+
+    let final = try await waitUntilDurableState(
+        .cancelled,
+        taskID: handle.id,
+        library: library
+    )
+    #expect(final.checkpoint == nil)
+    #expect(final.checkpointArtifact == nil)
+    #expect(await handle.value() == .cancelled)
+}
+
+private func waitUntilDurableCheckpoint(
+    taskID: ImportTaskID,
+    library: LocalLibrary
+) async throws -> DurableImportSnapshot {
+    let deadline = ContinuousClock.now + .seconds(5)
+    while ContinuousClock.now < deadline {
+        try Task.checkCancellation()
+        if let snapshot = try await library.retainedImports().first(where: {
+            $0.taskID == taskID && $0.checkpoint != nil
+        }) {
+            return snapshot
+        }
+        try await Task.sleep(for: .milliseconds(2))
+    }
+    throw DurableQueueTestError.timeout
+}
