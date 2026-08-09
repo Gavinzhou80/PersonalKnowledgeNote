@@ -960,13 +960,17 @@ public actor DocumentImport {
 
         if let error = error as? LocalLibraryError {
             switch error {
+            case .insufficientDiskSpace:
+                return ImportFailure(
+                    code: .insufficientDiskSpace,
+                    recovery: .requiresUserAction
+                )
             case .publicationFailed(let retryable):
                 return ImportFailure(
                     code: .publicationFailed,
                     recovery: retryable ? .retryable : .requiresUserAction
                 )
             case .unavailable,
-                 .insufficientDiskSpace,
                  .staleRevision,
                  .invalidTaskState,
                  .checkpointRegression,

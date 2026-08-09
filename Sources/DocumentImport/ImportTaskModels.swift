@@ -93,6 +93,7 @@ public struct ImportFailure: Error, Hashable, Sendable {
         case checkpointInvalid
         case localLibraryUnavailable
         case publicationFailed
+        case insufficientDiskSpace
     }
 
     public enum Recovery: String, Hashable, Codable, Sendable {
