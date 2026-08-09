@@ -32,6 +32,10 @@
 - **Limits**: redirect count cap, page-load timeout, serialized-DOM byte cap, main-frame-only navigation, http(s)-only schemes. Limit violations map to existing `WebAcquisitionError` cases so failure classification needs no new public failure codes.
 - **Checkpointing**: dynamic rendering happens inside the existing `acquiring` stage. The acquired checkpoint stores rendered HTML bytes, so restart after the acquired checkpoint resumes without network or re-rendering.
 
+### Hosting Strategy Decision (2026-08-09)
+
+The original risk materialized: WKWebView cannot be driven inside the `swift test` process. Off-main-thread hosting traps (SIGTRAP), and main-thread hosting hangs because the test runner blocks the main thread and the main run loop never spins. A standalone diagnostic process with a spinning main run loop confirmed the renderer logic works. **Decision (user-approved):** keep the production `IsolatedWKWebViewRenderer` (valid in the app, whose main run loop always spins) and test through the `DynamicWebRendering` seam with scripted stubs; the dynamic fixture's script effect is simulated by a kept-in-sync rendered-DOM string. The renderer itself is validated by the standalone diagnostic, not the automated suite.
+
 ---
 
 ## File Structure
@@ -59,7 +63,7 @@ A tested `DynamicWebRendering` seam with a production WKWebView adapter that ren
 - Modify: `Tests/Fixtures/FixtureCatalog.swift`
 - Create: `Tests/DocumentImportTests/DynamicWebImportTests.swift`
 
-- [ ] **Step 1: Add the dynamic article fixture**
+- [x] **Step 1: Add the dynamic article fixture**
 
 Create `Tests/Fixtures/Web/dynamic-article/index.html`:
 
@@ -108,7 +112,9 @@ public static let dynamicWebArticleURL = requiredResource(
 )
 ```
 
-- [ ] **Step 2: Write failing renderer tests**
+- [x] **Step 2: Write failing renderer tests**
+
+> Adjusted per Hosting Strategy Decision: WKWebView-based renderer tests cannot run under `swift test`; the suite became `DynamicWebRenderingSeamTests` — scripted-stub seam contract tests plus a check that the simulated post-render DOM feeds `StaticArticleExtractor`.
 
 Create `Tests/DocumentImportTests/DynamicWebImportTests.swift` with the renderer suite (serve fixtures through `LocalHTTPFixtureServer`):
 
@@ -152,7 +158,7 @@ Behavior under test:
 - `noCookieStateLeakIntoRenderedPage`: the server sends `Set-Cookie: pkn-session=secret`; the fixture prints `document.cookie` into the article; the rendered HTML must contain `clean session` and never `pkn-session=secret`.
 - `taskCancellationStopsRendering`: start `render` against a 30 s-delayed route in a child task, cancel it, and expect `CancellationError`.
 
-- [ ] **Step 3: Run tests to verify RED**
+- [x] **Step 3: Run tests to verify RED**
 
 Run:
 
@@ -162,7 +168,9 @@ swift test --filter IsolatedWebRendererTests
 
 Expected: compile failure because `IsolatedWebRenderer.swift` does not exist yet.
 
-- [ ] **Step 4: Implement the isolated renderer**
+- [x] **Step 4: Implement the isolated renderer**
+
+> Adjusted per Hosting Strategy Decision: delegate methods pin explicit Objective-C selectors; `WKProcessPool` reuse dropped (deprecated on macOS 12+); isolation rests on the non-persistent data store.
 
 Create `Sources/DocumentImport/Internal/IsolatedWebRenderer.swift` with:
 
@@ -206,7 +214,7 @@ Implementation requirements:
 - Swift Task cancellation: `withTaskCancellationHandler` performs cancellation on the host thread — `stopLoading()`, teardown, resume with `CancellationError()`. A `finished` flag guarantees exactly one continuation resume.
 - Teardown after every terminal outcome: invalidate timer, `stopLoading()`, nil the navigation delegate, drop the web view, all on the host thread.
 
-- [ ] **Step 5: Run renderer tests to verify GREEN**
+- [x] **Step 5: Run renderer tests to verify GREEN**
 
 Run:
 
@@ -216,7 +224,13 @@ swift test --filter IsolatedWebRendererTests
 
 Expected: PASS. If WKWebView proves unusable off the main thread in this environment, stop and report before changing the hosting strategy.
 
-- [ ] **Step 6: Run focused regressions and commit**
+> Outcome: WKWebView proved unusable under `swift test` (see Hosting Strategy Decision). GREEN was verified on the seam suite instead:
+>
+> ```bash
+> swift test --filter DynamicWebRenderingSeamTests
+> ```
+
+- [x] **Step 6: Run focused regressions and commit**
 
 Run:
 
