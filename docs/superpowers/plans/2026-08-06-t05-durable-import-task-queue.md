@@ -1647,7 +1647,7 @@ git commit -m "test: prove import task restart recovery"
 - Create: `Tests/AppSupportTests/ImportTaskStoreTests.swift`
 - Modify: `Tests/AppSupportTests/ImportCenterPresentationTests.swift`
 
-- [ ] **Step 1: Write failing adapter lifecycle tests**
+- [x] **Step 1: Write failing adapter lifecycle tests**
 
 Add tests using a real DocumentImport with gated tasks:
 
@@ -1699,7 +1699,7 @@ a real library and construct deterministic sources.
 
 Add cancel/retry routing, bootstrap availability error, Already Imported, failed, cancelled, and presentation tests.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -1709,7 +1709,7 @@ swift test --filter ImportTaskStoreTests
 
 Expected: FAIL because `ImportTaskStore` does not exist.
 
-- [ ] **Step 3: Implement the MainActor observable store**
+- [x] **Step 3: Implement the MainActor observable store**
 
 Create:
 
@@ -1736,7 +1736,7 @@ public final class ImportTaskStore {
 
 `start()` cancels only the previous observation task, awaits importer readiness, then consumes `.unfinished`. `stopObserving()` cancels only observation. `deinit` cancels observation without calling task cancel.
 
-- [ ] **Step 4: Implement submit, cancel, and retry actions**
+- [x] **Step 4: Implement submit, cancel, and retry actions**
 
 Implement these exact actions:
 
@@ -1748,7 +1748,7 @@ public func retry(id: ImportTaskID) async
 
 Use `DocumentImport.task(id:)` for recovered tasks. Clear the corresponding error before each action. Map availability and control errors separately; do not synthesize task failures.
 
-- [ ] **Step 5: Run AppSupport and DocumentImport tests**
+- [x] **Step 5: Run AppSupport and DocumentImport tests**
 
 Run:
 
@@ -1761,7 +1761,7 @@ swift test --filter DocumentImportTests
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Package.swift Sources/AppSupport/ImportTaskStore.swift Sources/AppSupport/ImportCenterPresentation.swift Tests/AppSupportTests/ImportTaskStoreTests.swift Tests/AppSupportTests/ImportCenterPresentationTests.swift
