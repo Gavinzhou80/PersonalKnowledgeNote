@@ -141,15 +141,20 @@ struct WebMilestoneHardeningTests {
             includingPropertiesForKeys: nil
         )
         #expect(!assets.isEmpty)
-        let heroAsset = try #require(assets.first)
-        #expect(try Data(contentsOf: heroAsset) == hero)
+        // Match by content, not directory order: future fixtures may
+        // localize more than one asset.
+        let heroPresent = try assets.contains { try Data(contentsOf: $0) == hero }
+        #expect(heroPresent)
     }
 
     @Test func failureDiagnosticsCarryNoSourceOrContent() throws {
         let urlMarker = "https://secret.example.com/private/article"
         let bodyMarker = "CONFIDENTIAL_ARTICLE_BODY"
+        // Feed markers through the classifier so the guard is not
+        // vacuous: even when the raw error mentions source or content,
+        // the persisted failure shape must not carry any of it.
         let failure = DocumentImport.classify(
-            WebAcquisitionError.networkUnavailable
+            MarkedFailure(message: "\(urlMarker) \(bodyMarker)")
         )
         // PersistedImportFailure is the durable shape of a terminal
         // failure; it must carry no source or content information.
@@ -190,12 +195,21 @@ struct WebMilestoneHardeningTests {
         let importer = DocumentImport(library: library)
 
         let clock = ContinuousClock()
-        let elapsed = await clock.measure {
-            _ = try? await importer.submit(
-                .webpage(server.url("articles/budget/index.html"))
-            ).value()
-        }
+        let start = clock.now
+        let terminal = try await importer.submit(
+            .webpage(server.url("articles/budget/index.html"))
+        ).value()
+        let elapsed = start.duration(to: clock.now)
 
+        // Assert success first: a fast failure must not pass the budget.
+        guard case .success(.published) = terminal else {
+            Issue.record("Expected published, got \(terminal)")
+            return
+        }
         #expect(elapsed < .seconds(5))
     }
+}
+
+private struct MarkedFailure: Error {
+    let message: String
 }

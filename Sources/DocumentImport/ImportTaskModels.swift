@@ -135,6 +135,12 @@ public struct ImportStageTiming: Hashable, Codable, Sendable {
     }
 }
 
+/// Transient runtime facts for one publication.
+///
+/// Stage timings only cover the stages the producing run actually
+/// executed: a resume from a checkpoint reports the remaining stages,
+/// and each timing includes checkpoint persistence overhead. Durable
+/// re-projections carry `nil` instead.
 public struct ImportPublicationFacts: Hashable, Codable, Sendable {
     public let diagnosticID: UUID
     public let stageTimings: [ImportStageTiming]
