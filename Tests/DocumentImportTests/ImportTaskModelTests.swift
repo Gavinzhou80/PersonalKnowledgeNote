@@ -122,11 +122,12 @@ func terminalSuccessPreservesPublicationOutcome() {
     )
     let success = ImportSuccess.published(
         documentID: documentID,
-        issues: [issue]
+        issues: [issue],
+        facts: nil
     )
 
     switch ImportTerminalState.success(success) {
-    case .success(.published(let actualID, let issues)):
+    case .success(.published(let actualID, let issues, _)):
         #expect(actualID == documentID)
         #expect(issues == [issue])
     default:

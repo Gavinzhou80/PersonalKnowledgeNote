@@ -844,13 +844,15 @@ public actor DocumentImport {
 
     static func success(
         for outcome: PublicationOutcome,
-        publishedIssues: [KnowledgeCore.ImportIssue]
+        publishedIssues: [KnowledgeCore.ImportIssue],
+        facts: ImportPublicationFacts?
     ) -> ImportSuccess {
         switch outcome {
         case .published(let documentID):
             return .published(
                 documentID: documentID,
-                issues: publishedIssues
+                issues: publishedIssues,
+                facts: facts
             )
         case .alreadyImported(
             let documentID,

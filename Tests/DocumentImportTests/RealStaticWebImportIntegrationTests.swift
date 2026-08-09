@@ -63,7 +63,16 @@ struct RealStaticWebImportIntegrationTests {
 
         let terminal = await handle.value()
         let documentID = try #require(publishedDocumentID(terminal))
-        #expect(terminal == .success(.published(documentID: documentID, issues: [])))
+        guard case .success(.published(
+            let terminalID,
+            let terminalIssues,
+            _
+        )) = terminal else {
+            Issue.record("Expected published terminal, got \(terminal)")
+            return
+        }
+        #expect(terminalID == documentID)
+        #expect(terminalIssues.isEmpty)
         let activities = snapshots.compactMap(\.activity)
         #expect(activities.first == .acquiringOriginalSource)
         #expect(
@@ -74,9 +83,16 @@ struct RealStaticWebImportIntegrationTests {
                 .publishing,
             ]
         )
-        #expect(snapshots.last?.state == .completed(
-            .published(documentID: documentID, issues: [])
-        ))
+        guard case .completed(.published(
+            let snapshotID,
+            let snapshotIssues,
+            _
+        )) = snapshots.last?.state else {
+            Issue.record("Expected completed published snapshot state")
+            return
+        }
+        #expect(snapshotID == documentID)
+        #expect(snapshotIssues.isEmpty)
 
         let located = try #require(try await library.sourceDocument(id: documentID))
         let content = located.document.content
@@ -255,7 +271,16 @@ struct RealStaticWebImportIntegrationTests {
         )]
 
         #expect(located.document.content.issues == expected)
-        #expect(terminal == .success(.published(documentID: documentID, issues: expected)))
+        guard case .success(.published(
+            let reloadedID,
+            let reloadedIssues,
+            _
+        )) = terminal else {
+            Issue.record("Expected published terminal, got \(terminal)")
+            return
+        }
+        #expect(reloadedID == documentID)
+        #expect(reloadedIssues == expected)
     }
 
     @Test(.timeLimit(.minutes(1)))
@@ -514,7 +539,7 @@ private extension ImportTaskSnapshot {
 }
 
 private func publishedDocumentID(_ terminal: ImportTerminalState) -> SourceDocumentID? {
-    guard case .success(.published(let documentID, _)) = terminal else { return nil }
+    guard case .success(.published(let documentID, _, _)) = terminal else { return nil }
     return documentID
 }
 

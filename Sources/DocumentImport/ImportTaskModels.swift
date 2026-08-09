@@ -71,7 +71,8 @@ public enum ImportActivity: String, Hashable, Sendable {
 public enum ImportSuccess: Hashable, Sendable {
     case published(
         documentID: SourceDocumentID,
-        issues: [KnowledgeCore.ImportIssue]
+        issues: [KnowledgeCore.ImportIssue],
+        facts: ImportPublicationFacts?
     )
     case alreadyImported(
         documentID: SourceDocumentID,
@@ -115,6 +116,35 @@ public struct ImportFailure: Error, Hashable, Sendable {
         self.code = code
         self.recovery = recovery
         self.diagnosticID = diagnosticID
+    }
+}
+
+public enum ImportStage: String, Codable, Hashable, Sendable {
+    case acquiringSource
+    case constructingDocument
+    case publishing
+}
+
+public struct ImportStageTiming: Hashable, Codable, Sendable {
+    public let stage: ImportStage
+    public let durationMilliseconds: Int64
+
+    public init(stage: ImportStage, durationMilliseconds: Int64) {
+        self.stage = stage
+        self.durationMilliseconds = durationMilliseconds
+    }
+}
+
+public struct ImportPublicationFacts: Hashable, Codable, Sendable {
+    public let diagnosticID: UUID
+    public let stageTimings: [ImportStageTiming]
+
+    public init(
+        diagnosticID: UUID = UUID(),
+        stageTimings: [ImportStageTiming]
+    ) {
+        self.diagnosticID = diagnosticID
+        self.stageTimings = stageTimings
     }
 }
 

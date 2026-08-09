@@ -558,7 +558,8 @@ func recreatedCompletedHistoryPreservesOutcomeIssuesAndSourceSummary() async thr
     ])
     #expect(history[0].state == .completed(.published(
         documentID: firstDocumentID,
-        issues: [issue]
+        issues: [issue],
+        facts: nil
     )))
     guard case .alreadyImported(
         let duplicateID,

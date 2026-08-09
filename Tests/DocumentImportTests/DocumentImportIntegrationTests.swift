@@ -138,11 +138,9 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
 
     let completedList = try #require(await taskLists.next())
     let completed = try #require(completedList.first)
-    let expectedSuccess = ImportSuccess.published(
-        documentID: fixedDocumentID,
-        issues: []
-    )
-    #expect(completed.state == .completed(expectedSuccess))
+    let completedFields = try #require(publishedFields(of: completed))
+    #expect(completedFields.documentID == fixedDocumentID)
+    #expect(completedFields.issues.isEmpty)
     #expect(await handleUpdates.next() == completed)
     #expect(await handleUpdates.next() == nil)
     #expect(
@@ -157,7 +155,10 @@ func importsStaticWebFixtureThroughPublicTaskInterface() async throws {
     #expect(acquiring.revision < constructing.revision)
     #expect(constructing.revision < publishing.revision)
     #expect(publishing.revision < completed.revision)
-    #expect(await terminal == .success(expectedSuccess))
+    let terminalState = await terminal
+    let terminalFields = try #require(publishedFields(of: terminalState))
+    #expect(terminalFields.documentID == fixedDocumentID)
+    #expect(terminalFields.issues.isEmpty)
     let durableCompleted = try await workspace.snapshot()
     #expect(durableCompleted.revision == completed.revision)
     #expect(durableCompleted.state == .completed)
@@ -247,10 +248,16 @@ func publishedSuccessMatchesPersistentIssues() async throws {
             relatedBlockID: imageBlock.id
         ),
     ])
-    #expect(terminal == .success(.published(
-        documentID: fixedDocumentID,
-        issues: persistedIssues
-    )))
+    guard case .success(.published(
+        let terminalID,
+        let terminalIssues,
+        _
+    )) = terminal else {
+        Issue.record("Expected published terminal, got \(terminal)")
+        return
+    }
+    #expect(terminalID == fixedDocumentID)
+    #expect(terminalIssues == persistedIssues)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -405,10 +412,6 @@ func completedSnapshotFailureStillPublishesSuccessfulTerminal() async throws {
     _ = try #require(await updates.next())
     let publishing = try #require(await updates.next())
     let completed = try #require(await updates.next())
-    let expectedSuccess = ImportSuccess.published(
-        documentID: fixedDocumentID,
-        issues: []
-    )
     #expect(
         publishing.state == .running(ImportProgress(
             activity: .publishing,
@@ -423,9 +426,14 @@ func completedSnapshotFailureStillPublishesSuccessfulTerminal() async throws {
     #expect(durableCompleted.state == .completed)
     #expect(completed.revision == durableCompleted.revision)
     #expect(completed.attempt == publishing.attempt)
-    #expect(completed.state == .completed(expectedSuccess))
+    let completedFields = try #require(publishedFields(of: completed))
+    #expect(completedFields.documentID == fixedDocumentID)
+    #expect(completedFields.issues.isEmpty)
     #expect(await updates.next() == nil)
-    #expect(await terminal == .success(expectedSuccess))
+    let terminalState = await terminal
+    let terminalFields = try #require(publishedFields(of: terminalState))
+    #expect(terminalFields.documentID == fixedDocumentID)
+    #expect(terminalFields.issues.isEmpty)
     #expect(
         try await library.sourceDocument(id: fixedDocumentID) != nil
     )
@@ -463,4 +471,20 @@ func initialSnapshotFailureDoesNotAbandonAcceptedTaskBeforeRunnerOwnsIt() async 
         snapshots.first { $0.taskID == handle.id }
     )
     #expect(durable.state == .failed)
+}
+
+private func publishedFields(
+    of snapshot: ImportTaskSnapshot
+) -> (documentID: SourceDocumentID, issues: [KnowledgeCore.ImportIssue])? {
+    guard case .completed(.published(let documentID, let issues, _)) = snapshot.state
+    else { return nil }
+    return (documentID, issues)
+}
+
+private func publishedFields(
+    of terminal: ImportTerminalState
+) -> (documentID: SourceDocumentID, issues: [KnowledgeCore.ImportIssue])? {
+    guard case .success(.published(let documentID, let issues, _)) = terminal
+    else { return nil }
+    return (documentID, issues)
 }

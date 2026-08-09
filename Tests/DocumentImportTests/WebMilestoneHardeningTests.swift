@@ -1,11 +1,12 @@
 import Foundation
 import KnowledgeCore
+import TestFixtures
 import Testing
 
 @testable import DocumentImport
 import LocalLibrary
 
-@Suite("Web milestone hardening")
+@Suite("Web milestone hardening", .serialized)
 struct WebMilestoneHardeningTests {
     @Test func classifyMapsInsufficientDiskSpaceToTypedRequiresUserActionFailure() {
         let failure = DocumentImport.classify(LocalLibraryError.insufficientDiskSpace)
@@ -37,5 +38,42 @@ struct WebMilestoneHardeningTests {
         #expect(product.issues.contains(
             KnowledgeCore.ImportIssue(code: .webEncodingFallback)
         ))
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func successfulImportReportsOrderedStageTimingFacts() async throws {
+        let root = try makeTemporaryDocumentImportRoot()
+        defer { removeTemporaryDocumentImportRoot(root) }
+        let library = try await LocalLibrary.open(
+            at: root.appending(path: "Library")
+        )
+        let fixture = try Data(contentsOf: FixtureCatalog.webArticleURL)
+        let server = try await LocalHTTPFixtureServer.start { path in
+            guard path.hasSuffix("index.html") else {
+                return .init(status: 404, headers: ["Content-Type": "text/plain"])
+            }
+            return .init(
+                headers: ["Content-Type": "text/html; charset=utf-8"],
+                body: fixture
+            )
+        }
+        defer { server.stop() }
+        let importer = DocumentImport(library: library)
+
+        let terminal = try await importer.submit(
+            .webpage(server.url("articles/simple/index.html"))
+        ).value()
+
+        guard case .success(.published(_, _, let facts)) = terminal else {
+            Issue.record("Expected published, got \(terminal)")
+            return
+        }
+        let timings = try #require(facts).stageTimings
+        #expect(timings.map(\.stage) == [
+            .acquiringSource, .constructingDocument, .publishing,
+        ])
+        for timing in timings {
+            #expect(timing.durationMilliseconds >= 0)
+        }
     }
 }

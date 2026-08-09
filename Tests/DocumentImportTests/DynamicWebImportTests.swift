@@ -115,7 +115,7 @@ struct DynamicWebImportIntegrationTests {
             .webpage(server.url("dynamic/index.html"))
         ).value()
 
-        guard case .success(.published(let documentID, _)) = terminal else {
+        guard case .success(.published(let documentID, _, _)) = terminal else {
             Issue.record("Expected published, got \(terminal)")
             return
         }
