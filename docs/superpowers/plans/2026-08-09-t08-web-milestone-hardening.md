@@ -445,3 +445,19 @@ git push origin main
 - Real trash move/restore APIs (§4.3) remain out of T08 scope; trash-location semantics are already tested.
 - True ENOSPC injection (filling a volume) is impractical in CI; the classify chain from `LocalLibraryError.insufficientDiskSpace` is the tested seam, matching how T07 tested typed failures.
 - Publication facts are delivered through the DocumentImport seam; LocalLibrary persistence of facts is deferred to keep GRDB schema stable.
+
+---
+
+## Completion Record (2026-08-09)
+
+All 28 steps of Tasks 1-5 executed and verified:
+
+- Task 1: commit 9b5694f — typed insufficientDiskSpace failure.
+- Task 2: commit a6b2d22 — issue taxonomy split + GBK rescue (utf-16 probe rejected: Foundation decodes it leniently; GBK chosen as the reliable fallback trigger).
+- Task 3: commit bf4ff2f — stage timing + optional publication facts (durable re-projection passes nil).
+- Task 4: commit 84e9cfd — restart re-localization, privacy shape, performance budget.
+- Task 5: checklist commit b41a174; public-fetch scan clean (reserved domains only); full regression 389/389 green; swift build clean; xcodebuild Debug BUILD SUCCEEDED.
+
+CodeReview on main..HEAD: no Blocker/Major. One Warning + two actionable Nits fixed in a follow-up commit (budget test asserts success before timing, privacy markers routed through classify, asset matching by content).
+
+Known environment gotcha: a stale incremental build after the KnowledgeCore enum change caused a SIGSEGV in LocalLibraryTests (layout mismatch in getEnumTagSinglePayload). A clean `rm -rf .build/arm64-apple-macosx/debug` rebuild resolved it; no code defect involved.
