@@ -458,7 +458,8 @@ struct TaskSnapshotRegistry {
                 }
                 state = .completed(.published(
                     documentID: documentID,
-                    issues: issues
+                    issues: issues,
+                    facts: nil
                 ))
             case .alreadyImported(
                 let documentID,

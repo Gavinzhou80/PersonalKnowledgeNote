@@ -71,7 +71,8 @@ public enum ImportActivity: String, Hashable, Sendable {
 public enum ImportSuccess: Hashable, Sendable {
     case published(
         documentID: SourceDocumentID,
-        issues: [KnowledgeCore.ImportIssue]
+        issues: [KnowledgeCore.ImportIssue],
+        facts: ImportPublicationFacts?
     )
     case alreadyImported(
         documentID: SourceDocumentID,
@@ -93,6 +94,7 @@ public struct ImportFailure: Error, Hashable, Sendable {
         case checkpointInvalid
         case localLibraryUnavailable
         case publicationFailed
+        case insufficientDiskSpace
     }
 
     public enum Recovery: String, Hashable, Codable, Sendable {
@@ -114,6 +116,41 @@ public struct ImportFailure: Error, Hashable, Sendable {
         self.code = code
         self.recovery = recovery
         self.diagnosticID = diagnosticID
+    }
+}
+
+public enum ImportStage: String, Codable, Hashable, Sendable {
+    case acquiringSource
+    case constructingDocument
+    case publishing
+}
+
+public struct ImportStageTiming: Hashable, Codable, Sendable {
+    public let stage: ImportStage
+    public let durationMilliseconds: Int64
+
+    public init(stage: ImportStage, durationMilliseconds: Int64) {
+        self.stage = stage
+        self.durationMilliseconds = durationMilliseconds
+    }
+}
+
+/// Transient runtime facts for one publication.
+///
+/// Stage timings only cover the stages the producing run actually
+/// executed: a resume from a checkpoint reports the remaining stages,
+/// and each timing includes checkpoint persistence overhead. Durable
+/// re-projections carry `nil` instead.
+public struct ImportPublicationFacts: Hashable, Codable, Sendable {
+    public let diagnosticID: UUID
+    public let stageTimings: [ImportStageTiming]
+
+    public init(
+        diagnosticID: UUID = UUID(),
+        stageTimings: [ImportStageTiming]
+    ) {
+        self.diagnosticID = diagnosticID
+        self.stageTimings = stageTimings
     }
 }
 

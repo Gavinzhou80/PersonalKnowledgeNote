@@ -84,7 +84,14 @@ func rejectsInvalidUnsafeAndOversizedImagesWithoutFailingTheBatch() async throws
 
     #expect(result.mediaByCandidateKey.isEmpty)
     #expect(result.issues.count == 4)
-    #expect(result.issues.allSatisfy { $0.code == .optionalWebImageUnavailable })
+    let codesByCandidate = Dictionary(
+        uniqueKeysWithValues: result.issues.map { ($0.candidateKey, $0.code) }
+    )
+    // Safety gates reject the payload; HTTP-level failures stay unavailable.
+    #expect(codesByCandidate["mime"] == .webImageRejected)
+    #expect(codesByCandidate["large"] == .webImageRejected)
+    #expect(codesByCandidate["unsafe"] == .webImageRejected)
+    #expect(codesByCandidate["status"] == .optionalWebImageUnavailable)
 }
 
 @Test

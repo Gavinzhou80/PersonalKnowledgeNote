@@ -83,7 +83,8 @@ func taskSnapshotMapsWithoutWorkflowKnowledge() {
             .completed(
                 .published(
                     documentID: .init(),
-                    issues: []
+                    issues: [],
+                    facts: nil
                 )
             ),
             "Import completed",

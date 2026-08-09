@@ -28,6 +28,13 @@ typealias ImportRunnerBoundaryHook = @Sendable (
     T05CrashPoint
 ) async throws -> Void
 
+extension Duration {
+    fileprivate var wholeMilliseconds: Int64 {
+        let (seconds, attoseconds) = components
+        return seconds * 1_000 + attoseconds / 1_000_000_000_000_000
+    }
+}
+
 struct PersistedImportFailure: Codable, Sendable {
     let code: ImportFailure.Code
     let recovery: ImportFailure.Recovery
@@ -73,6 +80,9 @@ extension DocumentImport {
         let claimed = try await workspaceSnapshotLoader(workspace)
         try await boundaryHook(.afterAcceptance)
 
+        let clock = ContinuousClock()
+        var stageTimings: [ImportStageTiming] = []
+
         switch try Self.resumePoint(from: claimed) {
         case .acquireFresh:
             let acquiring = try await workspace.checkpoint(
@@ -89,18 +99,25 @@ extension DocumentImport {
                 revision: acquiring.revision,
                 state: .running(Self.progress(.acquiringOriginalSource))
             )
+            let acquireStart = clock.now
             let page = try await webAcquirer.acquire(sourceURL)
             let acquiredRevision = try await persistAcquiredCheckpoint(
                 page: page,
                 workspace: workspace,
                 expectedRevision: acquiring.revision
             )
+            stageTimings.append(ImportStageTiming(
+                stage: .acquiringSource,
+                durationMilliseconds: acquireStart
+                    .duration(to: clock.now).wholeMilliseconds
+            ))
             try await constructAndPublish(
                 page: page,
                 workspace: workspace,
                 source: source,
                 sourceURL: sourceURL,
-                expectedRevision: acquiredRevision
+                expectedRevision: acquiredRevision,
+                stageTimings: &stageTimings
             )
         case .acquired(let artifact):
             updateSnapshot(
@@ -119,7 +136,8 @@ extension DocumentImport {
                 workspace: workspace,
                 source: source,
                 sourceURL: sourceURL,
-                expectedRevision: claimed.revision
+                expectedRevision: claimed.revision,
+                stageTimings: &stageTimings
             )
         case .prepared(let artifact):
             updateSnapshot(
@@ -135,7 +153,8 @@ extension DocumentImport {
                 prepared,
                 workspace: workspace,
                 sourceURL: sourceURL,
-                expectedRevision: claimed.revision
+                expectedRevision: claimed.revision,
+                stageTimings: stageTimings
             )
         }
     }
@@ -177,8 +196,11 @@ extension DocumentImport {
         workspace: ImportWorkspace,
         source: OriginalSource,
         sourceURL: URL,
-        expectedRevision: UInt64
+        expectedRevision: UInt64,
+        stageTimings: inout [ImportStageTiming]
     ) async throws {
+        let clock = ContinuousClock()
+        let constructStart = clock.now
         let documentID = documentIDGenerator()
         let product = try await webDocumentBuilder(page, documentID)
         let artifact = try await workspace.stageArtifact(
@@ -220,6 +242,11 @@ extension DocumentImport {
         )
         try await boundaryHook(.afterPreparedCheckpoint)
 
+        stageTimings.append(ImportStageTiming(
+            stage: .constructingDocument,
+            durationMilliseconds: constructStart
+                .duration(to: clock.now).wholeMilliseconds
+        ))
         try await publishCandidate(
             PublicationCandidate(
                 fingerprint: product.fingerprint,
@@ -230,7 +257,8 @@ extension DocumentImport {
             publishedIssues: product.issues,
             workspace: workspace,
             sourceURL: sourceURL,
-            expectedRevision: replacement.snapshot.revision
+            expectedRevision: replacement.snapshot.revision,
+            stageTimings: stageTimings
         )
     }
 
@@ -262,7 +290,8 @@ extension DocumentImport {
         _ prepared: PreparedWebPublication,
         workspace: ImportWorkspace,
         sourceURL: URL,
-        expectedRevision: UInt64
+        expectedRevision: UInt64,
+        stageTimings: [ImportStageTiming]
     ) async throws {
         let stagedArtifact = StagedArtifact(
             rawValue: prepared.stagedArtifactID,
@@ -279,7 +308,8 @@ extension DocumentImport {
             publishedIssues: prepared.issues,
             workspace: workspace,
             sourceURL: sourceURL,
-            expectedRevision: expectedRevision
+            expectedRevision: expectedRevision,
+            stageTimings: stageTimings
         )
     }
 
@@ -288,12 +318,21 @@ extension DocumentImport {
         publishedIssues: [KnowledgeCore.ImportIssue],
         workspace: ImportWorkspace,
         sourceURL: URL,
-        expectedRevision: UInt64
+        expectedRevision: UInt64,
+        stageTimings: [ImportStageTiming]
     ) async throws {
+        let clock = ContinuousClock()
+        let publishStart = clock.now
         let outcome = try await workspace.finish(
             candidate,
             expectedRevision: expectedRevision
         )
+        var completedTimings = stageTimings
+        completedTimings.append(ImportStageTiming(
+            stage: .publishing,
+            durationMilliseconds: publishStart
+                .duration(to: clock.now).wholeMilliseconds
+        ))
         let completed = try? await workspaceSnapshotLoader(workspace)
         let terminalRevision = completed?.revision
             ?? Self.completionRevision(
@@ -309,7 +348,10 @@ extension DocumentImport {
                 source: .webpage(sourceURL),
                 state: .completed(Self.success(
                     for: outcome,
-                    publishedIssues: publishedIssues
+                    publishedIssues: publishedIssues,
+                    facts: ImportPublicationFacts(
+                        stageTimings: completedTimings
+                    )
                 ))
             )
         )

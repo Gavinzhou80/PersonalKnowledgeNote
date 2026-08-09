@@ -129,11 +129,16 @@ struct StaticWebDocumentBuilder: Sendable {
                     ($0.id, SourceEvidence.web(locator: $0.block.evidenceLocator))
                 }
             )
-            let issues = localized.issues.map { issue in
+            var issues = localized.issues.map { issue in
                 KnowledgeCore.ImportIssue(
                     code: issue.code,
                     relatedBlockID: imageBlockIDs[issue.candidateKey]
                 )
+            }
+            if article.usedEncodingFallback {
+                issues.append(KnowledgeCore.ImportIssue(
+                    code: .webEncodingFallback
+                ))
             }
             let content = SourceDocumentContent(
                 documentID: documentID,

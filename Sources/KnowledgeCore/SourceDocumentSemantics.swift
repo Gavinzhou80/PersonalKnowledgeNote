@@ -448,6 +448,8 @@ public struct SourceRelation: Codable, Hashable, Sendable {
 public struct ImportIssue: Codable, Hashable, Sendable {
     public enum Code: String, Codable, Hashable, Sendable {
         case optionalWebImageUnavailable
+        case webImageRejected
+        case webEncodingFallback
     }
 
     public let code: Code

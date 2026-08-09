@@ -42,12 +42,13 @@ struct StaticArticleExtractor: Sendable {
         textEncodingName: String?,
         metrics: inout EvidenceExtractionMetrics
     ) throws -> ExtractedWebArticle {
-        guard let source = decodeHTML(
+        guard let decoded = decodeHTML(
             html,
             persistedCharset: textEncodingName
         ) else {
             throw StaticWebBuildError.unreadableHTML
         }
+        let source = decoded.text
         let document: Document
         do {
             document = try SwiftSoup.parse(source, sourceURL.absoluteString)
@@ -113,20 +114,24 @@ struct StaticArticleExtractor: Sendable {
             ),
             blocks: blocks,
             rootSelector: rootSelector,
-            imageCandidates: images
+            imageCandidates: images,
+            usedEncodingFallback: decoded.usedFallback
         )
     }
 
     private func decodeHTML(
         _ data: Data,
         persistedCharset: String?
-    ) -> String? {
-        if let encoding = htmlStringEncoding(for: persistedCharset),
-           let decoded = String(data: data, encoding: encoding) {
-            return decoded
+    ) -> (text: String, usedFallback: Bool)? {
+        let declaredEncoding = htmlStringEncoding(for: persistedCharset)
+        if let declaredEncoding,
+           let decoded = String(data: data, encoding: declaredEncoding) {
+            return (decoded, false)
         }
         if let decoded = String(data: data, encoding: .utf8) {
-            return decoded
+            // Degradation only when a declared charset failed; absent
+            // charset with clean UTF-8 is the normal path.
+            return (decoded, declaredEncoding != nil)
         }
         for charset in html5MetaCharsets(in: data) {
             guard let encoding = htmlStringEncoding(for: charset),
@@ -134,7 +139,7 @@ struct StaticArticleExtractor: Sendable {
             else {
                 continue
             }
-            return decoded
+            return (decoded, true)
         }
         return nil
     }

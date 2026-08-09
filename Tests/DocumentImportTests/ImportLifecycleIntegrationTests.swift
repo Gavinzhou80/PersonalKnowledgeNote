@@ -190,7 +190,8 @@ func publicLifecycleCoversAllDurableOutcomesAcrossRestart() async throws {
     let terminalA = await handleA.value()
     guard case .success(.published(
         documentID: let documentA,
-        issues: _
+        issues: _,
+        facts: _
     )) = terminalA else {
         Issue.record("Expected the first task to publish")
         return

@@ -844,13 +844,15 @@ public actor DocumentImport {
 
     static func success(
         for outcome: PublicationOutcome,
-        publishedIssues: [KnowledgeCore.ImportIssue]
+        publishedIssues: [KnowledgeCore.ImportIssue],
+        facts: ImportPublicationFacts?
     ) -> ImportSuccess {
         switch outcome {
         case .published(let documentID):
             return .published(
                 documentID: documentID,
-                issues: publishedIssues
+                issues: publishedIssues,
+                facts: facts
             )
         case .alreadyImported(
             let documentID,
@@ -960,13 +962,17 @@ public actor DocumentImport {
 
         if let error = error as? LocalLibraryError {
             switch error {
+            case .insufficientDiskSpace:
+                return ImportFailure(
+                    code: .insufficientDiskSpace,
+                    recovery: .requiresUserAction
+                )
             case .publicationFailed(let retryable):
                 return ImportFailure(
                     code: .publicationFailed,
                     recovery: retryable ? .retryable : .requiresUserAction
                 )
             case .unavailable,
-                 .insufficientDiskSpace,
                  .staleRevision,
                  .invalidTaskState,
                  .checkpointRegression,
