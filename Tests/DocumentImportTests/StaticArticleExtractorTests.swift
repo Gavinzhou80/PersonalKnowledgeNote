@@ -900,3 +900,35 @@ func evidenceIndexPrecomputesAnonymousSiblingOrdinalsLinearly() throws {
         #expect(try original.select(block.evidenceLocator).size() == 1)
     }
 }
+
+@Test
+func legacyMetaCharsetRescueFlagsTheDegradation() throws {
+    // Legacy GBK page: bytes are not valid UTF-8, so the UTF-8 pass fails
+    // and the meta-declared GBK charset rescues the page.
+    let html = "<html><head><meta charset=\"gbk\"></head><body><article><h1>编码救援</h1><p>正文段落足够长。</p></article></body></html>"
+    let gbk = try #require(htmlStringEncoding(for: "gbk"))
+    let bytes = try #require(html.data(using: gbk))
+
+    let article = try StaticArticleExtractor().extract(
+        html: bytes,
+        sourceURL: URL(string: "https://fixture.invalid/encoding")!
+    )
+
+    #expect(article.usedEncodingFallback)
+    #expect(article.blocks.contains { $0.canonicalText == "编码救援" })
+}
+
+@Test
+func cleanDeclaredCharsetDoesNotFlagTheDegradation() throws {
+    let html = Data("""
+    <html><head><meta charset="utf-8"></head><body><article><h1>Clean heading</h1></article></body></html>
+    """.utf8)
+
+    let article = try StaticArticleExtractor().extract(
+        html: html,
+        sourceURL: URL(string: "https://fixture.invalid/encoding")!,
+        textEncodingName: "utf-8"
+    )
+
+    #expect(!article.usedEncodingFallback)
+}

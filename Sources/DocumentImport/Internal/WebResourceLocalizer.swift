@@ -63,7 +63,7 @@ struct WebResourceLocalizer: Sendable {
         var media: [String: SourceMediaReference] = [:]
         var issues: [WebLocalizationIssue] = []
         for candidate in candidates {
-            switch downloads[candidate.resolvedURL] ?? .unavailable {
+            switch downloads[candidate.resolvedURL] ?? .unavailable(.fetchFailed) {
             case .available(
                 let data,
                 let mimeType,
@@ -86,9 +86,11 @@ struct WebResourceLocalizer: Sendable {
                     pixelWidth: pixelWidth,
                     pixelHeight: pixelHeight
                 )
-            case .unavailable:
+            case .unavailable(let reason):
                 issues.append(WebLocalizationIssue(
-                    code: .optionalWebImageUnavailable,
+                    code: reason == .payloadRejected
+                        ? .webImageRejected
+                        : .optionalWebImageUnavailable,
                     candidateKey: candidate.stableKey
                 ))
             }
@@ -101,7 +103,7 @@ struct WebResourceLocalizer: Sendable {
         session: URLSession
     ) async throws -> DownloadResult {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-              url.host != nil else { return .unavailable }
+              url.host != nil else { return .unavailable(.payloadRejected) }
         var request = URLRequest(url: url)
         request.httpShouldHandleCookies = false
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -109,22 +111,24 @@ struct WebResourceLocalizer: Sendable {
             let (bytes, response) = try await session.bytes(for: request)
             try Task.checkCancellation()
             guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode),
-                  let normalized = normalizedImageMIME(http.value(forHTTPHeaderField: "Content-Type")),
+                  (200..<300).contains(http.statusCode) else {
+                return .unavailable(.fetchFailed)
+            }
+            guard let normalized = normalizedImageMIME(http.value(forHTTPHeaderField: "Content-Type")),
                   let fileExtension = extensionForMIME(normalized) else {
-                return .unavailable
+                return .unavailable(.payloadRejected)
             }
             if let value = http.value(forHTTPHeaderField: "Content-Length"),
                let length = UInt64(value.trimmingCharacters(in: .whitespaces)),
                length > UInt64(Self.maximumImageBytes) {
-                return .unavailable
+                return .unavailable(.payloadRejected)
             }
             var data = Data()
             data.reserveCapacity(min(Self.maximumImageBytes, 64 * 1024))
             for try await byte in bytes {
                 try Task.checkCancellation()
                 guard data.count < Self.maximumImageBytes else {
-                    return .unavailable
+                    return .unavailable(.payloadRejected)
                 }
                 data.append(byte)
             }
@@ -132,7 +136,7 @@ struct WebResourceLocalizer: Sendable {
                   let validated = validateImage(
                     data,
                     declaredMIMEType: normalized
-                  ) else { return .unavailable }
+                  ) else { return .unavailable(.payloadRejected) }
             return .available(
                 validated.data,
                 normalized,
@@ -144,7 +148,7 @@ struct WebResourceLocalizer: Sendable {
             throw CancellationError()
         } catch {
             if Task.isCancelled { throw CancellationError() }
-            return .unavailable
+            return .unavailable(.fetchFailed)
         }
     }
 
@@ -296,7 +300,12 @@ struct WebResourceLocalizer: Sendable {
 
 private enum DownloadResult: Sendable {
     case available(Data, String, String, Int?, Int?)
-    case unavailable
+    case unavailable(UnavailableReason)
+
+    enum UnavailableReason: Sendable {
+        case fetchFailed
+        case payloadRejected
+    }
 }
 
 private struct ValidatedImage: Sendable {

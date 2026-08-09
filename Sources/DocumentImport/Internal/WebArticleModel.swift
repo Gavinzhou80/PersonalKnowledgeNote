@@ -6,6 +6,21 @@ struct ExtractedWebArticle: Sendable {
     let blocks: [ExtractedWebBlock]
     let rootSelector: String
     let imageCandidates: [WebImageCandidate]
+    let usedEncodingFallback: Bool
+
+    init(
+        metadata: ImportedDocumentMetadata,
+        blocks: [ExtractedWebBlock],
+        rootSelector: String,
+        imageCandidates: [WebImageCandidate],
+        usedEncodingFallback: Bool = false
+    ) {
+        self.metadata = metadata
+        self.blocks = blocks
+        self.rootSelector = rootSelector
+        self.imageCandidates = imageCandidates
+        self.usedEncodingFallback = usedEncodingFallback
+    }
 }
 
 struct ExtractedWebBlock: Sendable {
