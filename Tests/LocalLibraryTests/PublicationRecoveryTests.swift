@@ -50,7 +50,7 @@ func startupRecoversInterruptedPublicationAtEveryCrashBoundary(
     let recovered = try await workspace.snapshot()
 
     if point == .afterIntentCommit {
-        #expect(recovered.state == .running)
+        #expect(recovered.state == .queued)
         #expect(recovered.revision > interrupted.publicationRevision)
         #expect(recovered.stagedArtifact == interrupted.candidate.artifact)
         #expect(
@@ -174,7 +174,7 @@ func invalidMovedFinalWithoutStagingRollsBackAndCanRestage() async throws {
         try await reopened.importWorkspace(id: interrupted.taskID)
     )
     let recovered = try await workspace.snapshot()
-    #expect(recovered.state == .running)
+    #expect(recovered.state == .queued)
     #expect(recovered.stagedArtifact == nil)
     #expect(
         try await reopened.sourceDocument(
@@ -243,7 +243,7 @@ func invalidFinalWithValidStagingIsQuarantinedAndKeepsOwnership()
         try await reopened.importWorkspace(id: interrupted.taskID)
     )
     let recovered = try await workspace.snapshot()
-    #expect(recovered.state == .running)
+    #expect(recovered.state == .queued)
     #expect(recovered.stagedArtifact == interrupted.candidate.artifact)
     #expect(
         try LocalLibraryTestDriver.finalArtifactExists(
@@ -284,7 +284,7 @@ func missingFinalAndStagingClearsOwnershipForRestaging() async throws {
         try await reopened.importWorkspace(id: interrupted.taskID)
     )
     let recovered = try await workspace.snapshot()
-    #expect(recovered.state == .running)
+    #expect(recovered.state == .queued)
     #expect(recovered.stagedArtifact == nil)
     let restaged = try await stageRecoveryPackage(
         for: workspace,

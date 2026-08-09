@@ -147,7 +147,7 @@ func provenanceFailureRollsBackDuplicateCompletion(
     )
     let outcome = try await retryWorkspace.finish(
         failed.candidate,
-        expectedRevision: failed.expectedRevision
+        expectedRevision: try await retryWorkspace.snapshot().revision
     )
 
     #expect(

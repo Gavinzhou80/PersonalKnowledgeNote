@@ -38,7 +38,7 @@ func claimNextRunnableIsExclusiveAndDurable() async throws {
     let first = try await library.accept(
         .webpage(URL(string: "https://example.test/1")!)
     )
-    _ = try await library.accept(
+    let second = try await library.accept(
         .webpage(URL(string: "https://example.test/2")!)
     )
 
@@ -50,8 +50,11 @@ func claimNextRunnableIsExclusiveAndDurable() async throws {
 
     let reopened = try await LocalLibrary.open(at: root)
     let retained = try await reopened.retainedImports()
-    #expect(retained.first?.taskID == first.taskID)
-    #expect(retained.first?.state == .running)
+    #expect(
+        retained.map(\.taskID) == [second.taskID, first.taskID]
+    )
+    #expect(retained.compactMap(\.queueSequence) == [2, 3])
+    #expect(retained.allSatisfy { $0.state == .queued })
 }
 
 @Test

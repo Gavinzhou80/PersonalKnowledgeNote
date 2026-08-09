@@ -1,6 +1,7 @@
 import Foundation
 import KnowledgeCore
-import LocalLibrary
+@testable import LocalLibrary
+import Synchronization
 import TestFixtures
 import Testing
 @testable import DocumentImport
@@ -78,10 +79,12 @@ actor CountingWebAcquirer: WebAcquiring {
     enum Mode: Sendable {
         case normal
         case failingIfCalled
+        case blocking
     }
 
     private let html: Data
     private let mode: Mode
+    private var released = false
     private(set) var callCount = 0
 
     init(mode: Mode = .normal) throws {
@@ -91,10 +94,26 @@ actor CountingWebAcquirer: WebAcquiring {
 
     func acquire(_ url: URL) async throws -> AcquiredWebPage {
         callCount += 1
-        guard mode == .normal else {
+        switch mode {
+        case .normal:
+            return AcquiredWebPage(sourceURL: url, html: html)
+        case .failingIfCalled:
             throw FixtureWebAcquisitionError.unavailable
+        case .blocking:
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !released {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else {
+                    throw FixtureWebAcquisitionError.unavailable
+                }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+            return AcquiredWebPage(sourceURL: url, html: html)
         }
-        return AcquiredWebPage(sourceURL: url, html: html)
+    }
+
+    func release() {
+        released = true
     }
 }
 
@@ -126,23 +145,31 @@ actor CountingWebBuilder {
     }
 }
 
-actor ImportRunnerCrashInjector {
+final class ImportRunnerCrashInjector: Sendable {
+    private let terminatedFlag = Atomic(false)
     private let crashPoint: T05CrashPoint?
-    private var terminated = false
 
     init(crashPoint: T05CrashPoint?) {
         self.crashPoint = crashPoint
     }
 
-    func hit(_ point: T05CrashPoint) async throws {
+    func hit(_ point: T05CrashPoint) throws {
         guard point == crashPoint else { return }
-        terminated = true
+        terminatedFlag.store(true, ordering: .sequentiallyConsistent)
         throw ImportTaskRunnerInterruption.injectedProcessTermination
+    }
+
+    func matchesPublicationFault(_ point: PublicationFaultPoint) -> Bool {
+        guard let crashPoint else { return false }
+        return crashPoint.publicationFaultPoint == point
     }
 
     func waitForInjectedTermination() async throws {
         let deadline = ContinuousClock.now + .seconds(1)
-        while !terminated {
+        while true {
+            if terminatedFlag.load(ordering: .sequentiallyConsistent) {
+                return
+            }
             try Task.checkCancellation()
             guard ContinuousClock.now < deadline else {
                 throw DurableQueueTestError.timeout
@@ -159,17 +186,29 @@ struct RecoveryHarness {
     let acquirer: CountingWebAcquirer
     let builder: CountingWebBuilder
     let crashInjector: ImportRunnerCrashInjector
+    let crashPoint: T05CrashPoint?
 
     static func make(
         crashPoint: T05CrashPoint? = nil
     ) async throws -> RecoveryHarness {
         let root = try makeTemporaryDocumentImportRoot()
-        let library = try await LocalLibrary.open(
-            at: root.appending(path: "Library")
-        )
-        let acquirer = try CountingWebAcquirer()
-        let builder = CountingWebBuilder()
         let crashInjector = ImportRunnerCrashInjector(crashPoint: crashPoint)
+        let library = try await LocalLibrary.openForTesting(
+            at: root.appending(path: "Library"),
+            faultInjector: PublicationFaultInjector { point in
+                guard crashInjector.matchesPublicationFault(point) else {
+                    return
+                }
+                guard let crashPoint else { return }
+                try crashInjector.hit(crashPoint)
+            }
+        )
+        let acquirer = try CountingWebAcquirer(
+            mode: crashPoint == .duringCancellationCleanup
+                ? .blocking
+                : .normal
+        )
+        let builder = CountingWebBuilder()
         let importer = DocumentImport(
             library: library,
             webAcquirer: acquirer,
@@ -177,7 +216,7 @@ struct RecoveryHarness {
                 try await builder.build(page, documentID: documentID)
             },
             importRunnerBoundaryHook: { point in
-                try await crashInjector.hit(point)
+                try crashInjector.hit(point)
             }
         )
         return RecoveryHarness(
@@ -186,7 +225,8 @@ struct RecoveryHarness {
             firstImporter: importer,
             acquirer: acquirer,
             builder: builder,
-            crashInjector: crashInjector
+            crashInjector: crashInjector,
+            crashPoint: crashPoint
         )
     }
 
@@ -209,6 +249,118 @@ struct RecoveryHarness {
                 )
             }
         )
+    }
+}
+
+extension T05CrashPoint {
+    var publicationFaultPoint: PublicationFaultPoint? {
+        switch self {
+        case .afterPublicationIntent:
+            return .afterIntentCommit
+        case .afterArtifactMove:
+            return .afterArtifactMove
+        case .afterVisibilityCommit:
+            return .afterVisibilityCommit
+        case .afterAcceptance, .afterAcquiredCheckpoint,
+             .afterPreparedCheckpoint, .duringCancellationCleanup:
+            return nil
+        }
+    }
+}
+
+struct ReopenedRecoveryHarness {
+    let importer: DocumentImport
+    let library: LocalLibrary
+    let visibleDocumentCount: Int
+    let unownedStagingCount: Int
+
+    func checkpointArtifactCount(
+        _ taskID: ImportTaskID
+    ) async throws -> Int {
+        try await library.checkpointArtifactCount(taskID: taskID)
+    }
+}
+
+extension RecoveryHarness {
+    func runUntilInjectedTermination() async throws -> ImportTaskID {
+        let handle = try await firstImporter.submit(
+            .webpage(articleURL)
+        )
+        if crashPoint == .duringCancellationCleanup {
+            var remainingAttempts = 10
+            while true {
+                do {
+                    try await firstImporter.cancel(taskID: handle.id)
+                    break
+                } catch ImportTaskControlError.invalidState {
+                    remainingAttempts -= 1
+                    guard remainingAttempts > 0 else {
+                        throw DurableQueueTestError.timeout
+                    }
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+            }
+        }
+        try await crashInjector.waitForInjectedTermination()
+        return handle.id
+    }
+
+    func reopen() async throws -> ReopenedRecoveryHarness {
+        let libraryRoot = root.appending(path: "Library")
+        let library = try await LocalLibrary.open(at: libraryRoot)
+        let acquirer = try CountingWebAcquirer()
+        let builder = CountingWebBuilder()
+        let importer = DocumentImport(
+            library: library,
+            webAcquirer: acquirer,
+            webDocumentBuilder: { page, documentID in
+                try await builder.build(page, documentID: documentID)
+            }
+        )
+        let visibleDocumentCount = try managedDirectoryNames(
+            at: libraryRoot.appending(path: "Artifacts")
+        ).count
+        let retainedTaskIDs = Set(
+            try await library.retainedImports().map(\.taskID)
+        )
+        let unownedStagingCount = try managedDirectoryNames(
+            at: libraryRoot.appending(path: "Staging")
+        ).filter { name in
+            guard let uuid = UUID(uuidString: name) else {
+                return true
+            }
+            return !retainedTaskIDs.contains(ImportTaskID(uuid))
+        }.count
+        return ReopenedRecoveryHarness(
+            importer: importer,
+            library: library,
+            visibleDocumentCount: visibleDocumentCount,
+            unownedStagingCount: unownedStagingCount
+        )
+    }
+}
+
+private func managedDirectoryNames(at url: URL) throws -> [String] {
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        return []
+    }
+    return try FileManager.default.contentsOfDirectory(
+        at: url,
+        includingPropertiesForKeys: [.isDirectoryKey]
+    ).filter { entry in
+        (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?
+            .isDirectory == true
+    }.map(\.lastPathComponent)
+}
+
+extension ImportTerminalState {
+    func isExpectedFor(_ point: T05CrashPoint) -> Bool {
+        switch point {
+        case .duringCancellationCleanup:
+            return self == .cancelled
+        default:
+            return isSuccess
+        }
     }
 }
 

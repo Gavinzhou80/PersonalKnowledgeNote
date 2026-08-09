@@ -1521,7 +1521,7 @@ git commit -m "feat: control durable import tasks"
 - Modify: `Tests/LocalLibraryTests/PublicationRecoveryTests.swift`
 - Modify: `Tests/LocalLibraryTests/CheckpointArtifactTests.swift`
 
-- [ ] **Step 1: Write failing crash-boundary matrix**
+- [x] **Step 1: Write failing crash-boundary matrix**
 
 Use the internal `T05CrashPoint` cases already defined with
 `ImportTaskRunner` and add the parameterized recovery test:
@@ -1565,7 +1565,7 @@ extension ImportTerminalState {
 
 Add a test that constructs two `DocumentImport` instances sharing the same opened LocalLibrary actor and proves durable claim allows only one runner.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -1576,7 +1576,7 @@ swift test --filter twoImportersCannotRunTheSameDurableTask
 
 Expected: FAIL at unimplemented reconciliation or exclusivity edges.
 
-- [ ] **Step 3: Harden bootstrap reconciliation**
+- [x] **Step 3: Harden bootstrap reconciliation**
 
 `LocalLibrary.open` reconciles interrupted runner/publication states exactly
 once before returning the actor. Document Import bootstrap hydrates that
@@ -1599,11 +1599,11 @@ retained cancelling task, applies the cancelled snapshot only after cleanup
 succeeds, and leaves the task cancelling if cleanup fails so a later `start()`
 or reopen can retry.
 
-- [ ] **Step 4: Harden claim ownership across importer instances**
+- [x] **Step 4: Harden claim ownership across importer instances**
 
 Claim must be a single SQLite write transaction that first checks no active durable runner state. If two Document Import schedulers sharing one LocalLibrary race, one receives a running snapshot and the other receives nil. Do not use process-global locks. Concurrent independent LocalLibrary actors for the same root are outside T05.
 
-- [ ] **Step 5: Recover and clean checkpoint artifacts**
+- [x] **Step 5: Recover and clean checkpoint artifacts**
 
 On LocalLibrary open:
 
@@ -1614,7 +1614,7 @@ On LocalLibrary open:
 - never remove a package owned by another task;
 - synchronize checkpoint root after removals.
 
-- [ ] **Step 6: Run recovery and publication regression tests**
+- [x] **Step 6: Run recovery and publication regression tests**
 
 Run:
 
@@ -1628,7 +1628,7 @@ swift test --filter DocumentImportTests
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add Sources/LocalLibrary Sources/DocumentImport/Internal/ImportScheduler.swift Tests/DocumentImportTests/ImportRestartRecoveryTests.swift Tests/LocalLibraryTests/PublicationRecoveryTests.swift Tests/LocalLibraryTests/CheckpointArtifactTests.swift

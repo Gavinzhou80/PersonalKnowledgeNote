@@ -312,7 +312,7 @@ func managedTaskDirectorySymlinkSwapCannotDeleteExternalContent()
 
     await #expect(throws: LocalLibraryError.artifactMissing) {
         _ = try await faultingWorkspace.removeCheckpointArtifact(
-            expectedRevision: attached.snapshot.revision
+            expectedRevision: try await faultingWorkspace.snapshot().revision
         )
     }
     #expect(try Data(contentsOf: marker) == Data("external".utf8))
@@ -947,10 +947,6 @@ func faultInsideCheckpointPairTransactionRollsBackOldPairAndNewCopy()
             )
         )
     )
-    let before = try CheckpointArtifactTestDriver.state(
-        at: root,
-        taskID: initialWorkspace.taskID
-    )
     let faulting = try await LocalLibrary.openForTesting(
         at: root,
         checkpointArtifactFaultInjector: CheckpointArtifactFaultInjector { point in
@@ -962,6 +958,11 @@ func faultInsideCheckpointPairTransactionRollsBackOldPairAndNewCopy()
     let workspace = try #require(
         try await faulting.importWorkspace(id: initialWorkspace.taskID)
     )
+    let before = try CheckpointArtifactTestDriver.state(
+        at: root,
+        taskID: initialWorkspace.taskID
+    )
+    let reopenedRevision = try await workspace.snapshot().revision
     let secondPackage = try makeCheckpointPackage(body: Data("second".utf8))
     defer { try? FileManager.default.removeItem(at: secondPackage) }
 
@@ -969,7 +970,7 @@ func faultInsideCheckpointPairTransactionRollsBackOldPairAndNewCopy()
         _ = try await workspace.replaceCheckpointArtifact(
             packageURL: secondPackage,
             update: CheckpointUpdate(
-                expectedRevision: first.snapshot.revision,
+                expectedRevision: reopenedRevision,
                 ordinal: 4,
                 envelope: CheckpointEnvelope(
                     codecVersion: 2,
@@ -986,7 +987,7 @@ func faultInsideCheckpointPairTransactionRollsBackOldPairAndNewCopy()
         ) == before
     )
     let rolledBack = try await workspace.snapshot()
-    #expect(rolledBack.revision == first.snapshot.revision)
+    #expect(rolledBack.revision == reopenedRevision)
     #expect(rolledBack.checkpointArtifact == first.artifact)
     #expect(rolledBack.checkpoint == CheckpointEnvelope(
         codecVersion: 1,
@@ -1030,13 +1031,14 @@ func postCommitCleanupFaultLeavesNewPairAndReopenRemovesOldOrphan()
     let faultingWorkspace = try #require(
         try await faulting.importWorkspace(id: workspace.taskID)
     )
+    let reopenedRevision = try await faultingWorkspace.snapshot().revision
     let secondPackage = try makeCheckpointPackage(body: Data("second".utf8))
     defer { try? FileManager.default.removeItem(at: secondPackage) }
     await #expect(throws: LocalLibraryError.unavailable) {
         _ = try await faultingWorkspace.replaceCheckpointArtifact(
             packageURL: secondPackage,
             update: CheckpointUpdate(
-                expectedRevision: first.snapshot.revision,
+                expectedRevision: reopenedRevision,
                 ordinal: 2,
                 envelope: CheckpointEnvelope(codecVersion: 2, payload: Data("second-db".utf8))
             )
@@ -1149,13 +1151,29 @@ func v2ToV3MigrationPreservesQueueJournalCheckpointAndClock() async throws {
 
     let reopened = try await LocalLibrary.open(at: root)
     let retained = try await reopened.retainedImports()
+    let running = try #require(
+        before.snapshots.first { $0.queueSequence == nil }
+    )
+    let queued = try #require(
+        before.snapshots.first { $0.queueSequence != nil }
+    )
 
-    #expect(retained.map(\.taskID) == before.snapshots.map(\.taskID))
-    #expect(retained.map(\.journalSequence) == before.snapshots.map(\.journalSequence))
-    #expect(retained.map(\.queueSequence) == before.snapshots.map(\.queueSequence))
-    #expect(retained.map(\.revision) == before.snapshots.map(\.revision))
-    #expect(retained.map(\.checkpoint) == before.snapshots.map(\.checkpoint))
-    #expect(try CheckpointArtifactTestDriver.clock(at: root) == before.clock)
+    #expect(retained.map(\.taskID) == [queued.taskID, running.taskID])
+    #expect(
+        retained.map(\.journalSequence)
+            == [queued.journalSequence, running.journalSequence]
+    )
+    #expect(
+        retained.map(\.queueSequence)
+            == [queued.queueSequence, before.clock + 1]
+    )
+    #expect(
+        retained.map(\.revision) == [queued.revision, running.revision + 1]
+    )
+    #expect(
+        retained.map(\.checkpoint) == [queued.checkpoint, running.checkpoint]
+    )
+    #expect(try CheckpointArtifactTestDriver.clock(at: root) == before.clock + 1)
     #expect(try CheckpointArtifactTestDriver.hasCheckpointTable(at: root))
     #expect(
         FileManager.default.fileExists(

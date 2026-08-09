@@ -168,6 +168,13 @@ public actor DocumentImport {
                 bootstrapState = .idle
                 throw DocumentImportAvailabilityError.localLibraryUnavailable
             }
+            for snapshot in snapshots
+            where snapshot.state == .cancelling {
+                await runCancellationCleanup(
+                    taskID: snapshot.taskID,
+                    expectedRevision: snapshot.revision
+                )
+            }
             bootstrapState = .ready
             requestSchedulerWake()
         case .idle, .running:
@@ -311,12 +318,10 @@ public actor DocumentImport {
         if let runnerTask = activeRunners[taskID] {
             runnerTask.cancel()
         } else {
-            if let cancelled = try? await library.finishCancellation(
+            await runCancellationCleanup(
                 taskID: taskID,
                 expectedRevision: mutation.primary.revision
-            ) {
-                _ = try? registry.applyBatch([cancelled])
-            }
+            )
         }
         requestSchedulerWake()
     }
@@ -567,23 +572,41 @@ public actor DocumentImport {
     ) async {
         guard let workspace = try? await importWorkspaceLoader(taskID),
               let durable = try? await workspace.snapshot(),
-              durable.state == .cancelling,
-              let cancelled = try? await workspace.finishCancellation(
-                  expectedRevision: durable.revision
-              )
+              durable.state == .cancelling
         else {
             return
         }
-        _ = try? registry.applyBatch([cancelled])
+        await runCancellationCleanup(
+            taskID: taskID,
+            expectedRevision: durable.revision
+        )
     }
 
     func finishRunnerCancellation(workspace: ImportWorkspace) async {
         guard let durable = try? await workspace.snapshot(),
-              durable.state == .cancelling,
-              let cancelled = try? await workspace.finishCancellation(
-                  expectedRevision: durable.revision
-              )
+              durable.state == .cancelling
         else {
+            return
+        }
+        await runCancellationCleanup(
+            taskID: workspace.taskID,
+            expectedRevision: durable.revision
+        )
+    }
+
+    private func runCancellationCleanup(
+        taskID: ImportTaskID,
+        expectedRevision: UInt64
+    ) async {
+        do {
+            try await boundaryHook(.duringCancellationCleanup)
+        } catch {
+            return
+        }
+        guard let cancelled = try? await library.finishCancellation(
+            taskID: taskID,
+            expectedRevision: expectedRevision
+        ) else {
             return
         }
         _ = try? registry.applyBatch([cancelled])
